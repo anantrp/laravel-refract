@@ -4,6 +4,7 @@ namespace Anantrp\Refract;
 
 use Anantrp\Refract\Capture\RecordAgentRuns;
 use Anantrp\Refract\Capture\Recorder;
+use Anantrp\Refract\Capture\RunContext;
 use Anantrp\Refract\Contracts\Exporter;
 use Anantrp\Refract\Contracts\Transport;
 use Anantrp\Refract\Export\GenAiTranslator;
@@ -27,6 +28,11 @@ class RefractServiceProvider extends ServiceProvider
 
         $this->app->singleton(Recorder::class);
         $this->app->singleton(RecordAgentRuns::class);
+
+        $this->app->singleton(RunContext::class, fn () => new RunContext(
+            typeKey: Settings::string('context.participant.type', 'refract.participant_type'),
+            idKey: Settings::string('context.participant.id', 'refract.participant_id'),
+        ));
 
         $this->app->singleton(Platform::class, fn () => new LangfusePlatform(
             url: Settings::string('destinations.langfuse.url'),

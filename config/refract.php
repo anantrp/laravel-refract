@@ -66,6 +66,24 @@ return [
 
     'destination' => env('REFRACT_DESTINATION'),
 
+    /*
+    |--------------------------------------------------------------------------
+    | Context
+    |--------------------------------------------------------------------------
+    |
+    | A saved run records its conversation participant. A run that is not
+    | saved records the participant from the two Laravel Context keys named
+    | under "participant", and only when both are set.
+    |
+    */
+
+    'context' => [
+        'participant' => [
+            'type' => env('REFRACT_CONTEXT_PARTICIPANT_TYPE'),
+            'id' => env('REFRACT_CONTEXT_PARTICIPANT_ID'),
+        ],
+    ],
+
     'destinations' => [
 
         'langfuse' => [

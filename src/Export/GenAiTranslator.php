@@ -140,10 +140,13 @@ class GenAiTranslator
     protected function context(array $context): array
     {
         $session = $context['session'] ?? null;
+        $participant = is_array($context['participant'] ?? null) ? $context['participant'] : [];
 
         return [
             'session.id' => $session,
             'gen_ai.conversation.id' => $session,
+            'laravel.ai.participant.type' => $participant['type'] ?? null,
+            'laravel.ai.participant.id' => $participant['id'] ?? null,
         ];
     }
 

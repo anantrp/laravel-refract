@@ -1,10 +1,13 @@
 <?php
 
+use Anantrp\Refract\Capture\RunContext;
 use Anantrp\Refract\Contracts\Exporter;
 use Anantrp\Refract\Support\Diagnostics;
 use Anantrp\Refract\Tests\Support\Otlp;
+use Illuminate\Support\Facades\Context;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use Workbench\App\Ai\Agents\TimeAgent;
 
 /*
  * Each env var is read through config: a missing var is null, an empty one
@@ -42,6 +45,17 @@ function exportedServiceName(Exporter $exporter): mixed
     return Otlp::resource()['service.name'] ?? null;
 }
 
+/**
+ * Get the participant a run not saved records under the given key names.
+ */
+function participantFromKeys(RunContext $context, string $typeKey, string $idKey): mixed
+{
+    Context::add($typeKey, 'App\Models\User');
+    Context::add($idKey, '42');
+
+    return $context->of(new TimeAgent)['participant'] ?? null;
+}
+
 beforeEach(function () {
     $this->refreshApplicationWithConfig([
         'refract.destination' => 'langfuse',
@@ -67,4 +81,55 @@ it('C3: OTEL_SERVICE_NAME invalid gives the app name and one warning', function 
     expect(exportedServiceName(resolveWithConfig(Exporter::class, ['refract.service_name' => true])))->toBe('Shop');
 
     Log::shouldHaveReceived('warning')->once();
+});
+
+it('C1: REFRACT_CONTEXT_PARTICIPANT_TYPE and _ID missing give the default Context keys', function () {
+    $context = resolveWithConfig(RunContext::class, [
+        'refract.context.participant.type' => null,
+        'refract.context.participant.id' => null,
+    ]);
+
+    expect(participantFromKeys($context, 'refract.participant_type', 'refract.participant_id'))
+        ->toBe(['type' => 'App\Models\User', 'id' => '42']);
+
+    Log::shouldNotHaveReceived('warning');
+});
+
+it('C2: REFRACT_CONTEXT_PARTICIPANT_TYPE and _ID empty give the default Context keys with no warning', function () {
+    $context = resolveWithConfig(RunContext::class, [
+        'refract.context.participant.type' => '',
+        'refract.context.participant.id' => '',
+    ]);
+
+    expect(participantFromKeys($context, 'refract.participant_type', 'refract.participant_id'))
+        ->toBe(['type' => 'App\Models\User', 'id' => '42']);
+
+    Log::shouldNotHaveReceived('warning');
+});
+
+it('C3: REFRACT_CONTEXT_PARTICIPANT_TYPE invalid gives the default Context key and one warning', function () {
+    $context = resolveWithConfig(RunContext::class, ['refract.context.participant.type' => true]);
+
+    expect(participantFromKeys($context, 'refract.participant_type', 'refract.participant_id'))
+        ->toBe(['type' => 'App\Models\User', 'id' => '42']);
+
+    Log::shouldHaveReceived('warning')->once();
+});
+
+it('C3: REFRACT_CONTEXT_PARTICIPANT_ID invalid gives the default Context key and one warning', function () {
+    $context = resolveWithConfig(RunContext::class, ['refract.context.participant.id' => true]);
+
+    expect(participantFromKeys($context, 'refract.participant_type', 'refract.participant_id'))
+        ->toBe(['type' => 'App\Models\User', 'id' => '42']);
+
+    Log::shouldHaveReceived('warning')->once();
+});
+
+it('reads the participant from the Context keys named in config', function () {
+    $context = resolveWithConfig(RunContext::class, [
+        'refract.context.participant.type' => 'owner_type',
+        'refract.context.participant.id' => 'owner_id',
+    ]);
+
+    expect(participantFromKeys($context, 'owner_type', 'owner_id'))->toBe(['type' => 'App\Models\User', 'id' => '42']);
 });

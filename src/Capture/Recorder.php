@@ -12,8 +12,8 @@ use OpenTelemetry\API\Trace\Span;
  * wall clock times at each flush.
  *
  * @phpstan-type SpanEvent array{kind: string, time: int, call: array<string, mixed>}
- * @phpstan-type OpenSpan array{trace_id: string, span_id: string, parent_span_id: ?string, kind: string, start: int, call: array<string, mixed>, context: array<string, mixed>, events: list<SpanEvent>}
- * @phpstan-type FinishedSpan array{trace_id: string, span_id: string, parent_span_id: ?string, kind: string, start: int, end: int, status: string, status_message: ?string, call: array<string, mixed>, context: array<string, mixed>, events: list<SpanEvent>}
+ * @phpstan-type OpenSpan array{trace_id: string, span_id: string, parent_span_id: ?string, kind: string, start: int, call: array<string, mixed>, context: array<string, mixed>, context_from: ?string, events: list<SpanEvent>}
+ * @phpstan-type FinishedSpan array{trace_id: string, span_id: string, parent_span_id: ?string, kind: string, start: int, end: int, status: string, status_message: ?string, call: array<string, mixed>, context: array<string, mixed>, context_from: ?string, events: list<SpanEvent>}
  */
 class Recorder
 {
@@ -52,11 +52,14 @@ class Recorder
      * Start a span under the given parent, or under the app's active trace.
      *
      * A span still open under the same key is closed as abandoned first.
+     * A span started with a context source takes that span's context at
+     * flush, in place of its own.
      *
      * @param  array<string, mixed>  $call
      * @param  array<string, mixed>  $context
+     * @param  string|null  $contextFrom  The key of the open span whose context this span takes.
      */
-    public function start(string $key, string $kind, ?string $parentKey, array $call, array $context = []): void
+    public function start(string $key, string $kind, ?string $parentKey, array $call, array $context = [], ?string $contextFrom = null): void
     {
         if (isset($this->open[$key])) {
             $this->abandon($key);
@@ -79,8 +82,29 @@ class Recorder
             'start' => $this->monotonic(),
             'call' => $call,
             'context' => $context,
+            'context_from' => $contextFrom === null ? null : ($this->open[$contextFrom]['span_id'] ?? null),
             'events' => [],
         ];
+    }
+
+    /**
+     * Get the key of the open span that the given open span is under.
+     */
+    public function parentKey(string $key): ?string
+    {
+        $parent = $this->open[$key]['parent_span_id'] ?? null;
+
+        if ($parent === null) {
+            return null;
+        }
+
+        foreach ($this->open as $openKey => $open) {
+            if ($open['span_id'] === $parent) {
+                return $openKey;
+            }
+        }
+
+        return null;
     }
 
     /**
@@ -194,7 +218,7 @@ class Recorder
             return;
         }
 
-        $finished = $this->finished;
+        $finished = $this->inheritContext($this->finished);
         $this->finished = [];
 
         $offset = (int) round(microtime(true) * 1_000_000) * 1_000 - $this->monotonic();
@@ -218,6 +242,41 @@ class Recorder
                 'call' => $event['call'],
             ], $span['events']),
         ], $finished));
+    }
+
+    /**
+     * Give each span with a context source the context of the first span up its chain that has none.
+     *
+     * A span whose chain leaves the batch keeps its own context.
+     *
+     * @param  list<FinishedSpan>  $spans
+     * @return list<FinishedSpan>
+     */
+    protected function inheritContext(array $spans): array
+    {
+        $index = [];
+
+        foreach ($spans as $position => $span) {
+            $index[$span['span_id']] = $position;
+        }
+
+        foreach ($spans as $position => $span) {
+            $from = $span['context_from'];
+            $source = null;
+            $hops = 0;
+
+            // Bounded by the span count, so a cycle cannot loop forever.
+            while ($from !== null && isset($index[$from]) && $hops++ < count($spans)) {
+                $source = $spans[$index[$from]];
+                $from = $source['context_from'];
+            }
+
+            if ($source !== null && $from === null) {
+                $spans[$position]['context'] = $source['context'];
+            }
+        }
+
+        return $spans;
     }
 
     /**

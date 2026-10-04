@@ -1,0 +1,99 @@
+<?php
+
+namespace Anantrp\Refract\Capture;
+
+use Illuminate\Database\Eloquent\Relations\Relation;
+use Illuminate\Support\Facades\Context;
+use Laravel\Ai\Contracts\Agent;
+use Laravel\Ai\Contracts\RemembersConversations;
+use Laravel\Ai\Models\Conversation;
+use Throwable;
+
+/**
+ * Reads the context bucket of a run: its session and its participant.
+ *
+ * A saved run takes its participant from the conversation and ignores
+ * Context. A run that is not saved takes it from the two Context keys,
+ * only when both are set. The type is always the full class name.
+ */
+class RunContext
+{
+    /**
+     * Create a new run context reader.
+     *
+     * @param  string  $typeKey  The Context key holding the participant type.
+     * @param  string  $idKey  The Context key holding the participant id.
+     */
+    public function __construct(
+        protected string $typeKey,
+        protected string $idKey,
+    ) {}
+
+    /**
+     * Get the context bucket for a run of the given agent.
+     *
+     * @return array<string, mixed>
+     */
+    public function of(Agent $agent): array
+    {
+        return array_filter([
+            'session' => $agent instanceof RemembersConversations ? $agent->currentConversation() : null,
+            'participant' => $this->participant($agent),
+        ], fn (mixed $value) => $value !== null);
+    }
+
+    /**
+     * @return array{type: string, id: string}|null
+     */
+    protected function participant(Agent $agent): ?array
+    {
+        if ($agent instanceof RemembersConversations && $agent->hasConversationParticipant()) {
+            $participant = $agent->conversationParticipant();
+
+            return $participant === null ? null : $this->fromConversation($participant);
+        }
+
+        return $this->fromContext();
+    }
+
+    /**
+     * @return array{type: string, id: string}|null
+     */
+    protected function fromConversation(object $participant): ?array
+    {
+        try {
+            $id = $this->id(Conversation::participantKey($participant));
+        } catch (Throwable) {
+            return null;
+        }
+
+        return $id === null ? null : ['type' => $participant::class, 'id' => $id];
+    }
+
+    /**
+     * @return array{type: string, id: string}|null
+     */
+    protected function fromContext(): ?array
+    {
+        $type = Context::get($this->typeKey);
+        $id = $this->id(Context::get($this->idKey));
+
+        if (! is_string($type) || $type === '' || $id === null) {
+            return null;
+        }
+
+        return ['type' => Relation::getMorphedModel($type) ?? $type, 'id' => $id];
+    }
+
+    /**
+     * Get the participant id as a string, or null when it is not a usable id.
+     */
+    protected function id(mixed $id): ?string
+    {
+        if (is_int($id)) {
+            return (string) $id;
+        }
+
+        return is_string($id) && $id !== '' ? $id : null;
+    }
+}

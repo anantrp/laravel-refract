@@ -4,6 +4,7 @@ namespace Anantrp\Refract\Export\Platforms\Langfuse;
 
 use Anantrp\Refract\Export\GenAiTranslator;
 use Anantrp\Refract\Export\Platform;
+use Illuminate\Contracts\Auth\Authenticatable;
 
 /**
  * Langfuse: Basic auth, its ingestion header and its OTLP path.
@@ -80,7 +81,7 @@ class LangfusePlatform implements Platform
 
     /**
      * Move siblings that start in the same millisecond to distinct milliseconds,
-     * and mark abandoned spans.
+     * mark abandoned spans and set user.id on spans with a user participant.
      *
      * Langfuse stores times in milliseconds and orders tied siblings at
      * random. Each trace is walked in start order, and every move shifts all
@@ -100,7 +101,25 @@ class LangfusePlatform implements Platform
             $spans = $this->spread($spans, $indexes);
         }
 
-        return array_map($this->markAbandoned(...), $spans);
+        return array_map(fn (array $span) => $this->setUser($this->markAbandoned($span)), $spans);
+    }
+
+    /**
+     * Set user.id to the participant id when the participant type is a user (implements Authenticatable).
+     *
+     * @param  TranslatedSpan  $span
+     * @return TranslatedSpan
+     */
+    protected function setUser(array $span): array
+    {
+        $type = $span['attributes']['laravel.ai.participant.type'] ?? null;
+        $id = $span['attributes']['laravel.ai.participant.id'] ?? null;
+
+        if (is_string($type) && is_string($id) && is_a($type, Authenticatable::class, true)) {
+            $span['attributes']['user.id'] = $id;
+        }
+
+        return $span;
     }
 
     /**

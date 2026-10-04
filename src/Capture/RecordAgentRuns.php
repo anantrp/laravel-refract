@@ -5,7 +5,6 @@ namespace Anantrp\Refract\Capture;
 use Illuminate\Contracts\Events\Dispatcher;
 use Laravel\Ai\Contracts\Agent;
 use Laravel\Ai\Contracts\CanActAsTool;
-use Laravel\Ai\Contracts\RemembersConversations;
 use Laravel\Ai\Events\AgentFailed;
 use Laravel\Ai\Events\AgentFailedOver;
 use Laravel\Ai\Events\AgentPrompted;
@@ -38,7 +37,7 @@ class RecordAgentRuns
     /**
      * Create a new listener instance.
      */
-    public function __construct(protected Recorder $recorder) {}
+    public function __construct(protected Recorder $recorder, protected RunContext $context) {}
 
     /**
      * Register the listeners with the given dispatcher.
@@ -62,6 +61,9 @@ class RecordAgentRuns
     /**
      * Start the run span. A sub-agent run nests under the tool span that called it.
      *
+     * A sub-agent run takes the context of the run that called it, at
+     * flush, since a new conversation has its id only when that run ends.
+     *
      * The attempt after a failover keeps the run span it failed over from.
      * A run resumed from approval decisions sent no prompt text, so it is
      * marked as resumed and no prompt is ever recorded for it.
@@ -79,14 +81,19 @@ class RecordAgentRuns
         $agent = $event->prompt->agent;
         $parentTool = $event->prompt->parentToolInvocationId;
 
-        $this->recorder->start($this->runKey($event->invocationId), 'invoke_agent', $parentTool === null ? null : $this->toolKey($parentTool), [
+        $parentKey = $parentTool === null ? null : $this->toolKey($parentTool);
+
+        $this->recorder->start($this->runKey($event->invocationId), 'invoke_agent', $parentKey, [
             'invocation_id' => $event->invocationId,
             'agent' => $this->agentName($agent),
             'agent_class' => $agent::class,
             'provider' => $this->providerName($event->prompt->provider),
             'model' => $event->prompt->model,
             ...($event->prompt->hasApprovalDecisions() ? ['resumed' => true] : []),
-        ], $this->session($agent));
+        ],
+            context: $parentKey === null ? $this->context->of($agent) : [],
+            contextFrom: $parentKey === null ? null : $this->recorder->parentKey($parentKey),
+        );
     }
 
     /**
@@ -210,22 +217,6 @@ class RecordAgentRuns
     protected function toolKey(string $toolInvocationId): string
     {
         return "tool:{$toolInvocationId}";
-    }
-
-    /**
-     * Get the session context of a run that continues a saved conversation.
-     *
-     * @return array<string, string>
-     */
-    protected function session(Agent $agent): array
-    {
-        if (! $agent instanceof RemembersConversations) {
-            return [];
-        }
-
-        $conversationId = $agent->currentConversation();
-
-        return $conversationId === null ? [] : ['session' => $conversationId];
     }
 
     protected function agentName(Agent $agent): string
