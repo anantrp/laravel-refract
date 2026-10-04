@@ -31,6 +31,42 @@ class Settings
     }
 
     /**
+     * Get the given configuration value as a map of non-empty strings to non-empty strings.
+     *
+     * An entry that is not such a pair is left out, with one warning.
+     *
+     * @return array<string, string>
+     */
+    public static function map(string $key): array
+    {
+        $value = config("refract.{$key}");
+
+        if ($value === null || $value === '' || $value === []) {
+            return [];
+        }
+
+        if (! is_array($value)) {
+            Diagnostics::warn("config.{$key}", "Refract config [refract.{$key}] must be an array. Using the default.");
+
+            return [];
+        }
+
+        $map = [];
+
+        foreach ($value as $from => $to) {
+            if (! is_string($from) || $from === '' || ! is_string($to) || $to === '') {
+                Diagnostics::warn("config.{$key}", "Refract config [refract.{$key}] must map names to names. Invalid entries are skipped.");
+
+                continue;
+            }
+
+            $map[$from] = $to;
+        }
+
+        return $map;
+    }
+
+    /**
      * Get the given configuration value as one of the allowed strings.
      *
      * @param  list<string>  $allowed

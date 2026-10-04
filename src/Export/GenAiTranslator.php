@@ -25,6 +25,13 @@ class GenAiTranslator
     public const STATUS_ERROR = 2;
 
     /**
+     * Create a new translator instance.
+     *
+     * @param  array<string, string>  $contextAttributes  The attribute name of each mapped Laravel Context key.
+     */
+    public function __construct(protected array $contextAttributes = []) {}
+
+    /**
      * Translate the given neutral span.
      *
      * @param  array<string, mixed>  $span
@@ -65,7 +72,7 @@ class GenAiTranslator
                     'laravel.ai.abandoned' => $abandoned ?: null,
                 ],
                 fn (mixed $value) => $value !== null,
-            ),
+            ) + $this->mapped($context),
             'events' => $this->events($span['events'] ?? null),
             'status' => [
                 'code' => match (true) {
@@ -148,6 +155,28 @@ class GenAiTranslator
             'laravel.ai.participant.type' => $participant['type'] ?? null,
             'laravel.ai.participant.id' => $participant['id'] ?? null,
         ];
+    }
+
+    /**
+     * Translate the mapped Laravel Context values. A real attribute of the same name wins over them.
+     *
+     * @param  array<array-key, mixed>  $context
+     * @return array<string, mixed>
+     */
+    protected function mapped(array $context): array
+    {
+        $values = is_array($context['values'] ?? null) ? $context['values'] : [];
+        $attributes = [];
+
+        foreach ($this->contextAttributes as $key => $name) {
+            $value = $values[$key] ?? null;
+
+            if (is_scalar($value)) {
+                $attributes[$name] = $value;
+            }
+        }
+
+        return $attributes;
     }
 
     /**

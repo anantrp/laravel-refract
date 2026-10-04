@@ -10,7 +10,7 @@ use Laravel\Ai\Models\Conversation;
 use Throwable;
 
 /**
- * Reads the context bucket of a run: its session and its participant.
+ * Reads the context bucket of a run: its session, its participant and the mapped Laravel Context values.
  *
  * A saved run takes its participant from the conversation and ignores
  * Context. A run that is not saved takes it from the two Context keys,
@@ -23,10 +23,12 @@ class RunContext
      *
      * @param  string  $typeKey  The Context key holding the participant type.
      * @param  string  $idKey  The Context key holding the participant id.
+     * @param  list<string>  $keys  The Context keys copied onto the run span.
      */
     public function __construct(
         protected string $typeKey,
         protected string $idKey,
+        protected array $keys,
     ) {}
 
     /**
@@ -39,7 +41,8 @@ class RunContext
         return array_filter([
             'session' => $agent instanceof RemembersConversations ? $agent->currentConversation() : null,
             'participant' => $this->participant($agent),
-        ], fn (mixed $value) => $value !== null);
+            'values' => $this->values(),
+        ], fn (mixed $value) => $value !== null && $value !== []);
     }
 
     /**
@@ -95,5 +98,25 @@ class RunContext
         }
 
         return is_string($id) && $id !== '' ? $id : null;
+    }
+
+    /**
+     * Get the mapped Context values that are set, keyed by Context key.
+     *
+     * @return array<string, scalar>
+     */
+    protected function values(): array
+    {
+        $values = [];
+
+        foreach ($this->keys as $key) {
+            $value = Context::get($key);
+
+            if (is_scalar($value)) {
+                $values[$key] = $value;
+            }
+        }
+
+        return $values;
     }
 }

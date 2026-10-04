@@ -172,6 +172,32 @@ it('X7: a sub-agent run uses its parent run\'s participant and session', functio
     }
 });
 
+it('X8: a mapped Context key named like a GenAI attribute loses to the real value', function () {
+    $this->refreshApplicationWithConfig([
+        ...$this->environmentConfig,
+        'refract.context.attributes' => [
+            'agent' => 'gen_ai.agent.name',
+            'tenant' => 'app.tenant',
+        ],
+    ]);
+
+    Http::fake();
+
+    Context::add('agent', 'NotTheAgent');
+    Context::add('tenant', 'acme');
+
+    TimeAgent::fakeTwoSteps();
+
+    TimeAgent::make()->prompt('What time is it?');
+
+    [$run] = runAttributes();
+
+    expect($run)->toMatchArray([
+        'gen_ai.agent.name' => 'TimeAgent',
+        'app.tenant' => 'acme',
+    ]);
+});
+
 it('X9: APP_ENV "Staging EU 1" is sent to Langfuse as staging-eu-1', function () {
     $this->refreshApplicationWithConfig([
         ...$this->environmentConfig,

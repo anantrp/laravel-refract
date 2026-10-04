@@ -32,6 +32,7 @@ class RefractServiceProvider extends ServiceProvider
         $this->app->singleton(RunContext::class, fn () => new RunContext(
             typeKey: Settings::string('context.participant.type', 'refract.participant_type'),
             idKey: Settings::string('context.participant.id', 'refract.participant_id'),
+            keys: array_keys(Settings::map('context.attributes')),
         ));
 
         $this->app->singleton(Platform::class, fn () => new LangfusePlatform(
@@ -42,7 +43,7 @@ class RefractServiceProvider extends ServiceProvider
 
         $this->app->singleton(Exporter::class, fn (Application $app) => new HttpExporter(
             $app->make(Platform::class),
-            new GenAiTranslator,
+            new GenAiTranslator(Settings::map('context.attributes')),
             new OtlpJson,
             Settings::string('environment', $app->environment()),
             Settings::string('service_name', $this->appName()),

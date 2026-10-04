@@ -73,7 +73,8 @@ return [
     |
     | A saved run records its conversation participant. A run that is not
     | saved records the participant from the two Laravel Context keys named
-    | under "participant", and only when both are set.
+    | under "participant", and only when both are set. The "attributes" map
+    | copies Laravel Context keys onto each run span, keyed by Context key.
     |
     */
 
@@ -81,6 +82,10 @@ return [
         'participant' => [
             'type' => env('REFRACT_CONTEXT_PARTICIPANT_TYPE'),
             'id' => env('REFRACT_CONTEXT_PARTICIPANT_ID'),
+        ],
+
+        'attributes' => [
+            // 'tenant_id' => 'tenant.id',
         ],
     ],
 
