@@ -401,3 +401,29 @@ it('E3: a batch that cannot be retried because the export job is not on a queue 
     expect($log->warnings)->toHaveCount(1)
         ->and($log->warnings[0])->toContain('dropped');
 });
+
+it('E9: a redirect is not followed and counts as rejected, so the headers never go to another host', function (string $transport, int $status) {
+    $log = bootExport($transport);
+    useExportQueue();
+
+    Http::fake([
+        'cloud.langfuse.com/*' => Http::response('Moved.', $status, ['Location' => 'https://elsewhere.test/collect']),
+        'elsewhere.test/*' => Http::response('', 200),
+    ]);
+
+    sendSpan();
+
+    if ($transport === 'queue') {
+        workExportJob();
+
+        expect(DB::table('jobs')->count())->toBe(0);
+    }
+
+    $requests = Http::recorded();
+
+    expect($requests)->toHaveCount(1)
+        ->and($requests[0][0]->url())->toStartWith('https://cloud.langfuse.com/')
+        ->and($requests[0][0]->method())->toBe('POST')
+        ->and($log->warnings)->toHaveCount(1)
+        ->and($log->warnings[0])->toContain("HTTP {$status}");
+})->with(['sync', 'queue'])->with([301, 302, 303, 307, 308]);

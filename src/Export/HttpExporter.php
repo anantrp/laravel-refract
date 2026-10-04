@@ -15,8 +15,8 @@ use Throwable;
  * Translates neutral spans, applies the platform's changes and posts OTLP JSON.
  *
  * A 2xx is ok. A network error, 408, 429 or 5xx is retryable: the
- * transport decides whether to try again. Every other status is rejected
- * and warned about here, with the status and the start of the body. Any
+ * transport decides whether to try again. Every other status, a redirect
+ * too (it is never followed), is rejected and warned about here, with the status and the start of the body. Any
  * other error, from the HTTP client or from translating and encoding the
  * spans, is rejected with one warning.
  */
@@ -58,7 +58,9 @@ class HttpExporter implements Exporter
                 'deployment.environment.name' => $this->environment,
             ]));
 
+            // A redirect is never followed: it would send the headers to another host or turn the POST into a GET.
             $response = Http::withHeaders($this->platform->headers())
+                ->withoutRedirecting()
                 ->timeout(self::TIMEOUT)
                 ->withBody($body, 'application/json')
                 ->post($this->platform->endpoint());
