@@ -3,8 +3,15 @@
 use Anantrp\Refract\Capture\Recorder;
 use Anantrp\Refract\Tests\Support\Otlp;
 use Illuminate\Support\Facades\Http;
+use Laravel\Ai\Approvals\Decision;
+use Laravel\Ai\Approvals\PendingApproval;
 use Laravel\Ai\Contracts\Providers\TextProvider;
+use Laravel\Ai\Events\ToolApprovalResolved;
 use Laravel\Ai\Exceptions\RateLimitedException;
+use Laravel\Ai\Responses\Data\Meta;
+use Laravel\Ai\Responses\Data\TextUsage;
+use Laravel\Ai\Responses\Data\ToolResult;
+use Laravel\Ai\Responses\TextResponse;
 use Workbench\App\Ai\Agents\SupervisorAgent;
 use Workbench\App\Ai\Agents\TimeAgent;
 
@@ -229,4 +236,86 @@ it('R6: a stream read again after it stopped is a separate run, not a failover',
         ->and($againChat['parentSpanId'])->toBe($again['spanId'])
         ->and($stopped['endTimeUnixNano'] <= $again['startTimeUnixNano'])->toBeTrue()
         ->and(array_merge(...array_column($spans, 'events')))->toBe([]);
+});
+
+it('R7: approval events sit inside the run span and a resumed run records no prompt', function () {
+    $memory = $this->captureNeutralSpans();
+
+    TimeAgent::fake([
+        (new TextResponse('', new TextUsage, new Meta('openai', 'fake')))
+            ->withPendingApprovals(collect([new PendingApproval('call_1', 'CurrentTime', [])])),
+    ]);
+
+    TimeAgent::make()->withMessages([])->prompt('What time is it?');
+
+    TimeAgent::fake(['It is 12:00.']);
+
+    $resumed = TimeAgent::make()->withMessages([])->prompt(Decision::approveAll());
+
+    // A faked gateway does not run approved tools, so the SDK sends no resolved event here.
+    event(new ToolApprovalResolved($resumed->invocationId, new TimeAgent, collect([
+        new ToolResult('call_1', 'CurrentTime', [], '12:00'),
+        new ToolResult('call_2', 'CurrentTime', [], 'Denied.', denied: true),
+    ])));
+
+    app(Recorder::class)->flush();
+
+    $runs = array_values(array_filter($memory->spans, fn (array $span) => $span['kind'] === 'invoke_agent'));
+
+    expect($runs)->toHaveCount(2);
+
+    [$asked, $resume] = $runs;
+
+    expect(array_column($asked['events'], 'kind'))->toBe(['approval_requested'])
+        ->and($asked['events'][0]['call'])->toBe(['tool' => 'CurrentTime', 'tool_call_id' => 'call_1'])
+        ->and(array_column($resume['events'], 'kind'))->toBe(['approval_resolved', 'approval_resolved'])
+        ->and(array_column($resume['events'], 'call'))->toBe([
+            ['tool' => 'CurrentTime', 'tool_call_id' => 'call_1', 'approved' => true],
+            ['tool' => 'CurrentTime', 'tool_call_id' => 'call_2', 'approved' => false],
+        ]);
+
+    foreach ($runs as $run) {
+        foreach ($run['events'] as $event) {
+            expect($event['time'])->toBeGreaterThanOrEqual($run['start'])
+                ->and($event['time'])->toBeLessThanOrEqual($run['end']);
+        }
+    }
+
+    expect($asked['call'])->not->toHaveKey('resumed')
+        ->and($resume['call'])->toHaveKey('resumed', true)
+        ->and($resume['content'])->toBe([]);
+});
+
+it('R7: approval events are exported with the tool name, call id and decision', function () {
+    TimeAgent::fake([
+        (new TextResponse('', new TextUsage, new Meta('openai', 'fake')))
+            ->withPendingApprovals(collect([new PendingApproval('call_1', 'CurrentTime', [])])),
+    ]);
+
+    $response = TimeAgent::make()->withMessages([])->prompt('What time is it?');
+
+    event(new ToolApprovalResolved($response->invocationId, new TimeAgent, collect([
+        new ToolResult('call_1', 'CurrentTime', [], 'Denied.', denied: true),
+    ])));
+
+    app(Recorder::class)->flush();
+
+    $run = Otlp::spans()[0];
+
+    expect(array_column($run['events'], 'name'))->toBe([
+        'laravel.ai.tool_approval.requested',
+        'laravel.ai.tool_approval.resolved',
+    ])->and(Otlp::attributes($run['events'][0]))->toBe([
+        'gen_ai.tool.name' => 'CurrentTime',
+        'gen_ai.tool.call.id' => 'call_1',
+    ])->and(Otlp::attributes($run['events'][1]))->toBe([
+        'gen_ai.tool.name' => 'CurrentTime',
+        'gen_ai.tool.call.id' => 'call_1',
+        'laravel.ai.tool_approval.approved' => false,
+    ]);
+
+    foreach ($run['events'] as $event) {
+        expect($event['timeUnixNano'] >= $run['startTimeUnixNano'])->toBeTrue()
+            ->and($event['timeUnixNano'] <= $run['endTimeUnixNano'])->toBeTrue();
+    }
 });

@@ -2,7 +2,9 @@
 
 namespace Anantrp\Refract\Tests;
 
+use Anantrp\Refract\Contracts\Transport;
 use Anantrp\Refract\RefractServiceProvider;
+use Anantrp\Refract\Tests\Support\MemoryTransport;
 use Illuminate\Foundation\Application;
 use Laravel\Ai\AiServiceProvider;
 use Orchestra\Testbench\TestCase as Orchestra;
@@ -15,6 +17,23 @@ abstract class TestCase extends Orchestra
      * @var array<string, mixed>
      */
     protected array $environmentConfig = [];
+
+    /**
+     * The transport that receives the neutral spans instead of the configured one.
+     */
+    protected ?MemoryTransport $memoryTransport = null;
+
+    /**
+     * Recreate the application with a transport that keeps the neutral spans.
+     */
+    protected function captureNeutralSpans(): MemoryTransport
+    {
+        $this->memoryTransport = new MemoryTransport;
+
+        $this->refreshApplication();
+
+        return $this->memoryTransport;
+    }
 
     /**
      * Recreate the application with the given configuration applied before boot.
@@ -43,6 +62,12 @@ abstract class TestCase extends Orchestra
         ]);
 
         $app['config']->set($this->environmentConfig);
+
+        if ($this->memoryTransport !== null) {
+            $transport = $this->memoryTransport;
+
+            $app->extend(Transport::class, fn () => $transport);
+        }
     }
 
     protected function getPackageProviders($app): array

@@ -150,6 +150,15 @@ class GenAiTranslator
                     'gen_ai.request.model' => $call['model'] ?? null,
                     'error.type' => $call['error'] ?? null,
                 ]],
+                'approval_requested' => ['laravel.ai.tool_approval.requested', [
+                    'gen_ai.tool.name' => $call['tool'] ?? null,
+                    'gen_ai.tool.call.id' => $call['tool_call_id'] ?? null,
+                ]],
+                'approval_resolved' => ['laravel.ai.tool_approval.resolved', [
+                    'gen_ai.tool.name' => $call['tool'] ?? null,
+                    'gen_ai.tool.call.id' => $call['tool_call_id'] ?? null,
+                    'laravel.ai.tool_approval.approved' => $call['approved'] ?? null,
+                ]],
                 default => [$this->string($event, 'kind'), []],
             };
 

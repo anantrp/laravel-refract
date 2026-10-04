@@ -15,6 +15,8 @@ use Laravel\Ai\Events\StartingStep;
 use Laravel\Ai\Events\StepCompleted;
 use Laravel\Ai\Events\StepFailed;
 use Laravel\Ai\Events\StreamingAgent;
+use Laravel\Ai\Events\ToolApprovalRequested;
+use Laravel\Ai\Events\ToolApprovalResolved;
 use Laravel\Ai\Events\ToolFailed;
 use Laravel\Ai\Events\ToolInvoked;
 use Laravel\Ai\Providers\Provider;
@@ -52,12 +54,16 @@ class RecordAgentRuns
         $events->listen(InvokingTool::class, $this->invokingTool(...));
         $events->listen(ToolInvoked::class, $this->toolInvoked(...));
         $events->listen(ToolFailed::class, $this->toolFailed(...));
+        $events->listen(ToolApprovalRequested::class, $this->toolApprovalRequested(...));
+        $events->listen(ToolApprovalResolved::class, $this->toolApprovalResolved(...));
     }
 
     /**
      * Start the run span. A sub-agent run nests under the tool span that called it.
      *
      * The attempt after a failover keeps the run span it failed over from.
+     * A run resumed from approval decisions sent no prompt text, so it is
+     * marked as resumed and no prompt is ever recorded for it.
      */
     public function promptingAgent(PromptingAgent $event): void
     {
@@ -78,6 +84,7 @@ class RecordAgentRuns
             'agent_class' => $agent::class,
             'provider' => $this->providerName($event->prompt->provider),
             'model' => $event->prompt->model,
+            ...($event->prompt->hasApprovalDecisions() ? ['resumed' => true] : []),
         ]);
     }
 
@@ -147,6 +154,37 @@ class RecordAgentRuns
     public function toolFailed(ToolFailed $event): void
     {
         $this->recorder->end($this->toolKey($event->toolInvocationId), 'error', $event->exception::class);
+    }
+
+    /**
+     * Record each tool call waiting for approval as an event on the run span.
+     *
+     * The SDK sends this after the run ended, so the event sits at the run's end.
+     */
+    public function toolApprovalRequested(ToolApprovalRequested $event): void
+    {
+        foreach ($event->pendingApprovals as $approval) {
+            $this->recorder->event($this->runKey($event->invocationId), 'approval_requested', [
+                'tool' => $approval->tool,
+                'tool_call_id' => $approval->id,
+            ]);
+        }
+    }
+
+    /**
+     * Record each approval decision of a resumed run as an event on its run span.
+     *
+     * The SDK sends this after the run ended, so the event sits at the run's end.
+     */
+    public function toolApprovalResolved(ToolApprovalResolved $event): void
+    {
+        foreach ($event->toolResults as $result) {
+            $this->recorder->event($this->runKey($event->invocationId), 'approval_resolved', [
+                'tool' => $result->name,
+                'tool_call_id' => $result->id,
+                'approved' => ! $result->denied,
+            ]);
+        }
     }
 
     protected function runKey(string $invocationId): string
