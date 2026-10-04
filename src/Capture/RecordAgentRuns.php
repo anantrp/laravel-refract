@@ -6,7 +6,6 @@ use Anantrp\Refract\Support\Guard;
 use Closure;
 use Illuminate\Contracts\Events\Dispatcher;
 use Laravel\Ai\Contracts\Agent;
-use Laravel\Ai\Contracts\CanActAsTool;
 use Laravel\Ai\Events\AgentFailed;
 use Laravel\Ai\Events\AgentFailedOver;
 use Laravel\Ai\Events\AgentPrompted;
@@ -107,7 +106,7 @@ class RecordAgentRuns
 
         $this->recorder->start($this->runKey($event->invocationId), 'invoke_agent', $parentKey, [
             'invocation_id' => $event->invocationId,
-            'agent' => $this->agentName($agent),
+            'agent' => $this->agentName($agent, $parentKey),
             'agent_class' => $agent::class,
             'provider' => $this->providerName($event->prompt->provider),
             'model' => $event->prompt->model,
@@ -247,9 +246,17 @@ class RecordAgentRuns
         return "tool:{$toolInvocationId}";
     }
 
-    protected function agentName(Agent $agent): string
+    /**
+     * Get the agent's name without running its code: a sub-agent takes the
+     * name of the tool span that called it, which the SDK resolved for the
+     * tool; any other run takes its class name. The SDK calls name() only
+     * when it wraps the agent as a tool. (Rule 10)
+     */
+    protected function agentName(Agent $agent, ?string $parentKey): string
     {
-        return $agent instanceof CanActAsTool ? $agent->name() : class_basename($agent);
+        $tool = $parentKey === null ? null : ($this->recorder->call($parentKey)['tool'] ?? null);
+
+        return is_string($tool) && $tool !== '' ? $tool : class_basename($agent);
     }
 
     protected function providerName(object $provider): ?string

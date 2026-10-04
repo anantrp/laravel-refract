@@ -5,6 +5,7 @@ namespace Anantrp\Refract\Tests\Support\Ai;
 use Anantrp\Refract\Tests\Support\RefractStack;
 use Laravel\Ai\Attributes\Model;
 use Laravel\Ai\Contracts\Agent;
+use Laravel\Ai\Contracts\CanActAsTool;
 use Laravel\Ai\Contracts\HasTools;
 use Laravel\Ai\Promptable;
 use Laravel\Ai\Responses\Data\ToolCall;
@@ -13,10 +14,10 @@ use Workbench\App\Ai\Agents\TimeAgent;
 use Workbench\App\Ai\Tools\CurrentTime;
 
 /**
- * Counts each call of instructions() and tools(), by the SDK and by Refract.
+ * Counts each call of instructions(), tools(), name() and description(), by the SDK and by Refract.
  */
 #[Model('fake')]
-class CountingAgent implements Agent, HasTools
+class CountingAgent implements Agent, CanActAsTool, HasTools
 {
     use Promptable;
 
@@ -69,5 +70,19 @@ class CountingAgent implements Agent, HasTools
         self::count('tools');
 
         return [new CurrentTime, new TimeAgent];
+    }
+
+    public function name(): string
+    {
+        self::count('name');
+
+        return 'counting_agent';
+    }
+
+    public function description(): Stringable|string
+    {
+        self::count('description');
+
+        return 'Tells the time.';
     }
 }

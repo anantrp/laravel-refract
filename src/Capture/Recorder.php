@@ -132,6 +132,16 @@ class Recorder
     }
 
     /**
+     * Get the call bucket of the span open under the given key, or none when no span is open there.
+     *
+     * @return array<string, mixed>
+     */
+    public function call(string $key): array
+    {
+        return $this->open[$key]['call'] ?? [];
+    }
+
+    /**
      * Check whether a span is open under the given key.
      */
     public function isOpen(string $key): bool

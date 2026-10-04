@@ -12,8 +12,10 @@ use Anantrp\Refract\Export\OtlpJson;
 use Anantrp\Refract\Export\Platform;
 use Anantrp\Refract\Support\Diagnostics;
 use Anantrp\Refract\Tests\Support\Ai\CountingAgent;
+use Anantrp\Refract\Tests\Support\Ai\CountingSupervisor;
 use Anantrp\Refract\Tests\Support\Env;
 use Anantrp\Refract\Tests\Support\FlakyTransport;
+use Anantrp\Refract\Tests\Support\Otlp;
 use Anantrp\Refract\Tests\Support\RefractStack;
 use Anantrp\Refract\Tests\Support\ThrowingRecorder;
 use Anantrp\Refract\Tests\Support\WarningLog;
@@ -369,7 +371,7 @@ it('S4: 11 different internal errors give 10 warnings, then silence', function (
         ->and(implode("\n", $log->warnings))->not->toContain('again');
 });
 
-it('S5: instructions() and tools() are called only by the SDK, never by Refract', function () {
+it('S5: instructions(), tools() and name() are called only by the SDK, never by Refract', function () {
     bootSafety(['refract.capture.content' => true]);
 
     CountingAgent::fakeSteps();
@@ -386,12 +388,25 @@ it('S5: instructions() and tools() are called only by the SDK, never by Refract'
         : 'It is 12:00.');
     CountingAgent::make()->prompt('What time is it?', provider: ['openai' => 'gpt-a', 'anthropic' => 'claude-b']);
 
+    // As a sub-agent, the SDK needs its name() for the tool.
+    CountingSupervisor::fakeSteps();
+    CountingSupervisor::make()->prompt('What time is it?');
+
     app(FlushPoints::class)->flush();
 
-    expect(CountingAgent::$refractCalls)->toBe([])
+    $runs = collect(Otlp::spans())->map(Otlp::attributes(...))
+        ->filter(fn (array $attributes) => ($attributes['laravel.ai.agent.class'] ?? null) === CountingAgent::class)
+        ->values();
+
+    // Run spans never call name(). The execute_tool span of the one sub-agent call resolves its
+    // tool name the SDK's way (ToolNameResolver), which runs name() once: open question in log.md.
+    expect(CountingAgent::$refractCalls)->toBe(['name' => 1])
         ->and(CountingAgent::$sdkCalls['instructions'] ?? 0)->toBeGreaterThan(0)
         ->and(CountingAgent::$sdkCalls['tools'] ?? 0)->toBeGreaterThan(0)
-        ->and(count(Http::recorded()))->toBe(1);
+        ->and(CountingAgent::$sdkCalls['name'] ?? 0)->toBeGreaterThan(0)
+        ->and(count(Http::recorded()))->toBe(1)
+        // A top-level run is named by its class; a sub-agent run by the tool the SDK called it as.
+        ->and($runs->map(fn (array $attributes) => $attributes['gen_ai.agent.name'])->all())->toBe(['CountingAgent', 'CountingAgent', 'CountingAgent', 'counting_agent']);
 });
 
 it('S6: with Refract disabled no listener or flush hook is registered', function (bool $enabled) {
