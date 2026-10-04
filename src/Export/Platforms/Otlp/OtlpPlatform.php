@@ -35,12 +35,19 @@ class OtlpPlatform implements Platform
      * REFRACT_OTLP_ENDPOINT is the full traces URL and gets only
      * REFRACT_OTLP_HEADERS, so OTEL headers meant for another backend never
      * reach it. OTEL_EXPORTER_OTLP_ENDPOINT is a base URL: "/v1/traces" is
-     * appended and both header sets are sent, Refract's winning.
+     * appended and both header sets are sent, Refract's winning. An invalid
+     * REFRACT_OTLP_ENDPOINT exports nothing: it never falls back to the OTEL
+     * endpoint, so REFRACT_OTLP_HEADERS never go to a host the user did not name.
      */
     public static function fromConfig(string $key): ?self
     {
+        $endpoint = Settings::destinationUrl("{$key}.endpoint");
+
+        if ($endpoint === null) {
+            return null;
+        }
+
         $headers = Settings::headers("{$key}.headers");
-        $endpoint = Settings::url("{$key}.endpoint");
 
         if ($endpoint !== '') {
             return new self($endpoint, $headers);

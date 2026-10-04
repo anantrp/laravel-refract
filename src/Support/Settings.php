@@ -91,22 +91,45 @@ class Settings
     {
         $value = self::string($key, $default);
 
-        if ($value === $default) {
-            return $default;
+        if ($value === $default || self::isUrl($value)) {
+            return $value;
         }
 
+        Diagnostics::warn("config.{$key}", "Refract config [refract.{$key}] must be an http or https URL. Using the default.");
+
+        return $default;
+    }
+
+    /**
+     * Get the given configuration value as the URL of a destination that is
+     * sent credentials: an empty string when it is not set, or null and one
+     * warning when it is invalid. An invalid URL has no fallback host, so
+     * keys and headers never go to a host the user did not name.
+     */
+    public static function destinationUrl(string $key): ?string
+    {
+        $value = self::string($key);
+
+        if ($value === '' || self::isUrl($value)) {
+            return $value;
+        }
+
+        Diagnostics::warn("config.{$key}", "Refract config [refract.{$key}] must be an http or https URL. Nothing is exported.");
+
+        return null;
+    }
+
+    /**
+     * Determine if the given value is an http or https URL with a host.
+     */
+    protected static function isUrl(string $value): bool
+    {
         // Not FILTER_VALIDATE_URL: it rejects valid hosts like "otel_collector" (docker-compose names) and IDN hosts.
         $parts = parse_url($value);
         $scheme = is_array($parts) ? ($parts['scheme'] ?? '') : '';
         $host = is_array($parts) ? ($parts['host'] ?? '') : '';
 
-        if (! in_array(strtolower($scheme), ['http', 'https'], true) || $host === '') {
-            Diagnostics::warn("config.{$key}", "Refract config [refract.{$key}] must be an http or https URL. Using the default.");
-
-            return $default;
-        }
-
-        return $value;
+        return in_array(strtolower($scheme), ['http', 'https'], true) && $host !== '';
     }
 
     /**

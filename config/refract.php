@@ -127,6 +127,9 @@ return [
     |
     | "langfuse": LANGFUSE_BASE_URL defaults to Langfuse Cloud.
     |
+    | An invalid REFRACT_OTLP_ENDPOINT or LANGFUSE_BASE_URL exports nothing,
+    | with one warning: there is no fallback host for your keys and headers.
+    |
     */
 
     'destinations' => [

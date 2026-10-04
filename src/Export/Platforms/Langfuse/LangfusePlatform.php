@@ -54,11 +54,18 @@ class LangfusePlatform implements Platform
     /**
      * Create the platform from the config, or get null and one warning when a key is missing.
      *
-     * An empty base URL means Langfuse Cloud.
+     * An empty base URL means Langfuse Cloud. An invalid one exports
+     * nothing: it never falls back to Cloud, so the keys never go to a host
+     * the user did not name.
      */
     public static function fromConfig(string $key): ?self
     {
-        $url = Settings::url("{$key}.url");
+        $url = Settings::destinationUrl("{$key}.url");
+
+        if ($url === null) {
+            return null;
+        }
+
         $publicKey = Settings::string("{$key}.public_key");
         $secretKey = Settings::string("{$key}.secret_key");
 

@@ -166,8 +166,10 @@ function listening(): bool
 /**
  * The cases for each env var: the env the var is tested in, an invalid value,
  * how to read the result, the default result and the warnings the default gives.
+ * A var whose invalid value does not give the default names the result it
+ * gives ("on_invalid") and the warnings in all ("invalid_warnings").
  *
- * @return array<string, array{env: array<string, string|null>, invalid: string, read: Closure(): mixed, default: mixed, warnings: int}>
+ * @return array<string, array{env: array<string, string|null>, invalid: string, read: Closure(): mixed, default: mixed, warnings: int, on_invalid?: mixed, invalid_warnings?: int}>
  */
 function envCases(): array
 {
@@ -205,6 +207,8 @@ function envCases(): array
         'REFRACT_OTLP_ENDPOINT' => [
             'env' => ['OTEL_EXPORTER_OTLP_ENDPOINT' => 'https://collector.test:4318'],
             'invalid' => 'not a url', 'read' => $url, 'default' => 'https://collector.test:4318/v1/traces', 'warnings' => 0,
+            // No fallback to the OTEL endpoint: REFRACT_OTLP_HEADERS never go to a host the user did not name.
+            'on_invalid' => null, 'invalid_warnings' => 1,
         ],
         'REFRACT_OTLP_HEADERS' => [
             'env' => [], 'invalid' => 'x-team', 'read' => $headers, 'default' => [], 'warnings' => 0,
@@ -218,6 +222,8 @@ function envCases(): array
         ],
         'LANGFUSE_BASE_URL' => [
             'env' => LANGFUSE_ENV, 'invalid' => 'not a url', 'read' => $url, 'default' => LANGFUSE_CLOUD, 'warnings' => 0,
+            // No fallback to Langfuse Cloud: the keys never go to a host the user did not name.
+            'on_invalid' => null, 'invalid_warnings' => 1,
         ],
         'LANGFUSE_PUBLIC_KEY' => [
             'env' => LANGFUSE_ENV, 'invalid' => 'true', 'read' => fn () => exported(), 'default' => null, 'warnings' => 1,
@@ -270,15 +276,45 @@ it('C2: an env var set to empty gives the default with no warning about it', fun
         ->and($warnings)->toHaveCount(envCases()[$var]['warnings']);
 })->with('env vars');
 
+/**
+ * Get the result and the number of warnings the given env var case gives with an invalid value.
+ *
+ * @return array{mixed, int}
+ */
+function invalidOutcome(string $var): array
+{
+    $case = envCases()[$var];
+
+    return array_key_exists('on_invalid', $case)
+        ? [$case['on_invalid'], $case['invalid_warnings'] ?? $case['warnings'] + 1]
+        : [$case['default'], $case['warnings'] + 1];
+}
+
 it('C3: an invalid env var gives the default and one warning', function (string $var) {
     [$result, $warnings] = runEnvCase($var, envCases()[$var]['invalid']);
+    [$expected, $count] = invalidOutcome($var);
 
     $about = array_filter($warnings, fn (string $message) => str_contains($message, 'Refract config [refract.'));
 
-    expect($result)->toBe(envCases()[$var]['default'])
-        ->and($warnings)->toHaveCount(envCases()[$var]['warnings'] + 1)
+    expect($result)->toBe($expected)
+        ->and($warnings)->toHaveCount($count)
         ->and($about)->toHaveCount(1);
 })->with('env vars');
+
+it('C3: an invalid LANGFUSE_BASE_URL or REFRACT_OTLP_ENDPOINT exports nothing, with one warning, to no fallback host', function (array $env, string $var) {
+    Env::set([...BASE_ENV, ...$env, $var => 'not a url']);
+
+    $log = loadRefract();
+
+    expect(exported())->toBeNull()
+        ->and($log->warnings)->toHaveCount(1)
+        ->and($log->warnings[0])->toContain($var === 'LANGFUSE_BASE_URL' ? 'refract.destinations.langfuse.url' : 'refract.destinations.otlp.endpoint')
+        ->and($log->warnings[0])->toContain('Nothing is exported');
+    Http::assertNothingSent();
+})->with([
+    'LANGFUSE_BASE_URL' => [LANGFUSE_ENV, 'LANGFUSE_BASE_URL'],
+    'REFRACT_OTLP_ENDPOINT' => [['OTEL_EXPORTER_OTLP_ENDPOINT' => 'https://collector.test:4318', 'REFRACT_OTLP_HEADERS' => 'x-secret=1'], 'REFRACT_OTLP_ENDPOINT'],
+]);
 
 /**
  * The URL env vars, the env each is tested in, a value with an underscore or
@@ -519,8 +555,9 @@ it('C7: under config:cache every case gives the same result, and env changes aft
         [$fresh] = runEnvCase($name, $value);
         [$cached, $cachedWarnings] = runEnvCase($name, $value, cached: true);
 
-        $expected = envCases()[$name]['default'];
-        $warnings = envCases()[$name]['warnings'] + ($column === 'C3' ? 1 : 0);
+        [$expected, $warnings] = $column === 'C3'
+            ? invalidOutcome($name)
+            : [envCases()[$name]['default'], envCases()[$name]['warnings']];
     } else {
         $destination = destinationCases()[$case];
 
