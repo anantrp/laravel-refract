@@ -16,6 +16,11 @@ use JsonException;
  */
 class GenAiTranslator
 {
+    /**
+     * The OTel user attribute. A Context mapping never sets it.
+     */
+    public const USER_ID = 'user.id';
+
     public const KIND_INTERNAL = 1;
 
     public const KIND_CLIENT = 3;
@@ -81,8 +86,10 @@ class GenAiTranslator
             'kind' => $spanKind,
             'start' => $this->int($span, 'start'),
             'end' => $this->int($span, 'end'),
-            // A mapped value never takes the name of a real attribute, even one that is empty here.
-            'attributes' => array_filter($own, fn (mixed $value) => $value !== null) + array_diff_key($this->mapped($context), $own),
+            // A mapped value never takes the name of a real attribute, even one that is empty here,
+            // and never sets user.id, which a platform makes only from the participant.
+            'attributes' => array_filter($own, fn (mixed $value) => $value !== null)
+                + array_diff_key($this->mapped($context), $own, [self::USER_ID => true]),
             'events' => $this->events($span['events'] ?? null),
             'status' => [
                 'code' => match (true) {

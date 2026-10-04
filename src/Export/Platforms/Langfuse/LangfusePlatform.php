@@ -134,7 +134,7 @@ class LangfusePlatform implements Platform
     }
 
     /**
-     * Set user.id to the participant id when the participant type is a user (implements Authenticatable).
+     * Set user.id to the participant id when the participant type is a user (implements Authenticatable), and only then.
      *
      * @param  TranslatedSpan  $span
      * @return TranslatedSpan
@@ -143,6 +143,9 @@ class LangfusePlatform implements Platform
     {
         $type = $span['attributes']['laravel.ai.participant.type'] ?? null;
         $id = $span['attributes']['laravel.ai.participant.id'] ?? null;
+
+        // user.id comes only from the participant.
+        unset($span['attributes']['user.id']);
 
         if (is_string($type) && is_string($id) && is_a($type, Authenticatable::class, true)) {
             $span['attributes']['user.id'] = $id;

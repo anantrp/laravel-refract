@@ -247,6 +247,31 @@ it('X8: a mapped Context key never fills a real attribute that is empty, so it c
         ->and($run)->toHaveKey('app.tenant', 'acme');
 });
 
+it('X8: a Context key mapped to user.id never sets user.id; only a user participant does', function () {
+    $this->refreshApplicationWithConfig([
+        ...$this->environmentConfig,
+        'refract.context.attributes' => ['uid' => 'user.id', 'tenant' => 'app.tenant'],
+    ]);
+
+    Http::fake();
+
+    Context::add('uid', '77');
+    Context::add('tenant', 'acme');
+
+    ChatAgent::fake(['Hello.', 'Hello again.']);
+
+    TimeAgent::fakeTwoSteps();
+    TimeAgent::make()->prompt('What time is it?');
+    ChatAgent::make()->forParticipant((new Team)->forceFill(['id' => 7]))->prompt('Hello');
+
+    [$unsaved, $team] = runAttributes();
+
+    expect($unsaved)->not->toHaveKey('user.id')
+        ->and($unsaved)->toHaveKey('app.tenant', 'acme')
+        ->and($team)->not->toHaveKey('user.id')
+        ->and($team)->toHaveKey('laravel.ai.participant.id', '7');
+});
+
 it('X9: APP_ENV "Staging EU 1" is sent to Langfuse as staging-eu-1', function () {
     $this->refreshApplicationWithConfig([
         ...$this->environmentConfig,
