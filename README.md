@@ -242,7 +242,7 @@ How values are recorded:
 - **Byte cap.** Each value is cut at `REFRACT_CAPTURE_MAX_BYTES` (default 128 KB, at least 64), at a character border, and marked with its original size: `…[cut, original size N bytes]`.
 - **No files or media.** Attachments and files are never recorded, with capture on or off: no bytes, no name, no URL, no size. A file inside a value, for example a tool that returns an image, becomes `[file]`.
 - **Tool results in step history.** In a `chat` span's input messages, a tool result is only a reference (tool name and call id). The result itself is on the `execute_tool` span.
-- **Tool results.** A string is recorded as is. Arrays and Collections are recorded in full as JSON. A top-level `Stringable` result is cast with `__toString()`, as the SDK does. Inside an array or Collection, nested arrays and Collections are walked, enums keep their value, files become `[file]`, and any other object is recorded as its class name, with none of its methods run. Any other top-level object is recorded as its class name too. A value that cannot be encoded as JSON is recorded as `[not encodable as JSON]`, with one warning.
+- **Tool results.** A string is recorded as is. Arrays and Collections are recorded in full as JSON. A top-level `Stringable` result is cast with `__toString()`, as the SDK does. Inside an array or Collection, nested arrays and Collections are walked, backed enums keep their value (a pure enum makes the value `[not encodable as JSON]`), files become `[file]`, and any other object is recorded as its class name, with none of its methods run. Any other top-level object is recorded as its class name too. A value that cannot be encoded as JSON is recorded as `[not encodable as JSON]`, with one warning.
 - **No built-in redaction.** Refract does not look for secrets. Use a `mask`.
 
 ### Mask
@@ -340,7 +340,7 @@ Context::add('trigger', 'schedule');
 ## Safety
 
 - **Refract never breaks your app.** Every listener and lifecycle hook is guarded. A failure inside Refract logs one warning and the run goes on. Your app's own exceptions pass through unchanged.
-- **No extra calls.** Refract never calls agent methods that run your code (`instructions()`, `tools()`) and runs no queries. A run is named without calling the agent's `name()`. To name a tool span, Refract reads the tool name the way the SDK does, which calls `name()` of an agent used as a tool.
+- **No extra calls.** Refract never calls agent methods that run your code (`instructions()`, `tools()`) and runs no queries. A run is named without calling the agent's `name()`. To name a tool span, Refract reads the tool name the way the SDK does, which calls `name()` once per tool call on a tool or an agent used as a tool, the same call the SDK makes.
 - **Warnings.** Each warning is logged at the `warning` level, prefixed `[refract]`, once per kind per process. After 10 different warnings, Refract stays silent.
 - **Bounded memory.** The buffer holds at most 1,000 spans per request, job or command. Past that, new spans are dropped and one warning is logged.
 
