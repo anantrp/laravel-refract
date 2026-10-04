@@ -180,6 +180,8 @@ it('E2: a request exception that carries a response is judged by its status', fu
 
 it('E3: a 408, 429, 5xx or network error on queue is retried, 3 tries, 10 s apart', function (int|string $status) {
     $log = bootExport('queue');
+    // The backoff is checked to the second: a clock tick during the test must not change it.
+    $this->freezeTime();
     fakeDestination($status);
     useExportQueue();
 
