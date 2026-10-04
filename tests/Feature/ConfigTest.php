@@ -8,6 +8,7 @@ use Anantrp\Refract\Support\Diagnostics;
 use Anantrp\Refract\Tests\Support\Env;
 use Anantrp\Refract\Tests\Support\Otlp;
 use Anantrp\Refract\Tests\Support\WarningLog;
+use Illuminate\Config\Repository;
 use Illuminate\Events\Dispatcher;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Context;
@@ -57,13 +58,50 @@ const LANGFUSE_ENV = [
 const LANGFUSE_CLOUD = 'https://cloud.langfuse.com/api/public/otel/v1/traces';
 
 /**
- * Load config/refract.php again from the current env, rebuild Refract's services and record warnings.
+ * Other values for every env var, set after the config is cached. A cached config must not see them.
  */
-function loadRefract(): WarningLog
+const CHANGED_ENV = [
+    'REFRACT_ENABLED' => 'false',
+    'OTEL_SERVICE_NAME' => 'changed',
+    'REFRACT_ENVIRONMENT' => 'changed',
+    'REFRACT_TRANSPORT' => 'queue',
+    'REFRACT_DESTINATION' => 'langfuse',
+    'REFRACT_OTLP_ENDPOINT' => 'https://changed.test/v1/traces',
+    'REFRACT_OTLP_HEADERS' => 'x-changed=1',
+    'OTEL_EXPORTER_OTLP_ENDPOINT' => 'https://changed.test',
+    'OTEL_EXPORTER_OTLP_HEADERS' => 'x-changed=1',
+    'LANGFUSE_BASE_URL' => 'https://changed.test',
+    'LANGFUSE_PUBLIC_KEY' => 'pk-changed',
+    'LANGFUSE_SECRET_KEY' => 'sk-changed',
+    'REFRACT_CONTEXT_PARTICIPANT_TYPE' => 'changed_type',
+    'REFRACT_CONTEXT_PARTICIPANT_ID' => 'changed_id',
+];
+
+/**
+ * Load config/refract.php again from the current env, rebuild Refract's services and record warnings.
+ *
+ * Cached: write the loaded config the way config:cache does, change every
+ * env var, then load the app from that file the way Laravel loads a cached
+ * config, so config/refract.php is not read again.
+ */
+function loadRefract(bool $cached = false): WarningLog
 {
     config(['refract' => [], 'app.name' => 'Refract Test App']);
 
     (new RefractServiceProvider(app()))->register();
+
+    if ($cached) {
+        $path = tempnam(sys_get_temp_dir(), 'refract-config');
+        file_put_contents($path, '<?php return '.var_export(config()->all(), true).';'.PHP_EOL);
+
+        Env::set(CHANGED_ENV);
+
+        app()->instance('config_loaded_from_cache', true);
+        app()->instance('config', new Repository(require $path));
+        unlink($path);
+
+        (new RefractServiceProvider(app()))->register();
+    }
 
     Diagnostics::reset();
     Log::swap($log = new WarningLog);
@@ -188,13 +226,13 @@ function envCases(): array
  *
  * @return array{mixed, list<string>}
  */
-function runEnvCase(string $var, ?string $value): array
+function runEnvCase(string $var, ?string $value, bool $cached = false): array
 {
     $case = envCases()[$var];
 
     Env::set([...BASE_ENV, ...$case['env'], $var => $value]);
 
-    $log = loadRefract();
+    $log = loadRefract($cached);
 
     return [($case['read'])(), $log->warnings];
 }
@@ -335,3 +373,97 @@ it('reads the participant from the Context keys named in config', function () {
 
     expect(participantFromKeys(app(RunContext::class), 'owner_type', 'owner_id'))->toBe(['type' => 'App\Models\User', 'id' => '42']);
 });
+
+/**
+ * The C4 to C8 cases: the env, how to read the result, the result and the warnings it gives.
+ *
+ * @return array<string, array{env: array<string, string|null>, read: Closure(): mixed, expected: mixed, warnings: int}>
+ */
+function destinationCases(): array
+{
+    $sent = fn () => ($request = exported()) === null ? null : ['url' => $request['url'], 'headers' => $request['headers']];
+
+    return [
+        'C4: OTEL headers not sent to the Refract endpoint' => [
+            'env' => [
+                'REFRACT_OTLP_HEADERS' => 'x-refract=1',
+                'OTEL_EXPORTER_OTLP_ENDPOINT' => 'https://collector.test:4318',
+                'OTEL_EXPORTER_OTLP_HEADERS' => 'x-otel=1',
+            ],
+            'read' => $sent, 'expected' => ['url' => 'https://otlp.test/v1/traces', 'headers' => ['x-refract' => '1']], 'warnings' => 0,
+        ],
+        'C4: OTEL endpoint with its headers' => [
+            'env' => [
+                'REFRACT_OTLP_ENDPOINT' => null,
+                'OTEL_EXPORTER_OTLP_ENDPOINT' => 'https://collector.test:4318',
+                'OTEL_EXPORTER_OTLP_HEADERS' => 'x-otel=a%3Db',
+            ],
+            'read' => $sent, 'expected' => ['url' => 'https://collector.test:4318/v1/traces', 'headers' => ['x-otel' => 'a=b']], 'warnings' => 0,
+        ],
+        'C5: no OTLP endpoint' => [
+            'env' => ['REFRACT_OTLP_ENDPOINT' => null], 'read' => $sent, 'expected' => null, 'warnings' => 1,
+        ],
+        'C6: LANGFUSE_BASE_URL empty' => [
+            'env' => [...LANGFUSE_ENV, 'LANGFUSE_BASE_URL' => ''], 'read' => $sent,
+            'expected' => ['url' => LANGFUSE_CLOUD, 'headers' => [
+                'authorization' => 'Basic '.base64_encode('pk-test:sk-test'),
+                'x-langfuse-ingestion-version' => '4',
+            ]],
+            'warnings' => 0,
+        ],
+        'C8: Langfuse keys missing' => [
+            'env' => [...LANGFUSE_ENV, 'LANGFUSE_SECRET_KEY' => null], 'read' => $sent, 'expected' => null, 'warnings' => 1,
+        ],
+    ];
+}
+
+/**
+ * Every C1 to C6 and C8 case, by name.
+ *
+ * @return list<string>
+ */
+function allConfigCases(): array
+{
+    $cases = [];
+
+    foreach (['C1', 'C2', 'C3'] as $column) {
+        foreach (array_keys(envCases()) as $var) {
+            $cases[] = "{$column}: {$var}";
+        }
+    }
+
+    return [...$cases, ...array_keys(destinationCases())];
+}
+
+it('C7: under config:cache every case gives the same result, and env changes after caching do not matter', function (string $case) {
+    [$column, $name] = explode(': ', $case, 2);
+
+    if (in_array($column, ['C1', 'C2', 'C3'], true)) {
+        $value = ['C1' => null, 'C2' => '', 'C3' => envCases()[$name]['invalid']][$column];
+
+        [$fresh] = runEnvCase($name, $value);
+        [$cached, $cachedWarnings] = runEnvCase($name, $value, cached: true);
+
+        $expected = envCases()[$name]['default'];
+        $warnings = envCases()[$name]['warnings'] + ($column === 'C3' ? 1 : 0);
+    } else {
+        $destination = destinationCases()[$case];
+
+        Env::set([...BASE_ENV, ...$destination['env']]);
+        loadRefract();
+        $fresh = ($destination['read'])();
+
+        Env::set([...BASE_ENV, ...$destination['env']]);
+        $log = loadRefract(cached: true);
+        $cached = ($destination['read'])();
+        $cachedWarnings = $log->warnings;
+
+        $expected = $destination['expected'];
+        $warnings = $destination['warnings'];
+    }
+
+    expect(app()->configurationIsCached())->toBeTrue()
+        ->and($fresh)->toBe($expected)
+        ->and($cached)->toBe($expected)
+        ->and($cachedWarnings)->toHaveCount($warnings);
+})->with(allConfigCases());
