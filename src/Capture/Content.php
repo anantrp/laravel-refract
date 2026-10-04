@@ -57,6 +57,11 @@ class Content
     public const FILE = '[file]';
 
     /**
+     * The value a captured value becomes when it cannot be encoded as JSON.
+     */
+    public const NOT_ENCODABLE = '[not encodable as JSON]';
+
+    /**
      * The deepest a value is walked, the same as the json_encode() default.
      */
     protected const MAX_DEPTH = 512;
@@ -346,12 +351,20 @@ class Content
 
     /**
      * Encode the given value as JSON, with every file in it as "[file]". An empty value is an object.
+     *
+     * A value that cannot be encoded (NAN, INF, nested too deep) becomes a marker, with one warning.
      */
     protected function json(mixed $value): string
     {
-        $plain = $this->plain($value);
+        try {
+            $plain = $this->plain($value);
 
-        return (string) json_encode($plain === [] ? (object) [] : $plain, self::JSON_FLAGS);
+            return json_encode($plain === [] ? (object) [] : $plain, self::JSON_FLAGS | JSON_THROW_ON_ERROR);
+        } catch (JsonException $e) {
+            Diagnostics::warn('content.json', 'A captured value could not be encoded as JSON ('.$e->getMessage().'). It was recorded as '.self::NOT_ENCODABLE.'.');
+
+            return self::NOT_ENCODABLE;
+        }
     }
 
     /**

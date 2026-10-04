@@ -2,6 +2,8 @@
 
 namespace Anantrp\Refract\Export;
 
+use JsonException;
+
 /**
  * Turns neutral spans into spans with OTel GenAI attributes.
  *
@@ -166,7 +168,9 @@ class GenAiTranslator
 
     /**
      * Encode neutral messages as OTel GenAI messages: a tool call's arguments
-     * become JSON again when they are valid JSON.
+     * become JSON again when they are valid JSON. When the messages cannot
+     * be encoded that way (arguments nested too deep), the arguments stay
+     * their JSON text.
      */
     protected function messages(mixed $messages): ?string
     {
@@ -174,6 +178,20 @@ class GenAiTranslator
             return null;
         }
 
+        try {
+            return $this->encode($messages, decode: true);
+        } catch (JsonException) {
+            return $this->encode($messages, decode: false);
+        }
+    }
+
+    /**
+     * @param  array<array-key, mixed>  $messages
+     *
+     * @throws JsonException
+     */
+    protected function encode(array $messages, bool $decode): string
+    {
         $encoded = [];
 
         foreach ($messages as $message) {
@@ -181,15 +199,15 @@ class GenAiTranslator
                 continue;
             }
 
-            $parts = is_array($message['parts'] ?? null) ? $message['parts'] : [];
+            $parts = array_filter(is_array($message['parts'] ?? null) ? $message['parts'] : [], is_array(...));
 
             $encoded[] = [
                 ...$message,
-                'parts' => array_values(array_map($this->part(...), array_filter($parts, is_array(...)))),
+                'parts' => array_values($decode ? array_map($this->part(...), $parts) : $parts),
             ];
         }
 
-        return (string) json_encode($encoded, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE | JSON_PRESERVE_ZERO_FRACTION);
+        return json_encode($encoded, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE | JSON_PRESERVE_ZERO_FRACTION | JSON_THROW_ON_ERROR);
     }
 
     /**
@@ -198,9 +216,7 @@ class GenAiTranslator
      */
     protected function part(array $part): array
     {
-        $type = $part['type'] ?? null;
-
-        if ($type === 'tool_call' && is_string($part['arguments'] ?? null)) {
+        if (($part['type'] ?? null) === 'tool_call' && is_string($part['arguments'] ?? null)) {
             // Decoded to objects, so "{}" stays an object when encoded again.
             $arguments = json_decode($part['arguments']);
 

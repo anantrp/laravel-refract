@@ -1,6 +1,8 @@
 <?php
 
+use Anantrp\Refract\Capture\Content;
 use Anantrp\Refract\Capture\Recorder;
+use Anantrp\Refract\Export\GenAiTranslator;
 use Anantrp\Refract\Support\Diagnostics;
 use Anantrp\Refract\Tests\Support\Ai\FileAgent;
 use Anantrp\Refract\Tests\Support\Ai\FileTool;
@@ -551,4 +553,77 @@ it('P11: a tool result object (Collection) is recorded as text', function () {
     $result = array_values(array_filter($tool['attributes'], fn (array $attribute) => $attribute['key'] === 'gen_ai.tool.call.result'))[0];
 
     expect($result['value'])->toBe(['stringValue' => '{"topic":"release","note":"Ship on Friday."}']);
+});
+
+/**
+ * An array nested the given number of levels deep.
+ *
+ * @return array<array-key, mixed>
+ */
+function nested(int $depth): array
+{
+    $value = ['leaf' => 'SECRET'];
+
+    for ($i = 1; $i < $depth; $i++) {
+        $value = ['a' => $value];
+    }
+
+    return $value;
+}
+
+it('P13: a value that cannot be encoded as JSON is recorded as a marker with one warning that names no value', function (Closure $value) {
+    $this->environmentConfig = contentConfig(['refract.capture.content' => true]);
+    $this->refreshApplication();
+
+    Diagnostics::reset();
+    Log::swap($log = new WarningLog);
+
+    $content = app(Content::class);
+
+    expect($content->toolResult('run_1', 'NotesTool', [], $value()))->toBe(['result' => '[not encodable as JSON]'])
+        ->and($content->toolArguments(['value' => $value()]))->toBe(['arguments' => '[not encodable as JSON]'])
+        ->and($log->warnings)->toHaveCount(1)
+        ->and($log->warnings[0])->toContain('could not be encoded as JSON')
+        ->and($log->warnings[0])->not->toContain('SECRET');
+})->with([
+    'NAN' => [fn () => ['note' => 'SECRET', 'score' => NAN]],
+    'INF' => [fn () => ['note' => 'SECRET', 'score' => INF]],
+    'NAN in a Collection' => [fn () => collect(['note' => 'SECRET', 'score' => -INF])],
+    'nested deeper than 512' => [fn () => nested(600)],
+]);
+
+it('P13: a tool result that cannot be encoded keeps the rest of the step content', function () {
+    $this->environmentConfig = contentConfig(['refract.capture.content' => true]);
+    $memory = $this->captureNeutralSpans();
+
+    FileTool::$result = collect(['score' => NAN]);
+
+    FileAgent::fakeTwoSteps();
+    FileAgent::make()->prompt('Get the score.');
+
+    app(Recorder::class)->flush();
+
+    [$tool] = ofKind($memory->spans, 'execute_tool');
+    [, $second] = ofKind($memory->spans, 'chat');
+
+    expect($tool['content'])->toBe(['arguments' => '{}', 'result' => '[not encodable as JSON]'])
+        ->and($second['content']['input'][0])->toBe(['role' => 'user', 'parts' => [['type' => 'text', 'content' => 'Get the score.']]])
+        ->and(end($second['content']['input'])['parts'][0]['response'])->toBe('[not encodable as JSON]');
+});
+
+it('P13: tool call arguments too deep to nest in the messages are exported as their JSON text', function () {
+    $arguments = (string) json_encode(nested(510));
+
+    $span = (new GenAiTranslator)->translate([
+        'kind' => 'chat',
+        'content' => ['output' => [[
+            'role' => 'assistant',
+            'parts' => [['type' => 'tool_call', 'id' => 'call_1', 'name' => 'NotesTool', 'arguments' => $arguments]],
+        ]]],
+    ]);
+
+    expect(json_decode($span['attributes']['gen_ai.output.messages'], true))->toBe([[
+        'role' => 'assistant',
+        'parts' => [['type' => 'tool_call', 'id' => 'call_1', 'name' => 'NotesTool', 'arguments' => $arguments]],
+    ]]);
 });
