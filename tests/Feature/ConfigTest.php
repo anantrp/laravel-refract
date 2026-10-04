@@ -1,5 +1,6 @@
 <?php
 
+use Anantrp\Refract\Capture\Content;
 use Anantrp\Refract\Capture\RecordAgentRuns;
 use Anantrp\Refract\Capture\RunContext;
 use Anantrp\Refract\Contracts\Transport;
@@ -41,6 +42,8 @@ const BASE_ENV = [
     'LANGFUSE_SECRET_KEY' => null,
     'REFRACT_CONTEXT_PARTICIPANT_TYPE' => null,
     'REFRACT_CONTEXT_PARTICIPANT_ID' => null,
+    'OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT' => null,
+    'REFRACT_CAPTURE_MAX_BYTES' => null,
 ];
 
 /**
@@ -75,6 +78,8 @@ const CHANGED_ENV = [
     'LANGFUSE_SECRET_KEY' => 'sk-changed',
     'REFRACT_CONTEXT_PARTICIPANT_TYPE' => 'changed_type',
     'REFRACT_CONTEXT_PARTICIPANT_ID' => 'changed_id',
+    'OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT' => 'true',
+    'REFRACT_CAPTURE_MAX_BYTES' => '10',
 ];
 
 /**
@@ -172,6 +177,8 @@ function envCases(): array
 
     $resource = fn (string $name) => fn () => exported()['resource'][$name] ?? null;
     $participant = fn () => participantFromKeys(app(RunContext::class), 'refract.participant_type', 'refract.participant_id');
+    $captures = fn () => app(Content::class)->toolArguments(['topic' => 'release']) !== [];
+    $cap = fn () => strlen(app(Content::class)->value(str_repeat('a', 200_000)));
 
     return [
         'REFRACT_ENABLED' => [
@@ -217,6 +224,12 @@ function envCases(): array
         ],
         'LANGFUSE_SECRET_KEY' => [
             'env' => LANGFUSE_ENV, 'invalid' => 'true', 'read' => fn () => exported(), 'default' => null, 'warnings' => 1,
+        ],
+        'OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT' => [
+            'env' => [], 'invalid' => 'maybe', 'read' => $captures, 'default' => false, 'warnings' => 0,
+        ],
+        'REFRACT_CAPTURE_MAX_BYTES' => [
+            'env' => [], 'invalid' => 'lots', 'read' => $cap, 'default' => 131_072, 'warnings' => 0,
         ],
     ];
 }
@@ -310,6 +323,24 @@ it('C3: a URL with a scheme other than http or https, or with no host, is invali
             ->and(array_filter($log->warnings, fn (string $message) => str_contains($message, 'must be an http or https URL')))->toHaveCount(1);
     }
 })->with(urlHostCases());
+
+it('C3: a byte cap of 0, negative, a fraction or text gives 128 KB and one warning', function (string $value) {
+    [$result, $warnings] = runEnvCase('REFRACT_CAPTURE_MAX_BYTES', $value);
+
+    expect($result)->toBe(131_072)
+        ->and($warnings)->toHaveCount(1)
+        ->and($warnings[0])->toContain('refract.capture.max_bytes');
+})->with(['0', '-5', '1.5', '1e3', '128KB']);
+
+it('C1: capture turned on and a byte cap set are used', function () {
+    Env::set([...BASE_ENV, 'OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT' => 'true', 'REFRACT_CAPTURE_MAX_BYTES' => '1000']);
+
+    $log = loadRefract();
+
+    expect(app(Content::class)->toolArguments(['topic' => 'release']))->toBe(['arguments' => '{"topic":"release"}'])
+        ->and(strlen(app(Content::class)->value(str_repeat('a', 200_000))))->toBe(1000)
+        ->and($log->warnings)->toBe([]);
+});
 
 it('C4: OTEL headers are not sent to the REFRACT_OTLP_ENDPOINT', function () {
     Env::set([

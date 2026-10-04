@@ -42,6 +42,7 @@ class GenAiTranslator
         $kind = $this->string($span, 'kind');
         $call = is_array($span['call'] ?? null) ? $span['call'] : [];
         $context = is_array($span['context'] ?? null) ? $span['context'] : [];
+        $content = is_array($span['content'] ?? null) ? $span['content'] : [];
 
         [$name, $spanKind, $attributes] = match ($kind) {
             'invoke_agent' => $this->agent($call),
@@ -68,6 +69,7 @@ class GenAiTranslator
                 [
                     'gen_ai.operation.name' => $kind,
                     ...$attributes,
+                    ...$this->content($kind, $content),
                     ...$this->context($context),
                     'laravel.ai.abandoned' => $abandoned ?: null,
                 ],
@@ -136,6 +138,85 @@ class GenAiTranslator
             'gen_ai.tool.type' => 'function',
             'laravel.ai.tool_invocation_id' => $call['tool_invocation_id'] ?? null,
         ]];
+    }
+
+    /**
+     * Translate the neutral span's content bucket: messages on run and step
+     * spans, arguments and result on tool spans, all as JSON strings.
+     *
+     * @see https://github.com/open-telemetry/semantic-conventions-genai/blob/main/docs/gen-ai/gen-ai-spans.md
+     *
+     * @param  array<array-key, mixed>  $content
+     * @return array<string, mixed>
+     */
+    protected function content(string $kind, array $content): array
+    {
+        if ($kind === 'execute_tool') {
+            return [
+                'gen_ai.tool.call.arguments' => is_string($content['arguments'] ?? null) ? $content['arguments'] : null,
+                'gen_ai.tool.call.result' => is_string($content['result'] ?? null) ? $content['result'] : null,
+            ];
+        }
+
+        return [
+            'gen_ai.input.messages' => $this->messages($content['input'] ?? null),
+            'gen_ai.output.messages' => $this->messages($content['output'] ?? null),
+        ];
+    }
+
+    /**
+     * Encode neutral messages as OTel GenAI messages: a tool call's arguments
+     * become an object when they are valid JSON, and a media reference
+     * becomes a "uri" part (URL), a "file" part (provider file id) or stays
+     * a "media" part (no bytes are ever recorded, so never a "blob" part).
+     */
+    protected function messages(mixed $messages): ?string
+    {
+        if (! is_array($messages)) {
+            return null;
+        }
+
+        $encoded = [];
+
+        foreach ($messages as $message) {
+            if (! is_array($message)) {
+                continue;
+            }
+
+            $parts = is_array($message['parts'] ?? null) ? $message['parts'] : [];
+
+            $encoded[] = [
+                ...$message,
+                'parts' => array_values(array_map($this->part(...), array_filter($parts, is_array(...)))),
+            ];
+        }
+
+        return (string) json_encode($encoded, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE | JSON_PRESERVE_ZERO_FRACTION);
+    }
+
+    /**
+     * @param  array<array-key, mixed>  $part
+     * @return array<array-key, mixed>
+     */
+    protected function part(array $part): array
+    {
+        $type = $part['type'] ?? null;
+
+        if ($type === 'tool_call' && is_string($part['arguments'] ?? null)) {
+            $arguments = json_decode($part['arguments'], true);
+
+            return is_array($arguments) ? [...$part, 'arguments' => $arguments] : $part;
+        }
+
+        if ($type === 'media' && isset($part['uri'])) {
+            return [...$part, 'type' => 'uri'];
+        }
+
+        if ($type === 'media' && isset($part['file_id'])) {
+            return [...$part, 'type' => 'file'];
+        }
+
+        return $part;
     }
 
     /**

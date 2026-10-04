@@ -91,6 +91,29 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Content Capture
+    |--------------------------------------------------------------------------
+    |
+    | When "content" is on, prompts, step messages, outputs, tool arguments
+    | and tool results are recorded. It is off by default. Each value is cut
+    | at "max_bytes" (default 131072, 128 KB) and marked with its original
+    | size. Attachments are recorded as references (media type, size,
+    | source), never their bytes.
+    |
+    | "mask" is the class name of an invokable class, made from the
+    | container, that is given every captured string and returns it masked.
+    | When it throws, the value is replaced by a fixed placeholder.
+    |
+    */
+
+    'capture' => [
+        'content' => env('OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT'),
+        'max_bytes' => env('REFRACT_CAPTURE_MAX_BYTES'),
+        'mask' => null,
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Destinations
     |--------------------------------------------------------------------------
     |

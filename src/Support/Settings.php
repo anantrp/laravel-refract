@@ -147,6 +147,30 @@ class Settings
     }
 
     /**
+     * Get the given configuration value as a whole number above zero.
+     */
+    public static function positiveInt(string $key, int $default): int
+    {
+        $value = config("refract.{$key}");
+
+        if ($value === null || $value === '') {
+            return $default;
+        }
+
+        $number = is_int($value) || (is_string($value) && preg_match('/^\s*\d+\s*$/', $value) === 1)
+            ? filter_var($value, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]])
+            : false;
+
+        if (! is_int($number)) {
+            Diagnostics::warn("config.{$key}", "Refract config [refract.{$key}] must be a whole number above zero. Using the default.");
+
+            return $default;
+        }
+
+        return $number;
+    }
+
+    /**
      * Get the given configuration value as a boolean.
      */
     public static function bool(string $key, bool $default): bool

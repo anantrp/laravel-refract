@@ -248,6 +248,7 @@ it('R6: a stream read again after it stopped is a separate run, not a failover',
 });
 
 it('R7: approval events sit inside the run span and a resumed run records no prompt', function () {
+    $this->environmentConfig['refract.capture.content'] = true;
     $memory = $this->captureNeutralSpans();
 
     TimeAgent::fake([
@@ -290,9 +291,12 @@ it('R7: approval events sit inside the run span and a resumed run records no pro
         }
     }
 
+    // Content capture is on: the first run records its prompt, the resumed run sent none.
     expect($asked['call'])->not->toHaveKey('resumed')
         ->and($resume['call'])->toHaveKey('resumed', true)
-        ->and($resume['content'])->toBe([]);
+        ->and($asked['content']['input'])->toBe([['role' => 'user', 'parts' => [['type' => 'text', 'content' => 'What time is it?']]]])
+        ->and($resume['content'])->not->toHaveKey('input')
+        ->and($resume['content']['output'])->toBe([['role' => 'assistant', 'parts' => [['type' => 'text', 'content' => 'It is 12:00.']]]]);
 });
 
 it('R7: approval events are exported with the tool name, call id and decision', function () {

@@ -2,6 +2,7 @@
 
 namespace Anantrp\Refract;
 
+use Anantrp\Refract\Capture\Content;
 use Anantrp\Refract\Capture\RecordAgentRuns;
 use Anantrp\Refract\Capture\Recorder;
 use Anantrp\Refract\Capture\RunContext;
@@ -35,6 +36,13 @@ class RefractServiceProvider extends ServiceProvider
             typeKey: Settings::string('context.participant.type', 'refract.participant_type'),
             idKey: Settings::string('context.participant.id', 'refract.participant_id'),
             keys: array_keys(Settings::map('context.attributes')),
+        ));
+
+        $this->app->singleton(Content::class, fn (Application $app) => new Content(
+            $app,
+            enabled: Settings::bool('capture.content', false),
+            maxBytes: Settings::positiveInt('capture.max_bytes', Content::MAX_BYTES),
+            maskClass: config('refract.capture.mask'),
         ));
 
         $this->app->singleton(Exporter::class, function (Application $app) {
