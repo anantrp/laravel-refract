@@ -2,10 +2,12 @@
 
 use Anantrp\Refract\Capture\Recorder;
 use Anantrp\Refract\Tests\Support\Otlp;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
 use Laravel\Ai\Approvals\Decision;
 use Laravel\Ai\Approvals\PendingApproval;
 use Laravel\Ai\Contracts\Providers\TextProvider;
+use Laravel\Ai\Events\InvokingTool;
 use Laravel\Ai\Events\ToolApprovalResolved;
 use Laravel\Ai\Exceptions\RateLimitedException;
 use Laravel\Ai\Responses\Data\Meta;
@@ -356,6 +358,31 @@ it('R8: a run that throws has status error with the exception class and the app 
         ->and($run['status'])->toBe(['code' => 2, 'message' => RuntimeException::class])
         ->and($step['status'])->toBe(['code' => 2, 'message' => RuntimeException::class])
         ->and(json_encode(Http::recorded()[0][0]->data()))->not->toContain('secret detail');
+});
+
+it('R8: a run that throws closes its open children as abandoned before it ends', function () {
+    // The app's own listener throws after Refract opened the tool span; no ToolFailed follows.
+    Event::listen(InvokingTool::class, fn () => throw new RuntimeException('The app listener failed.'));
+
+    TimeAgent::fakeTwoSteps();
+
+    expect(fn () => TimeAgent::make()->prompt('What time is it?'))->toThrow(RuntimeException::class, 'The app listener failed.');
+
+    app(Recorder::class)->flush();
+
+    $spans = Otlp::spans();
+    $run = $spans[0];
+    $children = array_slice($spans, 1);
+    $abandoned = array_values(array_filter($children, fn (array $span) => (Otlp::attributes($span)['laravel.ai.abandoned'] ?? false) === true));
+
+    expect($run['name'])->toBe('invoke_agent TimeAgent')
+        ->and($run['status']['code'])->toBe(2)
+        ->and($abandoned)->not->toBeEmpty()
+        ->and(array_column($abandoned, 'name'))->toContain('execute_tool CurrentTime');
+
+    foreach ($children as $child) {
+        expect($child['endTimeUnixNano'] <= $run['endTimeUnixNano'])->toBeTrue();
+    }
 });
 
 it('R9: a run joins the app\'s active OTel trace as a child', function () {

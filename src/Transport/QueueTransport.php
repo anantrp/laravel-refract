@@ -49,6 +49,22 @@ class QueueTransport implements Transport
 
     public function send(array $spans): void
     {
+        try {
+            $this->queue($spans);
+        } catch (Throwable $e) {
+            Diagnostics::warn('queue.error', 'A batch of spans could not be queued ('.$e::class.'). It was exported in this process.');
+
+            $this->inProcess->send($spans);
+        }
+    }
+
+    /**
+     * Queue the batch, or export it in this process when it cannot go through the queue.
+     *
+     * @param  list<array<string, mixed>>  $spans
+     */
+    protected function queue(array $spans): void
+    {
         $connection = config('queue.default');
         $driver = is_string($connection) ? config("queue.connections.{$connection}.driver") : null;
 

@@ -4,6 +4,8 @@ namespace Anantrp\Refract\Capture;
 
 use Anantrp\Refract\Contracts\Transport;
 use Anantrp\Refract\Support\Diagnostics;
+use Anantrp\Refract\Support\Guard;
+use Closure;
 use OpenTelemetry\API\Trace\Span;
 
 /**
@@ -48,6 +50,13 @@ class Recorder
      * @var array<string, int>
      */
     protected array $ended = [];
+
+    /**
+     * The callbacks that reset other capture state at each flush.
+     *
+     * @var list<Closure(): mixed>
+     */
+    protected array $resets = [];
 
     /**
      * Create a new recorder instance.
@@ -205,6 +214,19 @@ class Recorder
      */
     public function abandon(string $key): void
     {
+        if (! isset($this->open[$key])) {
+            return;
+        }
+
+        $this->abandonChildren($key);
+        $this->end($key, 'abandoned');
+    }
+
+    /**
+     * Close every open span under the given open span as abandoned, the deepest first.
+     */
+    public function abandonChildren(string $key): void
+    {
         $span = $this->open[$key] ?? null;
 
         if ($span === null) {
@@ -212,13 +234,13 @@ class Recorder
         }
 
         $ids = [$span['span_id'] => true];
-        $keys = [$key];
+        $keys = [];
 
         do {
             $found = false;
 
             foreach ($this->open as $openKey => $open) {
-                if (! in_array($openKey, $keys, true) && isset($ids[$open['parent_span_id'] ?? ''])) {
+                if ($openKey !== $key && ! in_array($openKey, $keys, true) && isset($ids[$open['parent_span_id'] ?? ''])) {
                     $ids[$open['span_id']] = true;
                     $keys[] = $openKey;
                     $found = true;
@@ -232,26 +254,58 @@ class Recorder
     }
 
     /**
+     * Run the given callback at each flush, to reset capture state kept between flushes.
+     *
+     * @param  Closure(): mixed  $callback
+     */
+    public function flushing(Closure $callback): void
+    {
+        $this->resets[] = $callback;
+    }
+
+    /**
      * Close every open span as abandoned, then hand the finished spans to the transport as one batch.
+     *
+     * The buffer and the state kept between flushes are cleared even when
+     * building the batch fails or a reset throws.
      */
     public function flush(): void
     {
-        foreach (array_keys($this->open) as $key) {
-            $this->end($key, 'abandoned');
+        try {
+            foreach (array_keys($this->open) as $key) {
+                $this->end($key, 'abandoned');
+            }
+
+            $batch = $this->batch();
+        } finally {
+            $this->open = [];
+            $this->finished = [];
+            $this->ended = [];
+
+            foreach ($this->resets as $reset) {
+                Guard::run('capture.reset', 'to reset its state at a flush', $reset);
+            }
         }
 
-        $this->ended = [];
+        if ($batch !== []) {
+            $this->transport->send($batch);
+        }
+    }
 
+    /**
+     * Get the finished spans as neutral spans, with wall clock times.
+     *
+     * @return list<array<string, mixed>>
+     */
+    protected function batch(): array
+    {
         if ($this->finished === []) {
-            return;
+            return [];
         }
-
-        $finished = $this->inheritContext($this->finished);
-        $this->finished = [];
 
         $offset = $this->wall() - $this->monotonic();
 
-        $this->transport->send(array_map(fn (array $span) => [
+        return array_map(fn (array $span) => [
             'v' => self::VERSION,
             'trace_id' => $span['trace_id'],
             'span_id' => $span['span_id'],
@@ -269,7 +323,7 @@ class Recorder
                 'time' => $event['time'] + $offset,
                 'call' => $event['call'],
             ], $span['events']),
-        ], $finished));
+        ], $this->inheritContext($this->finished));
     }
 
     /**

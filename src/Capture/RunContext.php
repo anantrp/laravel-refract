@@ -2,6 +2,7 @@
 
 namespace Anantrp\Refract\Capture;
 
+use Anantrp\Refract\Support\Guard;
 use Illuminate\Database\Eloquent\Relations\Relation;
 use Illuminate\Support\Facades\Context;
 use Laravel\Ai\Contracts\Agent;
@@ -34,15 +35,17 @@ class RunContext
     /**
      * Get the context bucket for a run of the given agent.
      *
+     * When it cannot be read, the run is recorded without it, with one warning.
+     *
      * @return array<string, mixed>
      */
     public function of(Agent $agent): array
     {
-        return array_filter([
+        return Guard::run('capture.context', 'to read the context of a run', fn () => array_filter([
             'session' => $this->session($agent),
             'participant' => $this->participant($agent),
             'values' => $this->values(),
-        ], fn (mixed $value) => $value !== null && $value !== []);
+        ], fn (mixed $value) => $value !== null && $value !== []), []);
     }
 
     /**

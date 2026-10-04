@@ -17,7 +17,8 @@ use Throwable;
  * A 2xx is ok. A network error, 408, 429 or 5xx is retryable: the
  * transport decides whether to try again. Every other status is rejected
  * and warned about here, with the status and the start of the body. Any
- * other error from the HTTP client is rejected with one warning.
+ * other error, from the HTTP client or from translating and encoding the
+ * spans, is rejected with one warning.
  */
 class HttpExporter implements Exporter
 {
@@ -44,14 +45,14 @@ class HttpExporter implements Exporter
 
     public function export(array $spans): ExportResult
     {
-        $translated = $this->platform->prepare(array_map($this->translator->translate(...), $spans));
-
-        $body = $this->encoder->encode($translated, $this->platform->resource([
-            'service.name' => $this->serviceName,
-            'deployment.environment.name' => $this->environment,
-        ]));
-
         try {
+            $translated = $this->platform->prepare(array_map($this->translator->translate(...), $spans));
+
+            $body = $this->encoder->encode($translated, $this->platform->resource([
+                'service.name' => $this->serviceName,
+                'deployment.environment.name' => $this->environment,
+            ]));
+
             $response = Http::withHeaders($this->platform->headers())
                 ->timeout(self::TIMEOUT)
                 ->withBody($body, 'application/json')

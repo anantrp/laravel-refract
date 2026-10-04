@@ -2,6 +2,8 @@
 
 namespace Anantrp\Refract\Capture;
 
+use Anantrp\Refract\Support\Guard;
+use Closure;
 use Illuminate\Console\Events\CommandFinished;
 use Illuminate\Console\Events\CommandStarting;
 use Illuminate\Contracts\Events\Dispatcher;
@@ -41,11 +43,21 @@ class FlushPoints
         // boot-time callback adds the flush as the last terminating callback,
         // after those added during the request (afterResponse jobs, the app's
         // own callbacks). Application::terminate() re-reads the callback count.
-        $this->app->terminating(fn () => $this->app->terminating($this->flush(...)));
+        $this->app->terminating(fn () => $this->guard(fn () => $this->app->terminating($this->flush(...))));
 
-        $events->listen(JobAttempted::class, $this->jobAttempted(...));
-        $events->listen(CommandStarting::class, $this->commandStarting(...));
-        $events->listen(CommandFinished::class, $this->commandFinished(...));
+        $events->listen(JobAttempted::class, fn (JobAttempted $event) => $this->guard(fn () => $this->jobAttempted($event)));
+        $events->listen(CommandStarting::class, fn (CommandStarting $event) => $this->guard(fn () => $this->commandStarting($event)));
+        $events->listen(CommandFinished::class, fn (CommandFinished $event) => $this->guard(fn () => $this->commandFinished($event)));
+    }
+
+    /**
+     * Run the given hook so that a failure in it never reaches the app.
+     *
+     * @param  Closure(): mixed  $hook
+     */
+    protected function guard(Closure $hook): void
+    {
+        Guard::run('capture.flush', 'to flush spans', $hook);
     }
 
     /**
@@ -76,10 +88,10 @@ class FlushPoints
     }
 
     /**
-     * Hand the buffer to the transport.
+     * Hand the buffer to the transport. The buffer is cleared even when the flush fails.
      */
     public function flush(): void
     {
-        $this->recorder->flush();
+        $this->guard($this->recorder->flush(...));
     }
 }

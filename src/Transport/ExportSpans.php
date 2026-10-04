@@ -5,6 +5,7 @@ namespace Anantrp\Refract\Transport;
 use Anantrp\Refract\Contracts\Exporter;
 use Anantrp\Refract\Contracts\ExportResult;
 use Anantrp\Refract\Support\Diagnostics;
+use Illuminate\Contracts\Container\Container;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Queue\InteractsWithQueue;
 use Throwable;
@@ -19,7 +20,9 @@ use Throwable;
  * later, 3 tries in all. The job never throws for it: after the last try
  * it deletes itself and warns once from failed(), so it is not reported
  * to the exception handler, not stored as a failed job and fires no
- * JobFailed event. Error trackers never see it.
+ * JobFailed event. Error trackers never see it. Nothing else in the job
+ * throws either: a failure to decode or export drops the batch with one
+ * warning.
  */
 class ExportSpans implements ShouldQueue
 {
@@ -106,7 +109,19 @@ class ExportSpans implements ShouldQueue
     /**
      * Export the batch, and try again later when the destination could not take it now.
      */
-    public function handle(Exporter $exporter): void
+    public function handle(Container $container): void
+    {
+        try {
+            $this->export($container);
+        } catch (Throwable $e) {
+            Diagnostics::warn('export.error', 'Spans could not be exported ('.$e::class.'). The batch was dropped.');
+        }
+    }
+
+    /**
+     * Export the batch with the exporter made from the container, so that a failure to make it is guarded too.
+     */
+    protected function export(Container $container): void
     {
         $spans = $this->spans();
 
@@ -116,7 +131,7 @@ class ExportSpans implements ShouldQueue
             return;
         }
 
-        if ($exporter->export($spans) !== ExportResult::Retryable) {
+        if ($container->make(Exporter::class)->export($spans) !== ExportResult::Retryable) {
             return;
         }
 

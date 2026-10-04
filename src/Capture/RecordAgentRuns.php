@@ -2,6 +2,8 @@
 
 namespace Anantrp\Refract\Capture;
 
+use Anantrp\Refract\Support\Guard;
+use Closure;
 use Illuminate\Contracts\Events\Dispatcher;
 use Laravel\Ai\Contracts\Agent;
 use Laravel\Ai\Contracts\CanActAsTool;
@@ -28,7 +30,7 @@ use Laravel\Ai\Tools\ToolNameResolver;
 class RecordAgentRuns
 {
     /**
-     * The invocation ids that failed over and are waiting for their next attempt.
+     * The invocation ids that failed over and are waiting for their next attempt. Cleared at each flush.
      *
      * @var array<string, true>
      */
@@ -44,18 +46,32 @@ class RecordAgentRuns
      */
     public function subscribe(Dispatcher $events): void
     {
-        $events->listen([PromptingAgent::class, StreamingAgent::class], $this->promptingAgent(...));
-        $events->listen([AgentPrompted::class, AgentStreamed::class], $this->agentPrompted(...));
-        $events->listen(AgentFailed::class, $this->agentFailed(...));
-        $events->listen(AgentFailedOver::class, $this->agentFailedOver(...));
-        $events->listen(StartingStep::class, $this->startingStep(...));
-        $events->listen(StepCompleted::class, $this->stepCompleted(...));
-        $events->listen(StepFailed::class, $this->stepFailed(...));
-        $events->listen(InvokingTool::class, $this->invokingTool(...));
-        $events->listen(ToolInvoked::class, $this->toolInvoked(...));
-        $events->listen(ToolFailed::class, $this->toolFailed(...));
-        $events->listen(ToolApprovalRequested::class, $this->toolApprovalRequested(...));
-        $events->listen(ToolApprovalResolved::class, $this->toolApprovalResolved(...));
+        $events->listen([PromptingAgent::class, StreamingAgent::class], $this->guarded($this->promptingAgent(...)));
+        $events->listen([AgentPrompted::class, AgentStreamed::class], $this->guarded($this->agentPrompted(...)));
+        $events->listen(AgentFailed::class, $this->guarded($this->agentFailed(...)));
+        $events->listen(AgentFailedOver::class, $this->guarded($this->agentFailedOver(...)));
+        $events->listen(StartingStep::class, $this->guarded($this->startingStep(...)));
+        $events->listen(StepCompleted::class, $this->guarded($this->stepCompleted(...)));
+        $events->listen(StepFailed::class, $this->guarded($this->stepFailed(...)));
+        $events->listen(InvokingTool::class, $this->guarded($this->invokingTool(...)));
+        $events->listen(ToolInvoked::class, $this->guarded($this->toolInvoked(...)));
+        $events->listen(ToolFailed::class, $this->guarded($this->toolFailed(...)));
+        $events->listen(ToolApprovalRequested::class, $this->guarded($this->toolApprovalRequested(...)));
+        $events->listen(ToolApprovalResolved::class, $this->guarded($this->toolApprovalResolved(...)));
+
+        $this->recorder->flushing(fn () => $this->failingOver = []);
+    }
+
+    /**
+     * Wrap the given listener so that a failure in it never reaches the app.
+     *
+     * @return Closure(object): void
+     */
+    protected function guarded(Closure $listener): Closure
+    {
+        return function (object $event) use ($listener): void {
+            Guard::run('capture.listener', 'to record an agent event', fn () => $listener($event));
+        };
     }
 
     /**
@@ -117,8 +133,12 @@ class RecordAgentRuns
         );
     }
 
+    /**
+     * End the run span as failed, after closing its open children as abandoned.
+     */
     public function agentFailed(AgentFailed $event): void
     {
+        $this->recorder->abandonChildren($this->runKey($event->invocationId));
         $this->recorder->end($this->runKey($event->invocationId), 'error', $event->exception::class);
     }
 
