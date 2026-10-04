@@ -116,6 +116,18 @@ class Recorder
     }
 
     /**
+     * Merge the given call data into an open span.
+     *
+     * @param  array<string, mixed>  $call
+     */
+    public function update(string $key, array $call): void
+    {
+        if (isset($this->open[$key])) {
+            $this->open[$key]['call'] = [...$this->open[$key]['call'], ...$call];
+        }
+    }
+
+    /**
      * End the given span, merging in the call and context data known only at its end.
      *
      * @param  array<string, mixed>  $call

@@ -110,7 +110,7 @@ it('R2: a sub-agent run called from a tool nests under that tool span', function
         ->and($subRun['endTimeUnixNano'] <= $tool['endTimeUnixNano'])->toBeTrue();
 });
 
-it('R3: provider failover gives one run span with the failover as an event', function () {
+it('R3: provider failover gives one run span showing the provider that answered, with the failover as an event', function () {
     config(['ai.providers.anthropic' => ['driver' => 'anthropic', 'key' => 'test']]);
 
     TimeAgent::fake(fn (string $prompt, $attachments, TextProvider $provider) => $provider->name() === 'openai'
@@ -136,7 +136,11 @@ it('R3: provider failover gives one run span with the failover as an event', fun
         ->and($answered['status']['code'])->toBe(1)
         ->and($failed['parentSpanId'])->toBe($run['spanId'])
         ->and($answered['parentSpanId'])->toBe($run['spanId'])
-        ->and($run['events'])->toHaveCount(1);
+        ->and($run['events'])->toHaveCount(1)
+        ->and(Otlp::attributes($run))->toMatchArray([
+            'gen_ai.provider.name' => 'anthropic',
+            'gen_ai.request.model' => 'claude-b',
+        ]);
 
     $event = $run['events'][0];
 

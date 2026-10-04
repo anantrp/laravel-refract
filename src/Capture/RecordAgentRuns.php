@@ -64,7 +64,8 @@ class RecordAgentRuns
      * A sub-agent run takes the context of the run that called it, at
      * flush, since a new conversation has its id only when that run ends.
      *
-     * The attempt after a failover keeps the run span it failed over from.
+     * The attempt after a failover keeps the run span it failed over from,
+     * and the span shows the provider and model of that attempt.
      * A run resumed from approval decisions sent no prompt text, so it is
      * marked as resumed and no prompt is ever recorded for it.
      */
@@ -74,6 +75,11 @@ class RecordAgentRuns
             unset($this->failingOver[$event->invocationId]);
 
             if ($this->recorder->isOpen($this->runKey($event->invocationId))) {
+                $this->recorder->update($this->runKey($event->invocationId), [
+                    'provider' => $this->providerName($event->prompt->provider),
+                    'model' => $event->prompt->model,
+                ]);
+
                 return;
             }
         }
