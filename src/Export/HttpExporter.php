@@ -98,18 +98,27 @@ class HttpExporter implements Exporter
     }
 
     /**
-     * Remove header lines ("Name: value") and credentials (Authorization values,
-     * Bearer and Basic tokens) that a destination may echo in its body.
+     * Mask the values of credential-like keys (names holding key, token,
+     * secret, auth, password, credential or cookie) and Bearer and Basic
+     * tokens that a destination may echo in its body. Other text, such as
+     * a plain error line, is kept.
      */
     protected function withoutCredentials(string $body): string
     {
+        $key = '[\w.-]*(?:key|token|secret|auth|password|passwd|credential|cookie)[\w.-]*';
+
         return preg_replace([
-            '/^[ \t]*[A-Za-z0-9-]+[ \t]*:[^\r\n]*$/m',
-            '/(["\']?(?:proxy-)?authorization["\']?\s*[:=]\s*)(["\']?)[^"\'\r\n,}]*\2/i',
+            // JSON: "api_key": "value"
+            '/("'.$key.'"\s*:\s*)(?:"(?:[^"\\\\]|\\\\.)*"|[^,}\]\s]+)/i',
+            // Header line: X-Api-Key: value
+            '/^([ \t]*'.$key.'[ \t]*:)[^\r\n]*$/im',
+            // Query or form: api_key=value
+            '/(\b'.$key.'\s*=)[^&\s"\',;]*/i',
             '/\b(Bearer|Basic)\s+[A-Za-z0-9._~+\/=-]+/i',
         ], [
-            '[header removed]',
-            '$1$2[removed]$2',
+            '$1"[removed]"',
+            '$1 [removed]',
+            '$1[removed]',
             '$1 [removed]',
         ], $body) ?? '';
     }

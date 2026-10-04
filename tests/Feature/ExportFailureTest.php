@@ -347,7 +347,26 @@ it('E2: the body excerpt in the warning leaves out header lines and credentials 
         ->and($log->warnings[0])->toContain('401')
         ->and($log->warnings[0])->toContain('bad key');
 
-    foreach (['cGstdGVzdDpzay10ZXN0', 'SEVBREVSLVNFQ1JFVA', 'KEY-SECRET', 'TOKEN-SECRET', 'QkFTSUMtU0VDUkVU', 'X-Api-Key'] as $secret) {
+    foreach (['cGstdGVzdDpzay10ZXN0', 'SEVBREVSLVNFQ1JFVA', 'KEY-SECRET', 'TOKEN-SECRET', 'QkFTSUMtU0VDUkVU'] as $secret) {
+        expect($log->warnings[0])->not->toContain($secret);
+    }
+});
+
+it('E2: the body excerpt masks values by key name and keeps plain error lines', function () {
+    $log = bootExport('sync');
+    fakeDestination(400, implode("\n", [
+        'Error: invalid project',
+        '{"x-api-key":"K1-SECRET","secret_token": "K2-SECRET","Authorization":"Bearer a,K3-SECRET"}',
+        'api_key=K4-SECRET&password=K5-SECRET',
+        '{"access_token": 6543210987}',
+    ]));
+
+    sendSpan();
+
+    expect($log->warnings)->toHaveCount(1)
+        ->and($log->warnings[0])->toContain('Error: invalid project');
+
+    foreach (['K1-SECRET', 'K2-SECRET', 'K3-SECRET', 'K4-SECRET', 'K5-SECRET', '6543210987'] as $secret) {
         expect($log->warnings[0])->not->toContain($secret);
     }
 });
