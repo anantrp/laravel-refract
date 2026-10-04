@@ -544,3 +544,51 @@ it('L16: span times stay correct in a worker that runs for days, through the que
         ->and($secondSpan['startTimeUnixNano'])->toBe((string) ($secondWall - 2 * $second))
         ->and($secondSpan['endTimeUnixNano'])->toBe((string) ($secondWall - $second));
 });
+
+it('L11: a long command that makes 2,000 spans keeps 1,000, logs one warning, and memory stays flat', function () {
+    $transport = $this->captureNeutralSpans();
+    Diagnostics::reset();
+    Log::swap($log = new WarningLog);
+
+    $recorder = app(Recorder::class);
+    $call = ['agent' => 'TimeAgent', 'padding' => str_repeat('x', 1_024)];
+
+    $record = function (int $from, int $to) use ($recorder, $call) {
+        for ($i = $from; $i < $to; $i++) {
+            $recorder->start("run:{$i}", 'invoke_agent', null, [...$call, 'run' => $i]);
+            $recorder->event("run:{$i}", 'failover', $call);
+            $recorder->end("run:{$i}");
+        }
+    };
+
+    $record(0, 1_000);
+    $atCap = memory_get_usage();
+
+    $record(1_000, 2_000);
+    $grown = memory_get_usage() - $atCap;
+
+    $recorder->flush();
+
+    expect($transport->spans)->toHaveCount(1_000)
+        ->and(array_column(array_column($transport->spans, 'call'), 'run'))->toBe(range(0, 999))
+        ->and($log->warnings)->toHaveCount(1)
+        ->and($log->warnings[0])->toContain('1000 spans')
+        // 1,000 more spans of over 2 KB each would add over 2 MB.
+        ->and($grown)->toBeLessThan(100_000);
+});
+
+it('L11: after a flush the buffer takes spans again', function () {
+    $transport = $this->captureNeutralSpans();
+    $recorder = app(Recorder::class);
+
+    for ($i = 0; $i < 1_001; $i++) {
+        $recorder->start("run:{$i}", 'invoke_agent', null, []);
+        $recorder->end("run:{$i}");
+    }
+
+    $recorder->flush();
+    runTimeAgent();
+    $recorder->flush();
+
+    expect($transport->spans)->toHaveCount(1_004);
+});

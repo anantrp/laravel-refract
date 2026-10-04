@@ -3,6 +3,7 @@
 namespace Anantrp\Refract\Capture;
 
 use Anantrp\Refract\Contracts\Transport;
+use Anantrp\Refract\Support\Diagnostics;
 use OpenTelemetry\API\Trace\Span;
 
 /**
@@ -21,6 +22,11 @@ class Recorder
      * The version of the neutral span format.
      */
     public const VERSION = 1;
+
+    /**
+     * The most spans the buffer holds between two flushes.
+     */
+    public const MAX_SPANS = 1_000;
 
     /**
      * The spans started but not ended yet, keyed by their capture key.
@@ -53,7 +59,7 @@ class Recorder
      *
      * A span still open under the same key is closed as abandoned first.
      * A span started with a context source takes that span's context at
-     * flush, in place of its own.
+     * flush, in place of its own. A full buffer drops the span.
      *
      * @param  array<string, mixed>  $call
      * @param  array<string, mixed>  $context
@@ -64,6 +70,12 @@ class Recorder
     {
         if (isset($this->open[$key])) {
             $this->abandon($key);
+        }
+
+        if (count($this->open) + count($this->finished) >= self::MAX_SPANS) {
+            Diagnostics::warn('buffer.full', 'The buffer holds '.self::MAX_SPANS.' spans, the most it can between two flushes. New spans are dropped until the next flush.');
+
+            return;
         }
 
         $parent = $parentKey === null ? null : ($this->open[$parentKey] ?? null);
