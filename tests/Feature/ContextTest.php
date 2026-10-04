@@ -390,3 +390,43 @@ it('X12: a Context key mapped to a numeric attribute name is sent with the name 
         ->and(Http::recorded()->first()[0]->body())->toContain('{"key":"123","value":{"stringValue":"acme"}}')
         ->not->toContain('"key":123');
 });
+
+it('X13: a Context key mapped to a langfuse.* attribute is not sent to Langfuse; its own attributes still are', function () {
+    $this->refreshApplicationWithConfig([
+        ...$this->environmentConfig,
+        'refract.context.attributes' => [
+            'level' => 'langfuse.observation.level',
+            'status' => 'langfuse.observation.status_message',
+            'trace_name' => 'langfuse.trace.name',
+            'tenant' => 'app.tenant',
+        ],
+    ]);
+
+    Http::fake();
+
+    Context::add('level', 'DEBUG');
+    Context::add('status', 'fine');
+    Context::add('trace_name', 'not-from-context');
+    Context::add('tenant', 'acme');
+
+    // A finished run, then a stream stopped early, whose spans are abandoned.
+    TimeAgent::fakeTwoSteps();
+    TimeAgent::make()->prompt('What time is it?');
+
+    TimeAgent::fakeTwoSteps();
+
+    foreach (TimeAgent::make()->stream('What time is it?') as $event) {
+        break;
+    }
+
+    [$finished, $abandoned] = runAttributes();
+
+    expect(array_filter(array_keys($finished), fn (string $name) => str_starts_with($name, 'langfuse.')))->toBe([])
+        ->and($finished)->toHaveKey('app.tenant', 'acme')
+        ->and($abandoned)->toMatchArray([
+            'langfuse.observation.level' => 'WARNING',
+            'langfuse.observation.status_message' => 'abandoned',
+            'app.tenant' => 'acme',
+        ])
+        ->and($abandoned)->not->toHaveKey('langfuse.trace.name');
+});

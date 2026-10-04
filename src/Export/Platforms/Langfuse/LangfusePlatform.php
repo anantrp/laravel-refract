@@ -110,7 +110,8 @@ class LangfusePlatform implements Platform
 
     /**
      * Move siblings that start in the same millisecond to distinct milliseconds,
-     * mark abandoned spans and set user.id on spans with a user participant.
+     * drop langfuse.* attributes set by a Context mapping, mark abandoned
+     * spans and set user.id on spans with a user participant.
      *
      * Langfuse stores times in milliseconds and orders tied siblings at
      * random. Each trace is walked in start order, and every move shifts all
@@ -130,7 +131,26 @@ class LangfusePlatform implements Platform
             $spans = $this->spread($spans, $indexes);
         }
 
-        return array_map(fn (array $span) => $this->setUser($this->markAbandoned($span)), $spans);
+        return array_map(fn (array $span) => $this->setUser($this->markAbandoned($this->withoutOwnAttributes($span))), $spans);
+    }
+
+    /**
+     * Drop the langfuse.* attributes a span arrives with. Only a Context
+     * mapping can set them, since the translator never does; the ones
+     * Langfuse reads are set here alone.
+     *
+     * @param  TranslatedSpan  $span
+     * @return TranslatedSpan
+     */
+    protected function withoutOwnAttributes(array $span): array
+    {
+        $span['attributes'] = array_filter(
+            $span['attributes'],
+            fn (int|string $name) => ! str_starts_with((string) $name, 'langfuse.'),
+            ARRAY_FILTER_USE_KEY,
+        );
+
+        return $span;
     }
 
     /**
