@@ -237,7 +237,7 @@ class Recorder
         $finished = $this->inheritContext($this->finished);
         $this->finished = [];
 
-        $offset = (int) round(microtime(true) * 1_000_000) * 1_000 - $this->monotonic();
+        $offset = $this->wall() - $this->monotonic();
 
         $this->transport->send(array_map(fn (array $span) => [
             'v' => self::VERSION,
@@ -293,6 +293,14 @@ class Recorder
         }
 
         return $spans;
+    }
+
+    /**
+     * Get the wall clock in nanoseconds since the Unix epoch, read at each flush.
+     */
+    protected function wall(): int
+    {
+        return (int) round(microtime(true) * 1_000_000) * 1_000;
     }
 
     /**

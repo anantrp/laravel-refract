@@ -1,16 +1,24 @@
 <?php
 
 use Anantrp\Refract\Capture\Recorder;
+use Anantrp\Refract\Contracts\Transport;
+use Anantrp\Refract\Support\Diagnostics;
+use Anantrp\Refract\Tests\Support\ClockRecorder;
 use Anantrp\Refract\Tests\Support\Env;
 use Anantrp\Refract\Tests\Support\Jobs\RunAgentThenFail;
 use Anantrp\Refract\Tests\Support\Otlp;
+use Anantrp\Refract\Tests\Support\WarningLog;
+use Anantrp\Refract\Transport\ExportSpans;
 use Illuminate\Contracts\Console\Kernel as ConsoleKernel;
 use Illuminate\Contracts\Http\Kernel;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Http\Request;
 use Illuminate\Queue\WorkerOptions;
 use Illuminate\Support\Facades\Artisan;
+use Illuminate\Support\Facades\Context;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Facades\Schema;
@@ -287,4 +295,252 @@ it('L10: a command called from inside a command does not flush, open spans stay 
 
     expect($spans)->toHaveCount(4)
         ->and(array_map(fn (array $span) => Otlp::attributes($span)['laravel.ai.abandoned'] ?? false, $spans))->not->toContain(true);
+});
+
+/**
+ * Use a queue connection with the given driver as the app's default.
+ */
+function useQueueDriver(string $driver): void
+{
+    config(['queue.default' => 'refract-test', 'queue.connections.refract-test' => ['driver' => $driver]]);
+}
+
+/**
+ * Get the exported attributes of the run span, read from every request sent so far.
+ *
+ * @return array<string, mixed>
+ */
+function exportedRun(): array
+{
+    $runs = array_values(array_filter(Otlp::spans(), fn (array $span) => str_starts_with($span['name'], 'invoke_agent')));
+
+    expect($runs)->toHaveCount(1);
+
+    return $runs[0];
+}
+
+it('L2: a web request with transport queue dispatches one job after the response', function (string $driver) {
+    bootWeb(lifecycleConfig('queue'));
+    Http::fake();
+    Queue::fake();
+    useQueueDriver($driver);
+
+    Route::get('/agent', function () {
+        runTimeAgent();
+
+        return 'ok';
+    });
+
+    $terminate = handleRequest('/agent');
+
+    Queue::assertNothingPushed();
+
+    $terminate();
+
+    Queue::assertPushed(ExportSpans::class, 1);
+    Http::assertNothingSent();
+})->with(['redis', 'database', 'sqs', 'beanstalkd']);
+
+it('L2: the job a web request dispatches on the database queue exports the batch in the worker', function () {
+    bootWeb(lifecycleConfig('queue'));
+    Http::fake();
+    useDatabaseQueue();
+
+    Route::get('/agent', function () {
+        runTimeAgent();
+
+        return 'ok';
+    });
+
+    $terminate = handleRequest('/agent');
+
+    expect(DB::table('jobs')->count())->toBe(0);
+
+    $terminate();
+
+    expect(DB::table('jobs')->count())->toBe(1);
+    Http::assertNothingSent();
+
+    workNextJob();
+
+    Http::assertSentCount(1);
+    expect(batches()[0])->toHaveCount(4)
+        ->and(DB::table('jobs')->count())->toBe(0);
+});
+
+it('L3: transport queue on the sync driver exports with sync at the flush point, no job', function () {
+    $this->refreshApplicationWithConfig(lifecycleConfig('queue'));
+    Http::fake();
+    Queue::fake();
+    useQueueDriver('sync');
+
+    runTimeAgent();
+
+    Http::assertNothingSent();
+
+    app(Recorder::class)->flush();
+
+    Queue::assertNothingPushed();
+    Http::assertSentCount(1);
+    expect(batches()[0])->toHaveCount(4);
+});
+
+it('L4: transport queue on the deferred or background driver exports with sync, no span lost', function (string $driver) {
+    $this->refreshApplicationWithConfig(lifecycleConfig('queue'));
+    Http::fake();
+    Queue::fake();
+    useQueueDriver($driver);
+
+    runTimeAgent();
+    app(Recorder::class)->flush();
+
+    Queue::assertNothingPushed();
+    Http::assertSentCount(1);
+    expect(batches()[0])->toHaveCount(4);
+})->with(['deferred', 'background']);
+
+it('L5: transport queue on the failover driver or an unknown custom driver exports with sync', function (string $driver) {
+    $this->refreshApplicationWithConfig(lifecycleConfig('queue'));
+    Http::fake();
+    Queue::fake();
+    useQueueDriver($driver);
+
+    runTimeAgent();
+    app(Recorder::class)->flush();
+
+    Queue::assertNothingPushed();
+    Http::assertSentCount(1);
+    expect(batches()[0])->toHaveCount(4);
+})->with(['failover', 'my-custom-driver']);
+
+it('L13: a batch too big for the queue is exported with sync after the response, with one warning', function () {
+    bootWeb(lifecycleConfig('queue', [
+        'refract.capture.content' => true,
+        'refract.capture.max_bytes' => 2_000_000,
+    ]));
+    Http::fake();
+    Queue::fake();
+    useQueueDriver('redis');
+    Diagnostics::reset();
+    Log::swap($log = new WarningLog);
+
+    Route::get('/agent', function () {
+        TimeAgent::fakeTwoSteps();
+
+        // Random text does not compress much: well over 256 KB gzipped.
+        TimeAgent::make()->prompt(bin2hex(random_bytes(200_000)));
+
+        return 'ok';
+    });
+
+    $terminate = handleRequest('/agent');
+
+    Http::assertNothingSent();
+
+    $terminate();
+
+    Queue::assertNothingPushed();
+    Http::assertSentCount(1);
+    expect(batches()[0])->toHaveCount(4)
+        ->and($log->warnings)->toHaveCount(1)
+        ->and($log->warnings[0])->toContain('too big for the queue');
+});
+
+it('L13: a big batch that compresses under the limit still goes through the queue', function () {
+    $this->refreshApplicationWithConfig(lifecycleConfig('queue', [
+        'refract.capture.content' => true,
+        'refract.capture.max_bytes' => 2_000_000,
+    ]));
+    Http::fake();
+    Queue::fake();
+    useQueueDriver('redis');
+
+    TimeAgent::fakeTwoSteps();
+    TimeAgent::make()->prompt(str_repeat('All work and no play. ', 30_000));
+    app(Recorder::class)->flush();
+
+    Queue::assertPushed(ExportSpans::class, 1);
+    Http::assertNothingSent();
+});
+
+it('L14: captured text with invalid UTF-8 goes through the queue with the bytes as U+FFFD, batch not lost', function () {
+    $this->refreshApplicationWithConfig(lifecycleConfig('queue', ['refract.capture.content' => true]));
+    Http::fake();
+    useDatabaseQueue();
+
+    TimeAgent::fakeTwoSteps();
+    TimeAgent::make()->prompt("caf\xE9 au lait");
+    app(Recorder::class)->flush();
+
+    expect(DB::table('jobs')->count())->toBe(1);
+
+    workNextJob();
+
+    Http::assertSentCount(1);
+    expect(batches()[0])->toHaveCount(4)
+        ->and(Otlp::attributes(exportedRun())['gen_ai.input.messages'])->toContain("caf\u{FFFD} au lait");
+});
+
+it('L15: floats 1.0 and 0.0 are exported as doubles through the queue, same as sync', function (string $transport) {
+    $this->refreshApplicationWithConfig(lifecycleConfig($transport, [
+        'refract.context.attributes' => ['score' => 'app.score', 'zero' => 'app.zero'],
+    ]));
+    Http::fake();
+    useDatabaseQueue();
+
+    Context::add('score', 1.0);
+    Context::add('zero', 0.0);
+
+    runTimeAgent();
+    app(Recorder::class)->flush();
+
+    if ($transport === 'queue') {
+        Http::assertNothingSent();
+
+        workNextJob();
+    }
+
+    $values = array_column(exportedRun()['attributes'], 'value', 'key');
+
+    expect($values['app.score'])->toBe(['doubleValue' => 1.0])
+        ->and($values['app.zero'])->toBe(['doubleValue' => 0.0]);
+})->with(['sync', 'queue']);
+
+it('L16: span times stay correct in a worker that runs for days, through the queue', function () {
+    $this->refreshApplicationWithConfig(lifecycleConfig('queue'));
+    Http::fake();
+    useDatabaseQueue();
+
+    $second = 1_000_000_000;
+    $day = 86_400 * $second;
+
+    $recorder = new ClockRecorder(app(Transport::class));
+
+    // Three days after the worker started.
+    $recorder->monotonicNow = 3 * $day;
+    $recorder->start('first', 'invoke_agent', null, ['agent' => 'TimeAgent']);
+    $recorder->monotonicNow += $second;
+    $recorder->end('first');
+    $recorder->monotonicNow += $second;
+    $recorder->wallNow = $firstWall = 1_790_000_000 * $second;
+    $recorder->flush();
+
+    // Two days later. The wall clock was set 7 s ahead in between (NTP).
+    $recorder->monotonicNow += 2 * $day;
+    $recorder->start('second', 'invoke_agent', null, ['agent' => 'TimeAgent']);
+    $recorder->monotonicNow += $second;
+    $recorder->end('second');
+    $recorder->monotonicNow += $second;
+    $recorder->wallNow = $secondWall = $firstWall + 2 * $day + 2 * $second + 7 * $second;
+    $recorder->flush();
+
+    workNextJob();
+    workNextJob();
+
+    [[$firstSpan], [$secondSpan]] = batches();
+
+    expect($firstSpan['startTimeUnixNano'])->toBe((string) ($firstWall - 2 * $second))
+        ->and($firstSpan['endTimeUnixNano'])->toBe((string) ($firstWall - $second))
+        ->and($secondSpan['startTimeUnixNano'])->toBe((string) ($secondWall - 2 * $second))
+        ->and($secondSpan['endTimeUnixNano'])->toBe((string) ($secondWall - $second));
 });

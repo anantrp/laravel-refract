@@ -18,6 +18,7 @@ use Anantrp\Refract\Export\Platforms\Langfuse\LangfusePlatform;
 use Anantrp\Refract\Export\Platforms\Otlp\OtlpPlatform;
 use Anantrp\Refract\Support\Settings;
 use Anantrp\Refract\Transport\NullTransport;
+use Anantrp\Refract\Transport\QueueTransport;
 use Anantrp\Refract\Transport\SyncTransport;
 use Illuminate\Contracts\Events\Dispatcher;
 use Illuminate\Contracts\Foundation\Application;
@@ -60,6 +61,7 @@ class RefractServiceProvider extends ServiceProvider
 
         $this->app->singleton(Transport::class, fn (Application $app) => match (Settings::choice('transport', ['sync', 'queue', 'null'], 'sync')) {
             'sync' => new SyncTransport($app->make(Exporter::class)),
+            'queue' => new QueueTransport($app, $app->make(Exporter::class)),
             default => new NullTransport,
         });
     }

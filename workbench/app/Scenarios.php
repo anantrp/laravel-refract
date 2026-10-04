@@ -28,12 +28,25 @@ class Scenarios
     }
 
     /**
+     * Get the Refract config the row's scenario runs with in a web request, set before Refract boots.
+     *
+     * @return array<string, mixed>
+     */
+    public function config(string $row): array
+    {
+        return match ($row) {
+            'L2' => ['refract.transport' => 'queue'],
+            default => [],
+        };
+    }
+
+    /**
      * Run a matrix row inside a fresh active OTel span and return its trace id.
      */
     public function run(string $row): string
     {
         $runner = match ($row) {
-            'R1', 'R11', 'L1', 'L10' => $this->r1(...),
+            'R1', 'R11', 'L1', 'L2', 'L10' => $this->r1(...),
             'R2' => $this->r2(...),
             'R4' => $this->r4(...),
             'R5' => $this->r5(...),
