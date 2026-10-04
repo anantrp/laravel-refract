@@ -3,6 +3,7 @@
 namespace Anantrp\Refract;
 
 use Anantrp\Refract\Capture\Content;
+use Anantrp\Refract\Capture\FlushPoints;
 use Anantrp\Refract\Capture\RecordAgentRuns;
 use Anantrp\Refract\Capture\Recorder;
 use Anantrp\Refract\Capture\RunContext;
@@ -18,7 +19,6 @@ use Anantrp\Refract\Export\Platforms\Otlp\OtlpPlatform;
 use Anantrp\Refract\Support\Settings;
 use Anantrp\Refract\Transport\NullTransport;
 use Anantrp\Refract\Transport\SyncTransport;
-use Illuminate\Console\Events\CommandFinished;
 use Illuminate\Contracts\Events\Dispatcher;
 use Illuminate\Contracts\Foundation\Application;
 use Illuminate\Support\ServiceProvider;
@@ -31,6 +31,7 @@ class RefractServiceProvider extends ServiceProvider
 
         $this->app->singleton(Recorder::class);
         $this->app->singleton(RecordAgentRuns::class);
+        $this->app->singleton(FlushPoints::class);
 
         $this->app->singleton(RunContext::class, fn () => new RunContext(
             typeKey: Settings::string('context.participant.type', 'refract.participant_type'),
@@ -98,6 +99,6 @@ class RefractServiceProvider extends ServiceProvider
 
         $this->app->make(RecordAgentRuns::class)->subscribe($events);
 
-        $events->listen(CommandFinished::class, fn () => $this->app->make(Recorder::class)->flush());
+        $this->app->make(FlushPoints::class)->register($events);
     }
 }

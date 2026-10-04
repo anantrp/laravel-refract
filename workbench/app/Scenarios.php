@@ -9,6 +9,7 @@ use OpenTelemetry\API\Trace\TraceFlags;
 use Workbench\App\Ai\Agents\ChatAgent;
 use Workbench\App\Ai\Agents\SupervisorAgent;
 use Workbench\App\Ai\Agents\TimeAgent;
+use Workbench\App\Jobs\RunAgent;
 use Workbench\App\Models\User;
 
 class Scenarios
@@ -32,12 +33,13 @@ class Scenarios
     public function run(string $row): string
     {
         $runner = match ($row) {
-            'R1', 'R11' => $this->r1(...),
+            'R1', 'R11', 'L1', 'L10' => $this->r1(...),
             'R2' => $this->r2(...),
             'R4' => $this->r4(...),
             'R5' => $this->r5(...),
             'X1' => $this->x1(...),
             'X9' => $this->r1(...),
+            'L6' => $this->l6(...),
             default => throw new InvalidArgumentException("No scenario for row [{$row}] yet."),
         };
 
@@ -114,5 +116,15 @@ class Scenarios
         ChatAgent::fake(['Hello.']);
 
         ChatAgent::make()->forUser($user)->prompt('Hello');
+    }
+
+    /**
+     * An agent run in a queued job, inside this scenario's trace. A worker runs it.
+     */
+    protected function l6(): void
+    {
+        $context = Span::getCurrent()->getContext();
+
+        RunAgent::dispatch($context->getTraceId(), $context->getSpanId());
     }
 }

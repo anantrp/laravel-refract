@@ -1,0 +1,82 @@
+<?php
+
+namespace Anantrp\Refract\Capture;
+
+use Illuminate\Console\Events\CommandFinished;
+use Illuminate\Console\Events\CommandStarting;
+use Illuminate\Contracts\Events\Dispatcher;
+use Illuminate\Contracts\Foundation\Application;
+use Illuminate\Queue\Events\JobAttempted;
+use Illuminate\Queue\Jobs\SyncJob;
+
+/**
+ * Flushes the buffer at the end of the execution that owns it.
+ *
+ * The owner is the web request (flushed when it terminates, after the
+ * response is sent), the async job (flushed when it is attempted), or the
+ * console command (flushed when it finishes). A job run by a sync-like
+ * driver (sync, deferred, background) or a command called from inside a
+ * request or another command never owns the buffer: its spans leave with
+ * its caller. A flush closes every open span, so a flush from a process
+ * that does not own the buffer would cut a live run short.
+ */
+class FlushPoints
+{
+    /**
+     * The number of commands running in this process, nested calls included.
+     */
+    protected int $commands = 0;
+
+    /**
+     * Create a new flush points instance.
+     */
+    public function __construct(protected Application $app, protected Recorder $recorder) {}
+
+    /**
+     * Register the flush points with the application and the given dispatcher.
+     */
+    public function register(Dispatcher $events): void
+    {
+        // Web requests, and a last flush when any other process ends.
+        $this->app->terminating($this->flush(...));
+
+        $events->listen(JobAttempted::class, $this->jobAttempted(...));
+        $events->listen(CommandStarting::class, $this->commandStarting(...));
+        $events->listen(CommandFinished::class, $this->commandFinished(...));
+    }
+
+    /**
+     * Flush at the end of an async job. A job run by a sync-like driver runs inside its caller.
+     */
+    public function jobAttempted(JobAttempted $event): void
+    {
+        if (! $event->job instanceof SyncJob) {
+            $this->flush();
+        }
+    }
+
+    public function commandStarting(CommandStarting $event): void
+    {
+        $this->commands++;
+    }
+
+    /**
+     * Flush at the end of the outermost console command.
+     */
+    public function commandFinished(CommandFinished $event): void
+    {
+        $this->commands = max(0, $this->commands - 1);
+
+        if ($this->commands === 0 && $this->app->runningInConsole()) {
+            $this->flush();
+        }
+    }
+
+    /**
+     * Hand the buffer to the transport.
+     */
+    public function flush(): void
+    {
+        $this->recorder->flush();
+    }
+}
