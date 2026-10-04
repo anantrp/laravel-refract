@@ -166,9 +166,7 @@ class GenAiTranslator
 
     /**
      * Encode neutral messages as OTel GenAI messages: a tool call's arguments
-     * become JSON again when they are valid JSON, and a media reference
-     * becomes a "uri" part (URL), a "file" part (provider file id) or stays
-     * a "media" part (no bytes are ever recorded, so never a "blob" part).
+     * become JSON again when they are valid JSON.
      */
     protected function messages(mixed $messages): ?string
     {
@@ -207,14 +205,6 @@ class GenAiTranslator
             $arguments = json_decode($part['arguments']);
 
             return is_object($arguments) || is_array($arguments) ? [...$part, 'arguments' => $arguments] : $part;
-        }
-
-        if ($type === 'media' && isset($part['uri'])) {
-            return [...$part, 'type' => 'uri'];
-        }
-
-        if ($type === 'media' && isset($part['file_id'])) {
-            return [...$part, 'type' => 'file'];
         }
 
         return $part;

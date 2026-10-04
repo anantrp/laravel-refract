@@ -2,10 +2,14 @@
 
 use Anantrp\Refract\Capture\Recorder;
 use Anantrp\Refract\Support\Diagnostics;
+use Anantrp\Refract\Tests\Support\Ai\FileAgent;
+use Anantrp\Refract\Tests\Support\Ai\FileTool;
 use Anantrp\Refract\Tests\Support\Ai\NotesAgent;
 use Anantrp\Refract\Tests\Support\Ai\NotesTool;
 use Anantrp\Refract\Tests\Support\Ai\RecordingMask;
 use Anantrp\Refract\Tests\Support\Ai\ThrowingMask;
+use Anantrp\Refract\Tests\Support\Ai\TrapImage;
+use Anantrp\Refract\Tests\Support\Ai\TrapUpload;
 use Anantrp\Refract\Tests\Support\Otlp;
 use Anantrp\Refract\Tests\Support\WarningLog;
 use Illuminate\Http\Client\Request;
@@ -17,7 +21,6 @@ use Laravel\Ai\Approvals\PendingApproval;
 use Laravel\Ai\Contracts\Providers\TextProvider;
 use Laravel\Ai\Exceptions\RateLimitedException;
 use Laravel\Ai\Files\Audio;
-use Laravel\Ai\Files\Base64Image;
 use Laravel\Ai\Files\Document;
 use Laravel\Ai\Files\Image;
 use Laravel\Ai\Messages\AssistantMessage;
@@ -79,6 +82,7 @@ function exportedAttributes(string $prefix): array
 
 beforeEach(function () {
     RecordingMask::$seen = [];
+    TrapImage::$calls = [];
     NotesTool::$note = 'Ship on Friday.';
 });
 
@@ -381,7 +385,6 @@ it('P4: the mask runs on every captured value before export, and before the cut'
         ->and(RecordingMask::$seen)->toContain('The secret answer.')
         ->and(RecordingMask::$seen)->toContain('{"topic":"secret topic"}')
         ->and(RecordingMask::$seen)->toContain('{"topic":"secret topic","note":"the secret note"}')
-        ->and(RecordingMask::$seen)->toContain('https://cdn.test/secret.png')
         ->and(RecordingMask::$seen)->toContain(str_repeat('a', 3000).'secret');
 
     [$tool] = exportedAttributes('execute_tool');
@@ -447,146 +450,88 @@ it('P5: a mask class that cannot be made fully masks every value with one warnin
     'not a string' => [['App\\Masks\\Missing']],
 ]);
 
-it('P6: image, audio, document and stored file attachments are references with media type and size, no bytes', function () {
+it('P6: with capture on no attachment of any kind leaves a trace, in the run input or the step history', function () {
     $this->refreshApplicationWithConfig(contentConfig(['refract.capture.content' => true]));
 
     Http::fake();
 
-    $image = base64_encode(str_repeat('i', 300));
-    $audio = base64_encode(str_repeat('w', 200));
-    $document = base64_encode(str_repeat('d', 100));
+    $base64 = base64_encode('BYTES-SECRET');
+    $attachments = fn () => [
+        Image::fromBase64($base64, 'image/png')->as('NAME-SECRET.png'),
+        Image::fromUrl('https://bob:hunter2@cdn.test/URL-SECRET.png?token=tok3n#frag'),
+        Audio::fromPath('/nowhere/PATH-SECRET.wav', 'audio/wav'),
+        Document::fromStorage('reports/STORED-SECRET.pdf', 'local'),
+        Document::fromId('file_ID-SECRET'),
+        UploadedFile::fake()->create('UPLOAD-SECRET.pdf', 3, 'application/pdf'),
+        new TrapImage('VFJBUA==', 'image/trap'),
+        new TrapUpload,
+    ];
 
     TimeAgent::fake(['Seen.']);
-    TimeAgent::make()->prompt('Look.', attachments: [
-        Image::fromBase64($image, 'image/png'),
-        Audio::fromBase64($audio, 'audio/wav'),
-        Document::fromBase64($document, 'application/pdf'),
-        Document::fromStorage('reports/missing.pdf', 'local'),
-        Image::fromPath('/nowhere/missing.jpg', 'image/jpeg'),
-        Document::fromId('file_123'),
-    ]);
+    TimeAgent::make()
+        ->withMessages([new UserMessage('Earlier.', $attachments())])
+        ->prompt('Look.', attachments: $attachments());
 
     app(Recorder::class)->flush();
 
     [$run] = exportedAttributes('invoke_agent');
+    [$step] = exportedAttributes('chat');
 
-    expect(json_decode($run['gen_ai.input.messages'], true))->toBe([[
-        'role' => 'user',
-        'parts' => [
-            ['type' => 'text', 'content' => 'Look.'],
-            ['type' => 'media', 'modality' => 'image', 'mime_type' => 'image/png', 'size' => 300, 'source' => 'base64'],
-            ['type' => 'media', 'modality' => 'audio', 'mime_type' => 'audio/wav', 'size' => 200, 'source' => 'base64'],
-            ['type' => 'media', 'modality' => 'document', 'mime_type' => 'application/pdf', 'size' => 100, 'source' => 'base64'],
-            ['type' => 'media', 'modality' => 'document', 'source' => 'storage'],
-            ['type' => 'media', 'modality' => 'image', 'mime_type' => 'image/jpeg', 'source' => 'path'],
-            ['type' => 'file', 'modality' => 'document', 'file_id' => 'file_123', 'source' => 'provider'],
-        ],
-    ]])->and(sentBodies())->not->toContain($image)
-        ->and(sentBodies())->not->toContain($audio)
-        ->and(sentBodies())->not->toContain($document)
-        ->and(sentBodies())->not->toContain('missing.pdf')
-        ->and(sentBodies())->not->toContain('missing.jpg')
-        ->and(Http::recorded())->toHaveCount(1);
+    $body = sentBodies();
+
+    expect(json_decode($run['gen_ai.input.messages'], true))->toBe([
+        ['role' => 'user', 'parts' => [['type' => 'text', 'content' => 'Look.']]],
+    ])->and(json_decode($step['gen_ai.input.messages'], true))->toBe([
+        ['role' => 'user', 'parts' => [['type' => 'text', 'content' => 'Earlier.']]],
+        ['role' => 'user', 'parts' => [['type' => 'text', 'content' => 'Look.']]],
+    ])->and(Http::recorded())->toHaveCount(1);
+
+    foreach (['SECRET', $base64, 'hunter2', 'tok3n', 'frag', 'cdn.test', 'nowhere', 'TRAP', 'image/', 'audio/', 'application/', '3072', 'media', 'uri', 'file_id', 'size'] as $trace) {
+        expect($body)->not->toContain($trace);
+    }
+
+    expect(TrapImage::$calls)->toBe([]);
 });
 
-it('P7: an uploaded file attachment is a reference with source upload', function () {
+it('P6: a tool result that is a file, or holds files, records [file] for each file and calls no file method', function (Closure $result, string $expected) {
     $this->environmentConfig = contentConfig(['refract.capture.content' => true]);
     $memory = $this->captureNeutralSpans();
 
-    TimeAgent::fake(['Seen.']);
-    TimeAgent::make()->prompt('Read this.', attachments: [
-        UploadedFile::fake()->create('secret-report.pdf', 3, 'application/pdf'),
-        UploadedFile::fake()->create('photo.png', 2, 'image/png'),
-    ]);
+    FileTool::$result = $result();
+    TrapImage::$calls = [];
+
+    FileAgent::fakeTwoSteps();
+    FileAgent::make()->prompt('Get the file.');
 
     app(Recorder::class)->flush();
 
-    [$run] = ofKind($memory->spans, 'invoke_agent');
+    [$tool] = ofKind($memory->spans, 'execute_tool');
+    [, $second] = ofKind($memory->spans, 'chat');
 
-    expect($run['content']['input'][0]['parts'])->toBe([
-        ['type' => 'text', 'content' => 'Read this.'],
-        ['type' => 'media', 'modality' => 'document', 'mime_type' => 'application/pdf', 'size' => 3072, 'source' => 'upload'],
-        ['type' => 'media', 'modality' => 'image', 'mime_type' => 'image/png', 'size' => 2048, 'source' => 'upload'],
-    ])->and(json_encode($memory->spans))->not->toContain('secret-report');
-});
-
-it('P8: a file URL loses its credentials, query and fragment', function (string $url, ?string $expected) {
-    $this->environmentConfig = contentConfig(['refract.capture.content' => true]);
-    $memory = $this->captureNeutralSpans();
-
-    TimeAgent::fake(['Seen.']);
-    TimeAgent::make()->prompt('Look.', attachments: [Image::fromUrl($url)]);
-
-    app(Recorder::class)->flush();
-
-    $part = ofKind($memory->spans, 'invoke_agent')[0]['content']['input'][0]['parts'][1];
-
-    expect($part)->toBe(array_filter(['type' => 'media', 'modality' => 'image', 'uri' => $expected, 'source' => 'url']))
-        ->and(json_encode($memory->spans))->not->toContain('hunter2')
-        ->and(json_encode($memory->spans))->not->toContain('tok3n')
-        ->and(json_encode($memory->spans))->not->toContain('frag');
+    expect(TrapImage::$calls)->toBe([])
+        ->and($tool['content']['result'])->toBe($expected)
+        ->and(end($second['content']['input']))->toBe(['role' => 'tool', 'parts' => [
+            ['type' => 'tool_call_response', 'id' => 'call_1', 'name' => 'FileTool', 'response' => $expected],
+        ]])
+        ->and(json_encode($memory->spans))->not->toContain('TRAP');
 })->with([
-    'credentials, query, fragment' => ['https://bob:hunter2@cdn.test:8443/img/a.png?token=tok3n#frag', 'https://cdn.test:8443/img/a.png'],
-    'query only' => ['https://cdn.test/a.png?sig=tok3n', 'https://cdn.test/a.png'],
-    'plain' => ['https://cdn.test/a.png', 'https://cdn.test/a.png'],
-    'not a URL' => ['hunter2 tok3n frag', null],
-]);
-
-it('P8: a URL is exported as an OTel uri part', function () {
-    $this->refreshApplicationWithConfig(contentConfig(['refract.capture.content' => true]));
-
-    Http::fake();
-
-    TimeAgent::fake(['Seen.']);
-    TimeAgent::make()->prompt('Look.', attachments: [Document::fromUrl('https://bob:pw@cdn.test/a.pdf?x=1')->withMimeType('application/pdf')]);
-
-    app(Recorder::class)->flush();
-
-    [$run] = exportedAttributes('invoke_agent');
-
-    expect(json_decode($run['gen_ai.input.messages'], true)[0]['parts'][1])->toBe([
-        'type' => 'uri', 'modality' => 'document', 'mime_type' => 'application/pdf', 'uri' => 'https://cdn.test/a.pdf', 'source' => 'url',
-    ]);
-});
-
-it('P9: a data: URL keeps only its media type', function (object $file) {
-    $this->environmentConfig = contentConfig(['refract.capture.content' => true]);
-    $memory = $this->captureNeutralSpans();
-
-    TimeAgent::fake(['Seen.']);
-    TimeAgent::make()->prompt('Look.', attachments: [$file]);
-
-    app(Recorder::class)->flush();
-
-    $part = ofKind($memory->spans, 'invoke_agent')[0]['content']['input'][0]['parts'][1];
-
-    expect($part)->toBe(['type' => 'media', 'modality' => 'image', 'mime_type' => 'image/gif', 'source' => 'data'])
-        ->and(json_encode($memory->spans))->not->toContain('R0lGOD');
-})->with([
-    'remote' => fn () => Image::fromUrl('data:image/gif;base64,R0lGODlhAQABAAAAACw='),
-    'base64' => fn () => new Base64Image('data:image/gif;base64,R0lGODlhAQABAAAAACw=', 'image/png'),
-]);
-
-it('P10: the base64 size does not count padding', function (string $bytes) {
-    $this->environmentConfig = contentConfig(['refract.capture.content' => true]);
-    $memory = $this->captureNeutralSpans();
-
-    TimeAgent::fake(['Seen.']);
-    TimeAgent::make()->prompt('Look.', attachments: [
-        Image::fromBase64(base64_encode($bytes), 'image/png'),
-        Image::fromBase64(chunk_split(base64_encode($bytes), 4, "\n"), 'image/png'),
-    ]);
-
-    app(Recorder::class)->flush();
-
-    $parts = ofKind($memory->spans, 'invoke_agent')[0]['content']['input'][0]['parts'];
-
-    expect($parts[1]['size'])->toBe(strlen($bytes))
-        ->and($parts[2]['size'])->toBe(strlen($bytes));
-})->with([
-    'no padding' => ['abc'],
-    'one =' => ['hello'],
-    'two =' => ['hello!!'],
+    'a file' => [fn () => new TrapImage('VFJBUA==', 'image/trap'), '[file]'],
+    'an upload' => [fn () => new TrapUpload, '[file]'],
+    'files in a Collection, an array, a nested Collection and a JsonSerializable' => [
+        fn () => collect([
+            'image' => new TrapImage('VFJBUA==', 'image/trap'),
+            'list' => [new TrapImage('VFJBUA==', 'image/trap'), 'text'],
+            'nested' => collect(['upload' => new TrapUpload]),
+            'json' => new class implements JsonSerializable
+            {
+                public function jsonSerialize(): mixed
+                {
+                    return ['image' => new TrapImage('VFJBUA==', 'image/trap'), 'n' => 1];
+                }
+            },
+        ]),
+        '{"image":"[file]","list":["[file]","text"],"nested":{"upload":"[file]"},"json":{"image":"[file]","n":1}}',
+    ],
 ]);
 
 it('P11: a tool result object (Collection) is recorded as text', function () {

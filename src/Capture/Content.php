@@ -4,22 +4,12 @@ namespace Anantrp\Refract\Capture;
 
 use Anantrp\Refract\Support\Diagnostics;
 use Illuminate\Contracts\Container\Container;
-use Laravel\Ai\Files\Audio;
-use Laravel\Ai\Files\Document;
+use Illuminate\Contracts\Support\Arrayable;
+use Illuminate\Support\Enumerable;
+use JsonException;
+use JsonSerializable;
+use Laravel\Ai\Contracts\Files\HasContent;
 use Laravel\Ai\Files\File;
-use Laravel\Ai\Files\Image;
-use Laravel\Ai\Files\ProviderDocument;
-use Laravel\Ai\Files\ProviderImage;
-use Laravel\Ai\Files\RemoteAudio;
-use Laravel\Ai\Files\RemoteDocument;
-use Laravel\Ai\Files\RemoteImage;
-use Laravel\Ai\Files\RemoteVideo;
-use Laravel\Ai\Files\S3Document;
-use Laravel\Ai\Files\StoredAudio;
-use Laravel\Ai\Files\StoredDocument;
-use Laravel\Ai\Files\StoredImage;
-use Laravel\Ai\Files\StoredVideo;
-use Laravel\Ai\Files\Video;
 use Laravel\Ai\Gateway\StepResponse;
 use Laravel\Ai\Messages\AssistantMessage;
 use Laravel\Ai\Messages\Message;
@@ -28,26 +18,30 @@ use Laravel\Ai\Messages\ToolResultMessage;
 use Laravel\Ai\Messages\UserMessage;
 use Laravel\Ai\Prompts\AgentPrompt;
 use Laravel\Ai\Responses\AgentResponse;
+use Laravel\Ai\Responses\AudioResponse;
+use Laravel\Ai\Responses\Data\GeneratedImage;
 use Laravel\Ai\Responses\Data\ToolCall;
 use Laravel\Ai\Responses\Data\ToolResult;
+use Laravel\Ai\Responses\ImageResponse;
+use SplFileInfo;
 use Stringable;
-use Symfony\Component\HttpFoundation\File\UploadedFile;
 use Throwable;
+use UnitEnum;
 
 /**
  * Builds the content bucket of a span: prompts, messages, outputs, tool arguments and results.
  *
  * Off by default. Every captured string goes through the mask, then is
- * cut at the byte cap and marked with its original size. Attachments are
- * references (media type, size, source), never their bytes: no file is
- * read, fetched or decoded. Only plain arrays and scalars are returned.
+ * cut at the byte cap and marked with its original size. Files are never
+ * recorded: attachments are left out, and a file in a value becomes
+ * "[file]" with no method of the file called. Only plain arrays and
+ * scalars are returned.
  *
  * Message: {role: user|assistant|tool, parts: list<Part>, finish_reason?}
  * Part: {type: text, content} | {type: tool_call, id, name, arguments}
  *     | {type: tool_call_response, id, name, response}
- *     | {type: media, modality?, mime_type?, size?, uri?, file_id?, source}
  *
- * @phpstan-type Part array<string, int|string>
+ * @phpstan-type Part array<string, string>
  * @phpstan-type ContentMessage array{role: string, parts: list<Part>, finish_reason?: string}
  */
 class Content
@@ -58,6 +52,16 @@ class Content
     public const MASK_FAILED = '<fully masked due to failed mask function>';
 
     /**
+     * The text a file becomes inside a captured value.
+     */
+    public const FILE = '[file]';
+
+    /**
+     * The deepest a value is walked, the same as the json_encode() default.
+     */
+    protected const MAX_DEPTH = 512;
+
+    /**
      * The default byte cap of one captured value: 128 KB.
      */
     public const MAX_BYTES = 131_072;
@@ -66,6 +70,22 @@ class Content
      * The JSON flags tool arguments and results are encoded with, the same the SDK uses.
      */
     protected const JSON_FLAGS = JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE | JSON_PRESERVE_ZERO_FRACTION;
+
+    /**
+     * The most runs whose tool results are remembered at once. Past it, the oldest run is forgotten.
+     */
+    protected const MAX_RUNS = 100;
+
+    /**
+     * The captured result of each tool call of a run, in call order, keyed by invocation id.
+     *
+     * The SDK turns a tool result into text before it reaches the step
+     * history, so a file there is already its bytes. The history gets the
+     * value captured when the tool returned instead.
+     *
+     * @var array<string, list<array{tool: string, arguments: array<array-key, mixed>, result: string}>>
+     */
+    protected array $toolResults = [];
 
     /**
      * The mask, once made: a callable, or false when it could not be made.
@@ -87,14 +107,14 @@ class Content
     ) {}
 
     /**
-     * Get the input of a run: its prompt and attachments as one user message.
+     * Get the input of a run: its prompt as one user message. Attachments are never recorded.
      *
      * @return array<string, mixed>
      */
     public function runInput(AgentPrompt $prompt): array
     {
         return $this->capture(fn () => ['input' => [
-            $this->userMessage($prompt->prompt, $prompt->attachments->all()),
+            ['role' => 'user', 'parts' => $this->textParts($prompt->prompt)],
         ]]);
     }
 
@@ -111,19 +131,20 @@ class Content
     }
 
     /**
-     * Get the input of a step: the messages sent to the model.
+     * Get the input of a step of the given run: the messages sent to the model.
      *
      * @param  array<array-key, mixed>  $messages
      * @return array<string, mixed>
      */
-    public function stepInput(array $messages): array
+    public function stepInput(string $invocationId, array $messages): array
     {
-        return $this->capture(function () use ($messages) {
+        return $this->capture(function () use ($invocationId, $messages) {
             $input = [];
+            $captured = $this->toolResults[$invocationId] ?? [];
 
             foreach ($messages as $message) {
                 if ($message instanceof Message) {
-                    $input[] = $this->message($message);
+                    $input[] = $this->message($message, $captured);
                 }
             }
 
@@ -157,13 +178,32 @@ class Content
     }
 
     /**
-     * Get the result of a tool call, as the text the model gets.
+     * Get the result of a tool call of the given run, as the text the model gets, and remember it for the step history.
      *
+     * @param  array<array-key, mixed>  $arguments
      * @return array<string, mixed>
      */
-    public function toolResult(mixed $result): array
+    public function toolResult(string $invocationId, string $tool, array $arguments, mixed $result): array
     {
-        return $this->capture(fn () => ['result' => $this->value($this->text($result))]);
+        return $this->capture(function () use ($invocationId, $tool, $arguments, $result) {
+            $text = $this->value($this->text($result));
+
+            if (! isset($this->toolResults[$invocationId]) && count($this->toolResults) >= self::MAX_RUNS) {
+                unset($this->toolResults[array_key_first($this->toolResults)]);
+            }
+
+            $this->toolResults[$invocationId][] = ['tool' => $tool, 'arguments' => $arguments, 'result' => $text];
+
+            return ['result' => $text];
+        });
+    }
+
+    /**
+     * Forget the tool results of the given run: it ended.
+     */
+    public function forget(string $invocationId): void
+    {
+        unset($this->toolResults[$invocationId]);
     }
 
     /**
@@ -196,39 +236,23 @@ class Content
     }
 
     /**
+     * @param  list<array{tool: string, arguments: array<array-key, mixed>, result: string}>  $captured  The run's tool results not yet matched in the history.
      * @return ContentMessage
      */
-    protected function message(Message $message): array
+    protected function message(Message $message, array &$captured): array
     {
         return match (true) {
-            $message instanceof UserMessage => $this->userMessage((string) $message->content, $message->attachments->all()),
+            $message instanceof UserMessage => ['role' => 'user', 'parts' => $this->textParts((string) $message->content)],
             $message instanceof AssistantMessage => [
                 'role' => 'assistant',
                 'parts' => [...$this->textParts((string) $message->content), ...$this->toolCalls($message->toolCalls->all())],
             ],
-            $message instanceof ToolResultMessage => ['role' => 'tool', 'parts' => $this->toolResults($message->toolResults->all())],
+            $message instanceof ToolResultMessage => ['role' => 'tool', 'parts' => $this->toolResultParts($message->toolResults->all(), $captured)],
             default => [
                 'role' => $message->role === MessageRole::ToolResult ? 'tool' : $message->role->value,
                 'parts' => $this->textParts((string) $message->content),
             ],
         };
-    }
-
-    /**
-     * @param  array<array-key, mixed>  $attachments
-     * @return ContentMessage
-     */
-    protected function userMessage(string $text, array $attachments): array
-    {
-        $parts = $this->textParts($text);
-
-        foreach ($attachments as $attachment) {
-            if (is_object($attachment)) {
-                $parts[] = $this->media($attachment);
-            }
-        }
-
-        return ['role' => 'user', 'parts' => $parts];
     }
 
     /**
@@ -262,10 +286,15 @@ class Content
     }
 
     /**
+     * Get the tool results of the history. A result of this run is the value
+     * captured when its tool returned: the first one not yet matched with
+     * the same tool and arguments.
+     *
      * @param  array<array-key, mixed>  $results
+     * @param  list<array{tool: string, arguments: array<array-key, mixed>, result: string}>  $captured
      * @return list<Part>
      */
-    protected function toolResults(array $results): array
+    protected function toolResultParts(array $results, array &$captured): array
     {
         $parts = [];
 
@@ -275,7 +304,7 @@ class Content
                     'type' => 'tool_call_response',
                     'id' => $result->id,
                     'name' => $result->name,
-                    'response' => $this->value($this->text($result->result)),
+                    'response' => $this->capturedResult($result, $captured) ?? $this->value($this->text($result->result)),
                 ];
             }
         }
@@ -284,150 +313,92 @@ class Content
     }
 
     /**
-     * Get a reference to an attachment, from its public properties only.
+     * Take the captured value of the given tool result out of the list, or get null when it has none.
      *
-     * Never mimeType(), name() or content(): those fetch a URL or read the disk or storage.
-     *
-     * @return Part
+     * @param  list<array{tool: string, arguments: array<array-key, mixed>, result: string}>  $captured
      */
-    protected function media(object $file): array
+    protected function capturedResult(ToolResult $result, array &$captured): ?string
     {
-        if ($file instanceof UploadedFile) {
-            $mime = $file->getClientMimeType();
+        foreach ($captured as $index => $entry) {
+            if ($entry['tool'] === $result->name && $entry['arguments'] === $result->arguments) {
+                array_splice($captured, $index, 1);
 
-            return $this->reference($this->modalityOf($mime), $mime, $this->uploadSize($file), source: 'upload');
+                return $entry['result'];
+            }
         }
 
-        $modality = $this->modality($file);
-        $mime = $file instanceof File ? $file->mime : null;
-
-        if (property_exists($file, 'base64') && is_string($file->base64)) {
-            return str_starts_with($file->base64, 'data:')
-                ? $this->reference($modality, $this->dataMime($file->base64), source: 'data')
-                : $this->reference($modality, $mime, $this->base64Size($file->base64), source: 'base64');
-        }
-
-        if ($file instanceof RemoteImage || $file instanceof RemoteDocument || $file instanceof RemoteAudio || $file instanceof RemoteVideo || $file instanceof S3Document) {
-            return str_starts_with($file->url, 'data:')
-                ? $this->reference($modality, $this->dataMime($file->url), source: 'data')
-                : $this->reference($modality, $mime, uri: $this->strip($file->url), source: 'url');
-        }
-
-        if ($file instanceof ProviderImage || $file instanceof ProviderDocument) {
-            return $this->reference($modality, $mime, fileId: $this->value($file->id), source: 'provider');
-        }
-
-        if ($file instanceof StoredImage || $file instanceof StoredDocument || $file instanceof StoredAudio || $file instanceof StoredVideo) {
-            return $this->reference($modality, $mime, source: 'storage');
-        }
-
-        return $this->reference($modality, $mime, source: property_exists($file, 'path') ? 'path' : 'unknown');
+        return null;
     }
 
     /**
-     * @return Part
-     */
-    protected function reference(?string $modality, ?string $mime, ?int $size = null, ?string $uri = null, ?string $fileId = null, string $source = 'unknown'): array
-    {
-        return array_filter([
-            'type' => 'media',
-            'modality' => $modality,
-            'mime_type' => $mime === '' ? null : $mime,
-            'size' => $size,
-            'uri' => $uri,
-            'file_id' => $fileId,
-            'source' => $source,
-        ], fn (mixed $value) => $value !== null);
-    }
-
-    protected function modality(object $file): ?string
-    {
-        return match (true) {
-            $file instanceof Image => 'image',
-            $file instanceof Audio => 'audio',
-            $file instanceof Video => 'video',
-            $file instanceof Document => 'document',
-            default => null,
-        };
-    }
-
-    protected function modalityOf(string $mime): string
-    {
-        return match (true) {
-            str_starts_with($mime, 'image/') => 'image',
-            str_starts_with($mime, 'audio/') => 'audio',
-            str_starts_with($mime, 'video/') => 'video',
-            default => 'document',
-        };
-    }
-
-    /**
-     * Get the size of an upload from the file system, without reading it.
-     */
-    protected function uploadSize(UploadedFile $file): ?int
-    {
-        try {
-            $size = $file->getSize();
-        } catch (Throwable) {
-            return null;
-        }
-
-        return is_int($size) ? $size : null;
-    }
-
-    /**
-     * Get the decoded size of base64 text, without decoding it: padding and whitespace do not count.
-     */
-    protected function base64Size(string $base64): int
-    {
-        $length = strlen($base64) - preg_match_all('/[\s=]/', $base64);
-
-        return intdiv($length * 3, 4);
-    }
-
-    /**
-     * Get the media type of a data: URL, and nothing else from it.
-     */
-    protected function dataMime(string $url): ?string
-    {
-        return preg_match('#^data:([\w.+-]+/[\w.+-]+)#', $url, $match) === 1 ? strtolower($match[1]) : null;
-    }
-
-    /**
-     * Strip the credentials, query and fragment from a URL. Not a URL with a host: no URI at all.
-     */
-    protected function strip(string $url): ?string
-    {
-        $parts = parse_url($url);
-
-        if (! is_array($parts) || ! isset($parts['scheme'], $parts['host'])) {
-            return null;
-        }
-
-        $port = isset($parts['port']) ? ":{$parts['port']}" : '';
-
-        return $this->value("{$parts['scheme']}://{$parts['host']}{$port}".($parts['path'] ?? ''));
-    }
-
-    /**
-     * Get a tool result as the text the SDK sends to the model.
+     * Get a tool result as the text the SDK sends to the model, with every file in it as "[file]".
      */
     protected function text(mixed $value): string
     {
         return match (true) {
+            $this->isFile($value) => self::FILE,
             is_string($value) => $value,
-            is_array($value) => $this->json($value),
+            is_array($value), $value instanceof Enumerable => $this->json($value),
             is_scalar($value) || $value instanceof Stringable => (string) $value,
             default => get_debug_type($value),
         };
     }
 
     /**
-     * @param  array<array-key, mixed>  $value
+     * Encode the given value as JSON, with every file in it as "[file]". An empty value is an object.
      */
-    protected function json(array $value): string
+    protected function json(mixed $value): string
     {
-        return (string) json_encode($value === [] ? (object) [] : $value, self::JSON_FLAGS);
+        $plain = $this->plain($value);
+
+        return (string) json_encode($plain === [] ? (object) [] : $plain, self::JSON_FLAGS);
+    }
+
+    /**
+     * Get the given value as json_encode() would see it, with every file in it as "[file]".
+     *
+     * A file is caught before any of its methods can run: __toString(),
+     * jsonSerialize() and toArray() of an SDK file read, fetch or return its bytes.
+     *
+     * @throws JsonException When the value is nested deeper than json_encode() allows.
+     */
+    protected function plain(mixed $value, int $depth = 0): mixed
+    {
+        if ($depth > self::MAX_DEPTH) {
+            throw new JsonException('Maximum stack depth exceeded');
+        }
+
+        if ($this->isFile($value)) {
+            return self::FILE;
+        }
+
+        if (is_array($value)) {
+            return array_map(fn (mixed $item) => $this->plain($item, $depth + 1), $value);
+        }
+
+        if (! is_object($value) || $value instanceof UnitEnum) {
+            return $value;
+        }
+
+        return match (true) {
+            $value instanceof Enumerable => $this->plain($value->all(), $depth),
+            $value instanceof JsonSerializable => $this->plain($value->jsonSerialize(), $depth),
+            $value instanceof Arrayable => $this->plain($value->toArray(), $depth),
+            default => (object) $this->plain(get_object_vars($value), $depth),
+        };
+    }
+
+    /**
+     * Determine if the given value is a file: an SDK file or generated media, or a file on disk or uploaded.
+     */
+    protected function isFile(mixed $value): bool
+    {
+        return $value instanceof File
+            || $value instanceof HasContent
+            || $value instanceof SplFileInfo
+            || $value instanceof GeneratedImage
+            || $value instanceof ImageResponse
+            || $value instanceof AudioResponse;
     }
 
     /**
