@@ -1,0 +1,135 @@
+<?php
+
+namespace Anantrp\Refract\Export;
+
+/**
+ * Turns neutral spans into spans with OTel GenAI attributes.
+ *
+ * @see https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-agent-spans/
+ *
+ * @phpstan-type TranslatedSpan array{trace_id: string, span_id: string, parent_span_id: ?string, name: string, kind: int, start: int, end: int, attributes: array<string, mixed>, events: list<array{name: string, time: int, attributes: array<string, mixed>}>, status: array{code: int, message: ?string}}
+ */
+class GenAiTranslator
+{
+    public const KIND_INTERNAL = 1;
+
+    public const KIND_CLIENT = 3;
+
+    public const STATUS_OK = 1;
+
+    public const STATUS_ERROR = 2;
+
+    /**
+     * Translate the given neutral span.
+     *
+     * @param  array<string, mixed>  $span
+     * @return TranslatedSpan
+     */
+    public function translate(array $span): array
+    {
+        $kind = $this->string($span, 'kind');
+        $call = is_array($span['call'] ?? null) ? $span['call'] : [];
+
+        [$name, $spanKind, $attributes] = match ($kind) {
+            'invoke_agent' => $this->agent($call),
+            'chat' => $this->chat($call),
+            'execute_tool' => $this->tool($call),
+            default => [$kind, self::KIND_INTERNAL, []],
+        };
+
+        $error = ($span['status'] ?? null) === 'error';
+        $parent = $span['parent_span_id'] ?? null;
+        $message = $span['status_message'] ?? null;
+
+        return [
+            'trace_id' => $this->string($span, 'trace_id'),
+            'span_id' => $this->string($span, 'span_id'),
+            'parent_span_id' => is_string($parent) ? $parent : null,
+            'name' => $name,
+            'kind' => $spanKind,
+            'start' => $this->int($span, 'start'),
+            'end' => $this->int($span, 'end'),
+            'attributes' => array_filter(
+                ['gen_ai.operation.name' => $kind, ...$attributes],
+                fn (mixed $value) => $value !== null,
+            ),
+            'events' => [],
+            'status' => [
+                'code' => $error ? self::STATUS_ERROR : self::STATUS_OK,
+                'message' => $error && is_string($message) ? $message : null,
+            ],
+        ];
+    }
+
+    /**
+     * @param  array<array-key, mixed>  $call
+     * @return array{string, int, array<string, mixed>}
+     */
+    protected function agent(array $call): array
+    {
+        $agent = $this->string($call, 'agent');
+
+        return [trim("invoke_agent {$agent}"), self::KIND_INTERNAL, [
+            'gen_ai.agent.name' => $agent,
+            'gen_ai.provider.name' => $call['provider'] ?? null,
+            'gen_ai.request.model' => $call['model'] ?? null,
+            'laravel.ai.invocation_id' => $call['invocation_id'] ?? null,
+            'laravel.ai.agent.class' => $call['agent_class'] ?? null,
+        ]];
+    }
+
+    /**
+     * @param  array<array-key, mixed>  $call
+     * @return array{string, int, array<string, mixed>}
+     */
+    protected function chat(array $call): array
+    {
+        $model = $this->string($call, 'model');
+        $finishReason = $call['finish_reason'] ?? null;
+
+        return [trim("chat {$model}"), self::KIND_CLIENT, [
+            'gen_ai.provider.name' => $call['provider'] ?? null,
+            'gen_ai.request.model' => $call['model'] ?? null,
+            'gen_ai.response.model' => $call['response_model'] ?? null,
+            'gen_ai.response.finish_reasons' => is_string($finishReason) ? [$finishReason] : null,
+            'gen_ai.usage.input_tokens' => $call['input_tokens'] ?? null,
+            'gen_ai.usage.output_tokens' => $call['output_tokens'] ?? null,
+            'laravel.ai.step' => $call['step'] ?? null,
+        ]];
+    }
+
+    /**
+     * @param  array<array-key, mixed>  $call
+     * @return array{string, int, array<string, mixed>}
+     */
+    protected function tool(array $call): array
+    {
+        $tool = $this->string($call, 'tool');
+
+        return [trim("execute_tool {$tool}"), self::KIND_INTERNAL, [
+            'gen_ai.tool.name' => $tool,
+            'gen_ai.tool.type' => 'function',
+            'laravel.ai.tool_invocation_id' => $call['tool_invocation_id'] ?? null,
+        ]];
+    }
+
+    /**
+     * @param  array<array-key, mixed>  $data
+     */
+    protected function string(array $data, string $key): string
+    {
+        $value = $data[$key] ?? null;
+
+        return is_scalar($value) ? (string) $value : '';
+    }
+
+    /**
+     * @param  array<array-key, mixed>  $data
+     */
+    protected function int(array $data, string $key): int
+    {
+        $value = $data[$key] ?? null;
+
+        return is_numeric($value) ? (int) $value : 0;
+    }
+}

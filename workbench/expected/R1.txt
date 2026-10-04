@@ -1,5 +1,5 @@
 environment: local
 invoke_agent TimeAgent  ok
   chat fake  ok
-  execute_tool CurrentTime  ok
+  CurrentTime  ok
   chat fake  ok
