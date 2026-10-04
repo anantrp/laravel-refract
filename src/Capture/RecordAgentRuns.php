@@ -108,8 +108,6 @@ class RecordAgentRuns
      */
     public function agentPrompted(AgentPrompted $event): void
     {
-        $this->content->forget($event->invocationId);
-
         $conversationId = $event->response->conversationId;
 
         $this->recorder->end(
@@ -121,8 +119,6 @@ class RecordAgentRuns
 
     public function agentFailed(AgentFailed $event): void
     {
-        $this->content->forget($event->invocationId);
-
         $this->recorder->end($this->runKey($event->invocationId), 'error', $event->exception::class);
     }
 
@@ -132,7 +128,6 @@ class RecordAgentRuns
     public function agentFailedOver(AgentFailedOver $event): void
     {
         $this->failingOver[$event->invocationId] = true;
-        $this->content->forget($event->invocationId);
 
         $this->recorder->event($this->runKey($event->invocationId), 'failover', [
             'provider' => $this->providerName($event->provider),
@@ -148,7 +143,7 @@ class RecordAgentRuns
             'model' => $event->model,
             'step' => $event->stepNumber,
             'final_step' => $event->isFinalStep,
-        ], content: $this->content->stepInput($event->invocationId, $event->messages));
+        ], content: $this->content->stepInput($event->messages));
     }
 
     public function stepCompleted(StepCompleted $event): void
@@ -178,9 +173,7 @@ class RecordAgentRuns
 
     public function toolInvoked(ToolInvoked $event): void
     {
-        $this->recorder->end($this->toolKey($event->toolInvocationId), content: $this->content->toolResult(
-            $event->invocationId, ToolNameResolver::resolve($event->tool), $event->arguments, $event->result,
-        ));
+        $this->recorder->end($this->toolKey($event->toolInvocationId), content: $this->content->toolResult($event->result));
     }
 
     public function toolFailed(ToolFailed $event): void

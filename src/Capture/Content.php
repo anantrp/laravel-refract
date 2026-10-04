@@ -37,9 +37,14 @@ use UnitEnum;
  * "[file]" with no method of the file called. Only plain arrays and
  * scalars are returned.
  *
+ * A tool result in a step's message history is a reference only (its
+ * call id and tool name), never its text: the SDK has already turned it
+ * into text there, so a file in it is its bytes. The result is recorded
+ * on the tool span only.
+ *
  * Message: {role: user|assistant|tool, parts: list<Part>, finish_reason?}
  * Part: {type: text, content} | {type: tool_call, id, name, arguments}
- *     | {type: tool_call_response, id, name, response}
+ *     | {type: tool_call_response, id, name}
  *
  * @phpstan-type Part array<string, string>
  * @phpstan-type ContentMessage array{role: string, parts: list<Part>, finish_reason?: string}
@@ -75,22 +80,6 @@ class Content
      * The JSON flags tool arguments and results are encoded with, the same the SDK uses.
      */
     protected const JSON_FLAGS = JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE | JSON_PRESERVE_ZERO_FRACTION;
-
-    /**
-     * The most runs whose tool results are remembered at once. Past it, the oldest run is forgotten.
-     */
-    protected const MAX_RUNS = 100;
-
-    /**
-     * The captured result of each tool call of a run, in call order, keyed by invocation id.
-     *
-     * The SDK turns a tool result into text before it reaches the step
-     * history, so a file there is already its bytes. The history gets the
-     * value captured when the tool returned instead.
-     *
-     * @var array<string, list<array{tool: string, arguments: array<array-key, mixed>, result: string}>>
-     */
-    protected array $toolResults = [];
 
     /**
      * The mask, once made: a callable, or false when it could not be made.
@@ -136,20 +125,19 @@ class Content
     }
 
     /**
-     * Get the input of a step of the given run: the messages sent to the model.
+     * Get the input of a step: the messages sent to the model.
      *
      * @param  array<array-key, mixed>  $messages
      * @return array<string, mixed>
      */
-    public function stepInput(string $invocationId, array $messages): array
+    public function stepInput(array $messages): array
     {
-        return $this->capture(function () use ($invocationId, $messages) {
+        return $this->capture(function () use ($messages) {
             $input = [];
-            $captured = $this->toolResults[$invocationId] ?? [];
 
             foreach ($messages as $message) {
                 if ($message instanceof Message) {
-                    $input[] = $this->message($message, $captured);
+                    $input[] = $this->message($message);
                 }
             }
 
@@ -183,32 +171,13 @@ class Content
     }
 
     /**
-     * Get the result of a tool call of the given run, as the text the model gets, and remember it for the step history.
+     * Get the result of a tool call, as the text the model gets.
      *
-     * @param  array<array-key, mixed>  $arguments
      * @return array<string, mixed>
      */
-    public function toolResult(string $invocationId, string $tool, array $arguments, mixed $result): array
+    public function toolResult(mixed $result): array
     {
-        return $this->capture(function () use ($invocationId, $tool, $arguments, $result) {
-            $text = $this->value($this->text($result));
-
-            if (! isset($this->toolResults[$invocationId]) && count($this->toolResults) >= self::MAX_RUNS) {
-                unset($this->toolResults[array_key_first($this->toolResults)]);
-            }
-
-            $this->toolResults[$invocationId][] = ['tool' => $tool, 'arguments' => $arguments, 'result' => $text];
-
-            return ['result' => $text];
-        });
-    }
-
-    /**
-     * Forget the tool results of the given run: it ended.
-     */
-    public function forget(string $invocationId): void
-    {
-        unset($this->toolResults[$invocationId]);
+        return $this->capture(fn () => ['result' => $this->value($this->text($result))]);
     }
 
     /**
@@ -241,10 +210,12 @@ class Content
     }
 
     /**
-     * @param  list<array{tool: string, arguments: array<array-key, mixed>, result: string}>  $captured  The run's tool results not yet matched in the history.
+     * Get a message of the history. A tool result message that is not a
+     * ToolResultMessage has no call id or tool name, so it has no parts.
+     *
      * @return ContentMessage
      */
-    protected function message(Message $message, array &$captured): array
+    protected function message(Message $message): array
     {
         return match (true) {
             $message instanceof UserMessage => ['role' => 'user', 'parts' => $this->textParts((string) $message->content)],
@@ -252,9 +223,10 @@ class Content
                 'role' => 'assistant',
                 'parts' => [...$this->textParts((string) $message->content), ...$this->toolCalls($message->toolCalls->all())],
             ],
-            $message instanceof ToolResultMessage => ['role' => 'tool', 'parts' => $this->toolResultParts($message->toolResults->all(), $captured)],
+            $message instanceof ToolResultMessage => ['role' => 'tool', 'parts' => $this->toolResultParts($message->toolResults->all())],
+            $message->role === MessageRole::ToolResult => ['role' => 'tool', 'parts' => []],
             default => [
-                'role' => $message->role === MessageRole::ToolResult ? 'tool' : $message->role->value,
+                'role' => $message->role->value,
                 'parts' => $this->textParts((string) $message->content),
             ],
         };
@@ -291,15 +263,12 @@ class Content
     }
 
     /**
-     * Get the tool results of the history. A result of this run is the value
-     * captured when its tool returned: the first one not yet matched with
-     * the same tool and arguments.
+     * Get the tool results of the history, each as a reference: its call id and tool name, never its result.
      *
      * @param  array<array-key, mixed>  $results
-     * @param  list<array{tool: string, arguments: array<array-key, mixed>, result: string}>  $captured
      * @return list<Part>
      */
-    protected function toolResultParts(array $results, array &$captured): array
+    protected function toolResultParts(array $results): array
     {
         $parts = [];
 
@@ -309,30 +278,11 @@ class Content
                     'type' => 'tool_call_response',
                     'id' => $result->id,
                     'name' => $result->name,
-                    'response' => $this->capturedResult($result, $captured) ?? $this->value($this->text($result->result)),
                 ];
             }
         }
 
         return $parts;
-    }
-
-    /**
-     * Take the captured value of the given tool result out of the list, or get null when it has none.
-     *
-     * @param  list<array{tool: string, arguments: array<array-key, mixed>, result: string}>  $captured
-     */
-    protected function capturedResult(ToolResult $result, array &$captured): ?string
-    {
-        foreach ($captured as $index => $entry) {
-            if ($entry['tool'] === $result->name && $entry['arguments'] === $result->arguments) {
-                array_splice($captured, $index, 1);
-
-                return $entry['result'];
-            }
-        }
-
-        return null;
     }
 
     /**

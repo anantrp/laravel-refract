@@ -27,6 +27,12 @@ class GenAiTranslator
     public const STATUS_ERROR = 2;
 
     /**
+     * The response of a tool call response part in the messages. The OTel
+     * GenAI schema requires one; the result itself is only on the tool span.
+     */
+    public const TOOL_RESULT_REFERENCE = '[on the execute_tool span]';
+
+    /**
      * Create a new translator instance.
      *
      * @param  array<string, string>  $contextAttributes  The attribute name of each mapped Laravel Context key.
@@ -170,7 +176,7 @@ class GenAiTranslator
      * Encode neutral messages as OTel GenAI messages: a tool call's arguments
      * become JSON again when they are valid JSON. When the messages cannot
      * be encoded that way (arguments nested too deep), the arguments stay
-     * their JSON text.
+     * their JSON text. A tool call response gets a fixed response.
      */
     protected function messages(mixed $messages): ?string
     {
@@ -203,7 +209,7 @@ class GenAiTranslator
 
             $encoded[] = [
                 ...$message,
-                'parts' => array_values($decode ? array_map($this->part(...), $parts) : $parts),
+                'parts' => array_values(array_map(fn (array $part) => $this->part($part, $decode), $parts)),
             ];
         }
 
@@ -214,9 +220,13 @@ class GenAiTranslator
      * @param  array<array-key, mixed>  $part
      * @return array<array-key, mixed>
      */
-    protected function part(array $part): array
+    protected function part(array $part, bool $decode): array
     {
-        if (($part['type'] ?? null) === 'tool_call' && is_string($part['arguments'] ?? null)) {
+        if (($part['type'] ?? null) === 'tool_call_response') {
+            return [...$part, 'response' => self::TOOL_RESULT_REFERENCE];
+        }
+
+        if ($decode && ($part['type'] ?? null) === 'tool_call' && is_string($part['arguments'] ?? null)) {
             // Decoded to objects, so "{}" stays an object when encoded again.
             $arguments = json_decode($part['arguments']);
 

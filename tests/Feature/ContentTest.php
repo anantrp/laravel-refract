@@ -16,6 +16,7 @@ use Anantrp\Refract\Tests\Support\Otlp;
 use Anantrp\Refract\Tests\Support\WarningLog;
 use Illuminate\Http\Client\Request;
 use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Laravel\Ai\Approvals\Decision;
@@ -26,13 +27,18 @@ use Laravel\Ai\Files\Audio;
 use Laravel\Ai\Files\Document;
 use Laravel\Ai\Files\Image;
 use Laravel\Ai\Messages\AssistantMessage;
+use Laravel\Ai\Messages\Message;
+use Laravel\Ai\Messages\ToolResultMessage;
 use Laravel\Ai\Messages\UserMessage;
 use Laravel\Ai\Responses\Data\Meta;
 use Laravel\Ai\Responses\Data\TextUsage;
 use Laravel\Ai\Responses\Data\ToolCall;
+use Laravel\Ai\Responses\Data\ToolResult;
 use Laravel\Ai\Responses\TextResponse;
+use Workbench\App\Ai\Agents\ChatAgent;
 use Workbench\App\Ai\Agents\SupervisorAgent;
 use Workbench\App\Ai\Agents\TimeAgent;
+use Workbench\App\Models\User;
 
 /**
  * The config of a working Langfuse destination, with content capture set as given.
@@ -202,10 +208,10 @@ it('P2: with capture on the prompt, step messages, output, tool arguments and to
         'input' => [
             ...$history,
             ['role' => 'assistant', 'parts' => [$call]],
-            ['role' => 'tool', 'parts' => [['type' => 'tool_call_response', 'id' => 'call_1', 'name' => 'NotesTool', 'response' => $result]]],
+            ['role' => 'tool', 'parts' => [['type' => 'tool_call_response', 'id' => 'call_1', 'name' => 'NotesTool']]],
         ],
         'output' => [['role' => 'assistant', 'parts' => [$answer], 'finish_reason' => 'stop']],
-    ]);
+    ])->and(json_encode($second['content']))->not->toContain('Ship on Friday.');
 });
 
 it('P2: content is exported as the OTel GenAI input, output and tool call attributes', function () {
@@ -234,8 +240,9 @@ it('P2: content is exported as the OTel GenAI input, output and tool call attrib
         ->and(json_decode($second['gen_ai.input.messages'], true))->toBe([
             $prompt,
             ['role' => 'assistant', 'parts' => [$call]],
-            ['role' => 'tool', 'parts' => [['type' => 'tool_call_response', 'id' => 'call_1', 'name' => 'NotesTool', 'response' => $result]]],
+            ['role' => 'tool', 'parts' => [['type' => 'tool_call_response', 'id' => 'call_1', 'name' => 'NotesTool', 'response' => GenAiTranslator::TOOL_RESULT_REFERENCE]]],
         ])
+        ->and($second['gen_ai.input.messages'])->not->toContain('Ship on Friday.')
         ->and(json_decode($second['gen_ai.output.messages'], true))->toBe([['role' => 'assistant', 'parts' => [$answer], 'finish_reason' => 'stop']])
         ->and($tool['gen_ai.tool.call.arguments'])->toBe('{"topic":"release"}')
         ->and($tool['gen_ai.tool.call.result'])->toBe($result);
@@ -513,7 +520,7 @@ it('P6: a tool result that is a file, or holds files, records [file] for each fi
     expect(TrapImage::$calls)->toBe([])
         ->and($tool['content']['result'])->toBe($expected)
         ->and(end($second['content']['input']))->toBe(['role' => 'tool', 'parts' => [
-            ['type' => 'tool_call_response', 'id' => 'call_1', 'name' => 'FileTool', 'response' => $expected],
+            ['type' => 'tool_call_response', 'id' => 'call_1', 'name' => 'FileTool'],
         ]])
         ->and(json_encode($memory->spans))->not->toContain('TRAP');
 })->with([
@@ -535,6 +542,68 @@ it('P6: a tool result that is a file, or holds files, records [file] for each fi
         '{"image":"[file]","list":["[file]","text"],"nested":{"upload":"[file]"},"json":{"image":"[file]","n":1}}',
     ],
 ]);
+
+it('P2: a tool result in the history from withMessages() is a reference only and leaves no trace of its text', function () {
+    $this->refreshApplicationWithConfig(contentConfig(['refract.capture.content' => true]));
+
+    Http::fake();
+
+    TimeAgent::fake(['Seen.']);
+    TimeAgent::make()
+        ->withMessages([
+            new UserMessage('Get the file.'),
+            new AssistantMessage('', collect([new ToolCall('call_0', 'FileTool', [])])),
+            new ToolResultMessage(collect([new ToolResult('call_0', 'FileTool', [], 'BYTES-SECRET')])),
+            new Message('tool_result', 'BYTES-SECRET'),
+        ])
+        ->prompt('Look.');
+
+    app(Recorder::class)->flush();
+
+    [$step] = exportedAttributes('chat');
+
+    expect(json_decode($step['gen_ai.input.messages'], true))->toBe([
+        ['role' => 'user', 'parts' => [['type' => 'text', 'content' => 'Get the file.']]],
+        ['role' => 'assistant', 'parts' => [['type' => 'tool_call', 'id' => 'call_0', 'name' => 'FileTool', 'arguments' => []]]],
+        ['role' => 'tool', 'parts' => [['type' => 'tool_call_response', 'id' => 'call_0', 'name' => 'FileTool', 'response' => GenAiTranslator::TOOL_RESULT_REFERENCE]]],
+        ['role' => 'tool', 'parts' => []],
+        ['role' => 'user', 'parts' => [['type' => 'text', 'content' => 'Look.']]],
+    ])->and(sentBodies())->not->toContain('SECRET');
+});
+
+it('P2: a tool result in the history of a saved conversation is a reference only and leaves no trace of its text', function () {
+    $this->refreshApplicationWithConfig(contentConfig(['refract.capture.content' => true]));
+    $this->loadMigrationsFrom(dirname(__DIR__, 2).'/vendor/laravel/ai/database/migrations');
+
+    Http::fake();
+
+    $now = now();
+
+    DB::table('agent_conversations')->insert([
+        'id' => 'conv_1', 'participant_type' => User::class, 'participant_id' => 42, 'title' => 'Files',
+        'created_at' => $now, 'updated_at' => $now,
+    ]);
+
+    DB::table('agent_conversation_messages')->insert([
+        'id' => 'msg_1', 'conversation_id' => 'conv_1', 'participant_type' => User::class, 'participant_id' => 42,
+        'agent' => ChatAgent::class, 'role' => 'assistant', 'content' => 'Here it is.', 'attachments' => '[]',
+        'steps' => json_encode([['content' => '', 'tool_calls' => [
+            ['id' => 'call_0', 'name' => 'FileTool', 'arguments' => [], 'result' => 'BYTES-SECRET'],
+        ]]]),
+        'usage' => '{}', 'meta' => '{}', 'status' => 'completed', 'created_at' => $now, 'updated_at' => $now,
+    ]);
+
+    ChatAgent::fake(['Seen.']);
+    ChatAgent::make()->continue('conv_1', as: (new User)->forceFill(['id' => 42]))->prompt('Look.');
+
+    app(Recorder::class)->flush();
+
+    [$step] = exportedAttributes('chat');
+
+    expect(json_decode($step['gen_ai.input.messages'], true))->toContain(
+        ['role' => 'tool', 'parts' => [['type' => 'tool_call_response', 'id' => 'call_0', 'name' => 'FileTool', 'response' => GenAiTranslator::TOOL_RESULT_REFERENCE]]],
+    )->and(sentBodies())->not->toContain('SECRET');
+});
 
 it('P11: a tool result object (Collection) is recorded as text', function () {
     $this->refreshApplicationWithConfig(contentConfig(['refract.capture.content' => true]));
@@ -580,7 +649,7 @@ it('P13: a value that cannot be encoded as JSON is recorded as a marker with one
 
     $content = app(Content::class);
 
-    expect($content->toolResult('run_1', 'NotesTool', [], $value()))->toBe(['result' => '[not encodable as JSON]'])
+    expect($content->toolResult($value()))->toBe(['result' => '[not encodable as JSON]'])
         ->and($content->toolArguments(['value' => $value()]))->toBe(['arguments' => '[not encodable as JSON]'])
         ->and($log->warnings)->toHaveCount(1)
         ->and($log->warnings[0])->toContain('could not be encoded as JSON')
@@ -608,7 +677,7 @@ it('P13: a tool result that cannot be encoded keeps the rest of the step content
 
     expect($tool['content'])->toBe(['arguments' => '{}', 'result' => '[not encodable as JSON]'])
         ->and($second['content']['input'][0])->toBe(['role' => 'user', 'parts' => [['type' => 'text', 'content' => 'Get the score.']]])
-        ->and(end($second['content']['input'])['parts'][0]['response'])->toBe('[not encodable as JSON]');
+        ->and(end($second['content']['input'])['parts'])->toBe([['type' => 'tool_call_response', 'id' => 'call_1', 'name' => 'FileTool']]);
 });
 
 it('P13: tool call arguments too deep to nest in the messages are exported as their JSON text', function () {
