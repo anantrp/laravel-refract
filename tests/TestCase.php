@@ -48,6 +48,20 @@ abstract class TestCase extends Orchestra
     }
 
     /**
+     * Get the SQLite file the tests use. It outlives an app refresh inside a test, unlike :memory:.
+     */
+    protected static function sqliteFile(): string
+    {
+        $path = sys_get_temp_dir().'/refract-tests.sqlite';
+
+        if (! is_file($path)) {
+            touch($path);
+        }
+
+        return $path;
+    }
+
+    /**
      * Define the environment setup.
      *
      * @param  Application  $app
@@ -59,6 +73,9 @@ abstract class TestCase extends Orchestra
             'ai.providers.openai' => ['driver' => 'openai', 'key' => 'test'],
             'ai.conversations.generate_title' => false,
             'refract.transport' => 'null',
+            // Never touch the workbench database file that level 2 uses.
+            'database.default' => 'testing',
+            'database.connections.testing' => ['driver' => 'sqlite', 'database' => self::sqliteFile(), 'prefix' => ''],
         ]);
 
         $app['config']->set($this->environmentConfig);
