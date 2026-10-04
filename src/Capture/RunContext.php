@@ -5,7 +5,7 @@ namespace Anantrp\Refract\Capture;
 use Illuminate\Database\Eloquent\Relations\Relation;
 use Illuminate\Support\Facades\Context;
 use Laravel\Ai\Contracts\Agent;
-use Laravel\Ai\Contracts\RemembersConversations;
+use Laravel\Ai\Middleware\RememberConversation;
 use Laravel\Ai\Models\Conversation;
 use Throwable;
 
@@ -39,10 +39,32 @@ class RunContext
     public function of(Agent $agent): array
     {
         return array_filter([
-            'session' => $agent instanceof RemembersConversations ? $agent->currentConversation() : null,
+            'session' => $this->session($agent),
             'participant' => $this->participant($agent),
             'values' => $this->values(),
         ], fn (mixed $value) => $value !== null && $value !== []);
+    }
+
+    /**
+     * Check whether the SDK saves the given agent's runs: by the contract or by the trait alone.
+     */
+    protected function remembers(Agent $agent): bool
+    {
+        return RememberConversation::appliesTo($agent);
+    }
+
+    /**
+     * Get the conversation id the agent continues, if any.
+     */
+    protected function session(Agent $agent): ?string
+    {
+        if (! $this->remembers($agent) || ! method_exists($agent, 'currentConversation')) {
+            return null;
+        }
+
+        $id = $agent->currentConversation();
+
+        return is_string($id) ? $id : null;
     }
 
     /**
@@ -50,10 +72,12 @@ class RunContext
      */
     protected function participant(Agent $agent): ?array
     {
-        if ($agent instanceof RemembersConversations && $agent->hasConversationParticipant()) {
+        if ($this->remembers($agent) && method_exists($agent, 'conversationParticipant')) {
             $participant = $agent->conversationParticipant();
 
-            return $participant === null ? null : $this->fromConversation($participant);
+            if (is_object($participant)) {
+                return $this->fromConversation($participant);
+            }
         }
 
         return $this->fromContext();

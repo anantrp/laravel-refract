@@ -7,6 +7,7 @@ use Illuminate\Support\Facades\Context;
 use Illuminate\Support\Facades\Http;
 use Workbench\App\Ai\Agents\ChatAgent;
 use Workbench\App\Ai\Agents\TimeAgent;
+use Workbench\App\Ai\Agents\TraitChatAgent;
 use Workbench\App\Models\Team;
 use Workbench\App\Models\User;
 
@@ -45,6 +46,23 @@ it('X1: a saved run with a User participant records the full class, the id and L
     ChatAgent::fake(['Hello.']);
 
     ChatAgent::make()->forUser((new User)->forceFill(['id' => 42]))->prompt('Hello');
+
+    [$run] = runAttributes();
+
+    expect($run)->toMatchArray([
+        'laravel.ai.participant.type' => User::class,
+        'laravel.ai.participant.id' => '42',
+        'user.id' => '42',
+    ]);
+});
+
+it('X1: a saved run of an agent that only uses the conversation trait records its participant', function () {
+    Context::add('refract.participant_type', Team::class);
+    Context::add('refract.participant_id', '99');
+
+    TraitChatAgent::fake(['Hello.']);
+
+    TraitChatAgent::make()->forUser((new User)->forceFill(['id' => 42]))->prompt('Hello');
 
     [$run] = runAttributes();
 

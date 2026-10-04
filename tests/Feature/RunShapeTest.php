@@ -18,6 +18,7 @@ use OpenTelemetry\API\Trace\TraceFlags;
 use Workbench\App\Ai\Agents\ChatAgent;
 use Workbench\App\Ai\Agents\SupervisorAgent;
 use Workbench\App\Ai\Agents\TimeAgent;
+use Workbench\App\Ai\Agents\TraitChatAgent;
 
 beforeEach(function () {
     $this->refreshApplicationWithConfig([
@@ -400,6 +401,22 @@ it('R10: two runs in one trace each keep their own session.id', function () {
         ->and($second->conversationId)->not->toBe($first->conversationId)
         ->and($sessions)->toBe([$first->conversationId, $second->conversationId, $first->conversationId])
         ->and(Otlp::attributes($runs[1]))->toHaveKey('gen_ai.conversation.id', $second->conversationId);
+});
+
+it('R10: a failed run of an agent that only uses the conversation trait keeps its session.id', function () {
+    $this->loadMigrationsFrom(dirname(__DIR__, 2).'/vendor/laravel/ai/database/migrations');
+
+    TraitChatAgent::fake(fn () => throw new RuntimeException('down'));
+
+    expect(fn () => TraitChatAgent::make()->continue('conversation-1', as: (object) ['id' => 1])->prompt('Again'))
+        ->toThrow(RuntimeException::class);
+
+    app(Recorder::class)->flush();
+
+    [$run] = Otlp::spans();
+
+    expect($run['status']['code'])->toBe(2)
+        ->and(Otlp::attributes($run))->toHaveKey('session.id', 'conversation-1');
 });
 
 it('R12: chat spans export the final_step flag as laravel.ai.final_step', function () {
