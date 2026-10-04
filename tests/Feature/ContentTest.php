@@ -14,11 +14,15 @@ use Anantrp\Refract\Tests\Support\Ai\TrapImage;
 use Anantrp\Refract\Tests\Support\Ai\TrapUpload;
 use Anantrp\Refract\Tests\Support\Otlp;
 use Anantrp\Refract\Tests\Support\WarningLog;
+use Illuminate\Contracts\Support\Arrayable;
+use Illuminate\Database\Eloquent\Collection as EloquentCollection;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Http\Client\Request;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\LazyCollection;
 use Laravel\Ai\Approvals\Decision;
 use Laravel\Ai\Approvals\PendingApproval;
 use Laravel\Ai\Contracts\Files\HasContent;
@@ -41,6 +45,7 @@ use Laravel\Ai\Messages\ToolResultMessage;
 use Laravel\Ai\Messages\UserMessage;
 use Laravel\Ai\Providers\Provider;
 use Laravel\Ai\Responses\AddedDocumentResponse;
+use Laravel\Ai\Responses\AgentResponse;
 use Laravel\Ai\Responses\AudioResponse;
 use Laravel\Ai\Responses\Data\GeneratedImage;
 use Laravel\Ai\Responses\Data\ImageUsage;
@@ -58,6 +63,11 @@ use Workbench\App\Ai\Agents\ChatAgent;
 use Workbench\App\Ai\Agents\SupervisorAgent;
 use Workbench\App\Ai\Agents\TimeAgent;
 use Workbench\App\Models\User;
+
+enum Lab: string
+{
+    case Done = 'done';
+}
 
 /**
  * The config of a working Langfuse destination, with content capture set as given.
@@ -561,7 +571,7 @@ it('P6: a tool result that is a file, or holds files, records [file] for each fi
 })->with([
     'a file' => [fn () => new TrapImage('VFJBUA==', 'image/trap'), '[file]'],
     'an upload' => [fn () => new TrapUpload, '[file]'],
-    'files in a Collection, an array, a nested Collection and a JsonSerializable' => [
+    'files in a Collection, an array, a nested Collection, and a JsonSerializable that is not walked' => [
         fn () => collect([
             'image' => new TrapImage('VFJBUA==', 'image/trap'),
             'list' => [new TrapImage('VFJBUA==', 'image/trap'), 'text'],
@@ -570,11 +580,13 @@ it('P6: a tool result that is a file, or holds files, records [file] for each fi
             {
                 public function jsonSerialize(): mixed
                 {
+                    TrapImage::called('jsonSerialize');
+
                     return ['image' => new TrapImage('VFJBUA==', 'image/trap'), 'n' => 1];
                 }
             },
         ]),
-        '{"image":"[file]","list":["[file]","text"],"nested":{"upload":"[file]"},"json":{"image":"[file]","n":1}}',
+        '{"image":"[file]","list":["[file]","text"],"nested":{"upload":"[file]"},"json":"JsonSerializable@anonymous"}',
     ],
 ]);
 
@@ -658,7 +670,7 @@ it('P6: each kind of file in a tool result records [file], directly or inside a 
     expect($content->toolResult($file()))->toBe(['result' => '[file]'])
         ->and($content->toolResult(['file' => $file(), 'n' => 1]))->toBe(['result' => '{"file":"[file]","n":1}'])
         ->and($content->toolResult(collect(['file' => $file(), 'n' => 1])))->toBe(['result' => '{"file":"[file]","n":1}'])
-        ->and($content->toolResult(['json' => $json]))->toBe(['result' => '{"json":{"file":"[file]","n":1}}']);
+        ->and($content->toolResult(['json' => $json]))->toBe(['result' => '{"json":"JsonSerializable@anonymous"}']);
 })->with([
     'an SDK file' => [fn () => new S3Document('s3://bucket/SECRET.pdf')],
     'a file with content' => [fn () => new class implements HasContent
@@ -707,6 +719,120 @@ it('P6: SDK file responses returned by a tool leave no bytes or id in the tool s
     [$tool] = ofKind($memory->spans, 'execute_tool');
 
     expect($tool['content']['result'])->toBe('{"download":"[file]","stored":"[file]","added":"[file]"}')
+        ->and(json_encode($memory->spans))->not->toContain('SECRET');
+});
+
+it('P6: an SDK response inside a Collection is its class name, so the file bytes its steps hold leave no trace', function () {
+    $this->environmentConfig = contentConfig(['refract.capture.content' => true]);
+    $memory = $this->captureNeutralSpans();
+
+    // A sub-agent answer: the SDK keeps the text of its old file results (the bytes).
+    $answer = new AgentResponse('run_1', 'Done.', new TextUsage, new Meta);
+    $answer->toolResults = collect([new ToolResult('call_0', 'FileTool', [], 'BYTES-SECRET')]);
+    $answer->steps = collect([['tool_results' => ['BYTES-SECRET']]]);
+
+    FileTool::$result = collect(['answer' => $answer, 'list' => [$answer], 'n' => 1]);
+
+    FileAgent::fakeTwoSteps();
+    FileAgent::make()->prompt('Get the file.');
+
+    app(Recorder::class)->flush();
+
+    [$tool] = ofKind($memory->spans, 'execute_tool');
+
+    expect($tool['content']['result'])->toBe('{"answer":"'.addslashes(AgentResponse::class).'","list":["'.addslashes(AgentResponse::class).'"],"n":1}')
+        ->and(json_encode($memory->spans))->not->toContain('SECRET');
+});
+
+it('P11: objects other than arrays and Collections in a tool result are their class names and are never walked, serialized or iterated', function () {
+    $this->environmentConfig = contentConfig(['refract.capture.content' => true]);
+    $this->refreshApplication();
+
+    $content = app(Content::class);
+
+    $arrayable = new class implements Arrayable
+    {
+        public string $text = 'PROPERTY-SECRET';
+
+        public function toArray(): array
+        {
+            TrapImage::called('toArray');
+
+            return ['text' => 'ARRAY-SECRET'];
+        }
+    };
+
+    $plain = new stdClass;
+    $plain->text = 'PROPERTY-SECRET';
+
+    $result = $content->toolResult(collect([
+        'arrayable' => $arrayable,
+        'plain' => $plain,
+        'enum' => Lab::Done,
+        'list' => [1, 2.5, true, null, 'text'],
+        'eloquent' => new EloquentCollection(['a' => 1]),
+    ]))['result'];
+
+    expect($result)->toBe('{"arrayable":"'.addslashes(Arrayable::class).'@anonymous","plain":"stdClass","enum":"done","list":[1,2.5,true,null,"text"],"eloquent":{"a":1}}')
+        ->and(TrapImage::$calls)->toBe([]);
+});
+
+it('P11: a LazyCollection tool result, alone or inside a Collection, is never run by Refract', function (Closure $result, string $expected) {
+    $this->environmentConfig = contentConfig(['refract.capture.content' => true]);
+    $memory = $this->captureNeutralSpans();
+
+    $lazy = LazyCollection::make(function () {
+        TrapImage::called('generator');
+
+        yield 'row' => 'QUERY-SECRET';
+    });
+
+    FileTool::$result = $result($lazy);
+
+    FileAgent::fakeTwoSteps();
+    FileAgent::make()->prompt('Get the rows.');
+
+    app(Recorder::class)->flush();
+
+    [$tool] = ofKind($memory->spans, 'execute_tool');
+
+    expect(TrapImage::$calls)->toBe([])
+        ->and($tool['content']['result'])->toBe($expected)
+        ->and(json_encode($memory->spans))->not->toContain('SECRET');
+})->with([
+    'alone' => [fn (LazyCollection $lazy) => $lazy, LazyCollection::class],
+    'in a Collection' => [fn (LazyCollection $lazy) => collect(['rows' => $lazy]), '{"rows":"'.addslashes(LazyCollection::class).'"}'],
+]);
+
+it('P11: a model inside a tool result is its class name, so its appended accessors never run', function () {
+    $this->environmentConfig = contentConfig(['refract.capture.content' => true]);
+    $memory = $this->captureNeutralSpans();
+
+    $model = new class extends Model
+    {
+        protected $appends = ['secret'];
+
+        public function getSecretAttribute(): string
+        {
+            TrapImage::called('accessor');
+
+            return 'ACCESSOR-SECRET';
+        }
+    };
+
+    $model->forceFill(['id' => 7]);
+
+    FileTool::$result = collect(['model' => $model, 'models' => new EloquentCollection([$model])]);
+
+    FileAgent::fakeTwoSteps();
+    FileAgent::make()->prompt('Get the model.');
+
+    app(Recorder::class)->flush();
+
+    [$tool] = ofKind($memory->spans, 'execute_tool');
+
+    expect(TrapImage::$calls)->toBe([])
+        ->and($tool['content']['result'])->toBe('{"model":"'.addslashes(Model::class).'@anonymous","models":["'.addslashes(Model::class).'@anonymous"]}')
         ->and(json_encode($memory->spans))->not->toContain('SECRET');
 });
 
@@ -800,4 +926,21 @@ it('P13: tool call arguments too deep to nest in the messages are exported as th
         'role' => 'assistant',
         'parts' => [['type' => 'tool_call', 'id' => 'call_1', 'name' => 'NotesTool', 'arguments' => $arguments]],
     ]]);
+});
+
+it('P13: a tool call response in messages exported as JSON text still gets its fixed response', function () {
+    $arguments = (string) json_encode(nested(510));
+
+    $span = (new GenAiTranslator)->translate([
+        'kind' => 'chat',
+        'content' => ['input' => [
+            ['role' => 'assistant', 'parts' => [['type' => 'tool_call', 'id' => 'call_1', 'name' => 'NotesTool', 'arguments' => $arguments]]],
+            ['role' => 'tool', 'parts' => [['type' => 'tool_call_response', 'id' => 'call_1', 'name' => 'NotesTool']]],
+        ]],
+    ]);
+
+    expect(json_decode($span['attributes']['gen_ai.input.messages'], true))->toBe([
+        ['role' => 'assistant', 'parts' => [['type' => 'tool_call', 'id' => 'call_1', 'name' => 'NotesTool', 'arguments' => $arguments]]],
+        ['role' => 'tool', 'parts' => [['type' => 'tool_call_response', 'id' => 'call_1', 'name' => 'NotesTool', 'response' => GenAiTranslator::TOOL_RESULT_REFERENCE]]],
+    ]);
 });

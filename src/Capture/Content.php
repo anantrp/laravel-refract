@@ -4,10 +4,9 @@ namespace Anantrp\Refract\Capture;
 
 use Anantrp\Refract\Support\Diagnostics;
 use Illuminate\Contracts\Container\Container;
-use Illuminate\Contracts\Support\Arrayable;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Enumerable;
 use JsonException;
-use JsonSerializable;
 use Laravel\Ai\Contracts\Files\HasContent;
 use Laravel\Ai\Contracts\Files\HasProviderId;
 use Laravel\Ai\Events\AddingFileToStore;
@@ -43,8 +42,12 @@ use UnitEnum;
  * Off by default. Every captured string goes through the mask, then is
  * cut at the byte cap and marked with its original size. Files are never
  * recorded: attachments are left out, and a file in a value becomes
- * "[file]" with no method of the file called. Only plain arrays and
- * scalars are returned.
+ * "[file]" with no method of the file called.
+ *
+ * A tool result is walked only through arrays and Collections; any other
+ * object in it becomes its class name and none of its methods run. A
+ * top-level Stringable result (not a collection) is cast, as the SDK
+ * does. Only plain arrays and scalars are returned.
  *
  * A tool result in a step's message history is a reference only (its
  * call id and tool name), never its text: the SDK has already turned it
@@ -307,7 +310,9 @@ class Content
         return match (true) {
             $this->isFile($value) => self::FILE,
             is_string($value) => $value,
-            is_array($value), $value instanceof Enumerable => $this->json($value),
+            is_array($value), $value instanceof Collection => $this->json($value),
+            // Any other collection (a LazyCollection runs its query when cast).
+            $value instanceof Enumerable => get_debug_type($value),
             is_scalar($value) || $value instanceof Stringable => (string) $value,
             default => get_debug_type($value),
         };
@@ -332,10 +337,13 @@ class Content
     }
 
     /**
-     * Get the given value as json_encode() would see it, with every file in it as "[file]".
+     * Get the given value as plain data for json_encode(), with every file in it as "[file]".
      *
-     * A file is caught before any of its methods can run: __toString(),
-     * jsonSerialize() and toArray() of an SDK file read, fetch or return its bytes.
+     * Only arrays and Collections (Eloquent's too) are walked. Scalars,
+     * null and enums are kept. Every other object becomes its class name
+     * and none of its methods run: jsonSerialize(), toArray() or a
+     * LazyCollection's generator can read file bytes, run accessors or
+     * queries, and an SDK response holds the bytes of old file results.
      *
      * @throws JsonException When the value is nested deeper than json_encode() allows.
      */
@@ -349,6 +357,10 @@ class Content
             return self::FILE;
         }
 
+        if ($value instanceof Collection) {
+            $value = $value->all();
+        }
+
         if (is_array($value)) {
             return array_map(fn (mixed $item) => $this->plain($item, $depth + 1), $value);
         }
@@ -357,12 +369,7 @@ class Content
             return $value;
         }
 
-        return match (true) {
-            $value instanceof Enumerable => $this->plain($value->all(), $depth),
-            $value instanceof JsonSerializable => $this->plain($value->jsonSerialize(), $depth),
-            $value instanceof Arrayable => $this->plain($value->toArray(), $depth),
-            default => (object) $this->plain(get_object_vars($value), $depth),
-        };
+        return get_debug_type($value);
     }
 
     /**
