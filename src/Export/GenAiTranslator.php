@@ -5,6 +5,9 @@ namespace Anantrp\Refract\Export;
 /**
  * Turns neutral spans into spans with OTel GenAI attributes.
  *
+ * A span closed at flush without its end event (status "abandoned") has
+ * no OTel status and the laravel.ai.abandoned attribute.
+ *
  * @see https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-agent-spans/
  *
  * @phpstan-type TranslatedSpan array{trace_id: string, span_id: string, parent_span_id: ?string, name: string, kind: int, start: int, end: int, attributes: array<string, mixed>, events: list<array{name: string, time: int, attributes: array<string, mixed>}>, status: array{code: int, message: ?string}}
@@ -14,6 +17,8 @@ class GenAiTranslator
     public const KIND_INTERNAL = 1;
 
     public const KIND_CLIENT = 3;
+
+    public const STATUS_UNSET = 0;
 
     public const STATUS_OK = 1;
 
@@ -37,7 +42,9 @@ class GenAiTranslator
             default => [$kind, self::KIND_INTERNAL, []],
         };
 
-        $error = ($span['status'] ?? null) === 'error';
+        $status = $span['status'] ?? null;
+        $error = $status === 'error';
+        $abandoned = $status === 'abandoned';
         $parent = $span['parent_span_id'] ?? null;
         $message = $span['status_message'] ?? null;
 
@@ -50,12 +57,16 @@ class GenAiTranslator
             'start' => $this->int($span, 'start'),
             'end' => $this->int($span, 'end'),
             'attributes' => array_filter(
-                ['gen_ai.operation.name' => $kind, ...$attributes],
+                ['gen_ai.operation.name' => $kind, ...$attributes, 'laravel.ai.abandoned' => $abandoned ?: null],
                 fn (mixed $value) => $value !== null,
             ),
             'events' => $this->events($span['events'] ?? null),
             'status' => [
-                'code' => $error ? self::STATUS_ERROR : self::STATUS_OK,
+                'code' => match (true) {
+                    $error => self::STATUS_ERROR,
+                    $abandoned => self::STATUS_UNSET,
+                    default => self::STATUS_OK,
+                },
                 'message' => $error && is_string($message) ? $message : null,
             ],
         ];

@@ -62,7 +62,8 @@ class LangfusePlatform implements Platform
     }
 
     /**
-     * Move siblings that start in the same millisecond to distinct milliseconds.
+     * Move siblings that start in the same millisecond to distinct milliseconds,
+     * and mark abandoned spans.
      *
      * Langfuse stores times in milliseconds and orders tied siblings at
      * random. Each trace is walked in start order, and every move shifts all
@@ -82,7 +83,23 @@ class LangfusePlatform implements Platform
             $spans = $this->spread($spans, $indexes);
         }
 
-        return $spans;
+        return array_map($this->markAbandoned(...), $spans);
+    }
+
+    /**
+     * Show an abandoned span as a warning, since Langfuse reads only the error status.
+     *
+     * @param  TranslatedSpan  $span
+     * @return TranslatedSpan
+     */
+    protected function markAbandoned(array $span): array
+    {
+        if (($span['attributes']['laravel.ai.abandoned'] ?? false) === true) {
+            $span['attributes']['langfuse.observation.level'] = 'WARNING';
+            $span['attributes']['langfuse.observation.status_message'] = 'abandoned';
+        }
+
+        return $span;
     }
 
     /**

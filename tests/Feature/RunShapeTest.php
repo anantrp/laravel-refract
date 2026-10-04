@@ -138,3 +138,95 @@ it('R3: provider failover gives one run span with the failover as an event', fun
         ->and($event['timeUnixNano'] >= $failed['endTimeUnixNano'])->toBeTrue()
         ->and($event['timeUnixNano'] <= $answered['startTimeUnixNano'])->toBeTrue();
 });
+
+it('R4: a stream read to the end gives the same tree as prompt()', function () {
+    TimeAgent::fakeTwoSteps();
+
+    foreach (TimeAgent::make()->stream('What time is it?') as $event) {
+        //
+    }
+
+    app(Recorder::class)->flush();
+
+    $spans = Otlp::spans();
+
+    expect(array_column($spans, 'name'))->toBe([
+        'invoke_agent TimeAgent',
+        'chat fake',
+        'execute_tool CurrentTime',
+        'chat fake',
+    ]);
+
+    [$run, $first, $tool, $second] = $spans;
+
+    expect($run)->not->toHaveKey('parentSpanId')
+        ->and($first['parentSpanId'])->toBe($run['spanId'])
+        ->and($tool['parentSpanId'])->toBe($run['spanId'])
+        ->and($second['parentSpanId'])->toBe($run['spanId'])
+        ->and(array_column(array_column($spans, 'status'), 'code'))->toBe([1, 1, 1, 1]);
+});
+
+it('R5: a stream stopped early has its open spans closed as abandoned at flush', function () {
+    TimeAgent::fakeTwoSteps();
+
+    foreach (TimeAgent::make()->stream('What time is it?') as $event) {
+        break;
+    }
+
+    app(Recorder::class)->flush();
+
+    $spans = Otlp::spans();
+
+    expect(array_column($spans, 'name'))->toBe([
+        'invoke_agent TimeAgent',
+        'chat fake',
+    ]);
+
+    foreach ($spans as $span) {
+        expect($span['status'])->toBe(['code' => 0])
+            ->and(Otlp::attributes($span))->toMatchArray([
+                'laravel.ai.abandoned' => true,
+                'langfuse.observation.level' => 'WARNING',
+                'langfuse.observation.status_message' => 'abandoned',
+            ]);
+    }
+
+    expect($spans[1]['parentSpanId'])->toBe($spans[0]['spanId']);
+});
+
+it('R6: a stream read again after it stopped is a separate run, not a failover', function () {
+    TimeAgent::fake(['First answer.', 'Second answer.']);
+
+    $stream = TimeAgent::make()->stream('What time is it?');
+
+    foreach ($stream as $event) {
+        break;
+    }
+
+    foreach ($stream as $event) {
+        //
+    }
+
+    app(Recorder::class)->flush();
+
+    $spans = Otlp::spans();
+
+    expect(array_column($spans, 'name'))->toBe([
+        'invoke_agent TimeAgent',
+        'chat fake',
+        'invoke_agent TimeAgent',
+        'chat fake',
+    ]);
+
+    [$stopped, $stoppedChat, $again, $againChat] = $spans;
+
+    expect(Otlp::attributes($stopped))->toHaveKey('laravel.ai.abandoned', true)
+        ->and(Otlp::attributes($stoppedChat))->toHaveKey('laravel.ai.abandoned', true)
+        ->and(Otlp::attributes($again))->not->toHaveKey('laravel.ai.abandoned')
+        ->and($again['status']['code'])->toBe(1)
+        ->and($againChat['status']['code'])->toBe(1)
+        ->and($stoppedChat['parentSpanId'])->toBe($stopped['spanId'])
+        ->and($againChat['parentSpanId'])->toBe($again['spanId'])
+        ->and($stopped['endTimeUnixNano'] <= $again['startTimeUnixNano'])->toBeTrue()
+        ->and(array_merge(...array_column($spans, 'events')))->toBe([]);
+});
