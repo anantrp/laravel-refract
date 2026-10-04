@@ -37,13 +37,19 @@
     },
     "autoload-dev": {
         "psr-4": {
-            "Anantrp\\Refract\\Tests\\": "tests/"
+            "Anantrp\\Refract\\Tests\\": "tests/",
+            "Workbench\\App\\": "workbench/app/"
         }
     },
     "scripts": {
         "test": "pest",
         "lint": "pint",
-        "analyse": "phpstan analyse --memory-limit=1G"
+        "analyse": "phpstan analyse --memory-limit=1G",
+        "build": "@php vendor/bin/testbench workbench:build --ansi",
+        "serve": [
+            "Composer\\Config::disableProcessTimeout",
+            "@php vendor/bin/testbench serve --ansi"
+        ]
     },
     "extra": {
         "laravel": {

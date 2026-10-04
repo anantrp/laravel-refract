@@ -8,3 +8,6 @@
 /phpunit.xml.dist   export-ignore
 /phpstan.neon.dist  export-ignore
 /pint.json          export-ignore
+/workbench          export-ignore
+/testbench.yaml     export-ignore
+/.claude            export-ignore
