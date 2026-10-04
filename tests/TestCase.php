@@ -7,6 +7,7 @@ use Anantrp\Refract\RefractServiceProvider;
 use Anantrp\Refract\Tests\Support\MemoryTransport;
 use Closure;
 use Illuminate\Foundation\Application;
+use Illuminate\Http\Client\Factory as HttpFactory;
 use Laravel\Ai\AiServiceProvider;
 use Orchestra\Testbench\TestCase as Orchestra;
 
@@ -87,6 +88,9 @@ abstract class TestCase extends Orchestra
         ]);
 
         $app['config']->set($this->environmentConfig);
+
+        // No test may reach a real destination: a request not faked throws.
+        $app->resolving(HttpFactory::class, fn (HttpFactory $http) => $http->preventStrayRequests());
 
         // The app environment comes from APP_ENV, which config('app.env') stands in for here.
         $environment = $this->environmentConfig['app.env'] ?? null;
