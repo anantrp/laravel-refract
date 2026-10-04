@@ -37,8 +37,11 @@ class FlushPoints
      */
     public function register(Dispatcher $events): void
     {
-        // Web requests, and a last flush when any other process ends.
-        $this->app->terminating($this->flush(...));
+        // Web requests, and a last flush when any other process ends. The
+        // boot-time callback adds the flush as the last terminating callback,
+        // after those added during the request (afterResponse jobs, the app's
+        // own callbacks). Application::terminate() re-reads the callback count.
+        $this->app->terminating(fn () => $this->app->terminating($this->flush(...)));
 
         $events->listen(JobAttempted::class, $this->jobAttempted(...));
         $events->listen(CommandStarting::class, $this->commandStarting(...));

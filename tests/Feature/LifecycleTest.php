@@ -161,6 +161,46 @@ it('L1: a web request with transport sync exports after the response is sent, on
     expect(batches()[0])->toHaveCount(4);
 });
 
+it('L1: an agent run in an afterResponse dispatch is exported once, after it ran', function () {
+    bootWeb(lifecycleConfig('sync'));
+    Http::fake();
+
+    Route::get('/agent', function () {
+        dispatch(new RunAgent)->afterResponse();
+
+        return 'ok';
+    });
+
+    $terminate = handleRequest('/agent');
+
+    Http::assertNothingSent();
+
+    $terminate();
+
+    Http::assertSentCount(1);
+    expect(batches()[0])->toHaveCount(4);
+});
+
+it('L1: an agent run in a terminating callback added after boot is exported once', function () {
+    bootWeb(lifecycleConfig('sync'));
+    Http::fake();
+
+    Route::get('/agent', function () {
+        app()->terminating(fn () => runTimeAgent());
+
+        return 'ok';
+    });
+
+    $terminate = handleRequest('/agent');
+
+    Http::assertNothingSent();
+
+    $terminate();
+
+    Http::assertSentCount(1);
+    expect(batches()[0])->toHaveCount(4);
+});
+
 it('L6: an async job is flushed at its end, and the next job on the worker starts with an empty buffer', function () {
     $this->refreshApplicationWithConfig(lifecycleConfig('sync'));
     Http::fake();
