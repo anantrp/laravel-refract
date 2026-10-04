@@ -4,6 +4,8 @@ use Anantrp\Refract\Capture\Content;
 use Anantrp\Refract\Capture\RecordAgentRuns;
 use Anantrp\Refract\Capture\RunContext;
 use Anantrp\Refract\Contracts\Transport;
+use Anantrp\Refract\Export\Platforms\Langfuse\LangfusePlatform;
+use Anantrp\Refract\Export\Platforms\Otlp\OtlpPlatform;
 use Anantrp\Refract\RefractServiceProvider;
 use Anantrp\Refract\Support\Diagnostics;
 use Anantrp\Refract\Tests\Support\Env;
@@ -320,6 +322,33 @@ it('C3: an invalid LANGFUSE_BASE_URL or REFRACT_OTLP_ENDPOINT exports nothing, w
     'true' => 'true',
     '(false)' => '(false)',
 ]);
+
+it('C3: a destination whose platform is not a Platform class exports nothing, with one warning', function (mixed $platform) {
+    Env::set(BASE_ENV);
+
+    $log = loadRefract();
+    config(['refract.destinations.otlp.platform' => $platform]);
+
+    expect(exported())->toBeNull()
+        ->and(exported())->toBeNull()
+        ->and($log->warnings)->toHaveCount(1)
+        ->and($log->warnings[0])->toContain('refract.destinations.otlp.platform');
+    Http::assertNothingSent();
+})->with([
+    'missing class' => ['App\\Platforms\\Missing'],
+    'not a platform' => [stdClass::class],
+    'not a string' => [['App\\Platforms\\Missing']],
+    'empty' => [null],
+]);
+
+it('C1: each destination names its platform class in the config', function () {
+    Env::set(BASE_ENV);
+
+    loadRefract();
+
+    expect(config('refract.destinations.otlp.platform'))->toBe(OtlpPlatform::class)
+        ->and(config('refract.destinations.langfuse.platform'))->toBe(LangfusePlatform::class);
+});
 
 /**
  * The URL env vars, the env each is tested in, a value with an underscore or

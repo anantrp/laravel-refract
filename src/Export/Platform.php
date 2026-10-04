@@ -10,6 +10,11 @@ namespace Anantrp\Refract\Export;
 interface Platform
 {
     /**
+     * Create the platform from the destination config under the given key, or get null and one warning when it cannot send.
+     */
+    public static function fromConfig(string $key): ?self;
+
+    /**
      * Get the full URL the OTLP traces are posted to.
      */
     public function endpoint(): string;

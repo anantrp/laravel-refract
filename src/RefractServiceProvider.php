@@ -13,9 +13,7 @@ use Anantrp\Refract\Export\GenAiTranslator;
 use Anantrp\Refract\Export\HttpExporter;
 use Anantrp\Refract\Export\NullExporter;
 use Anantrp\Refract\Export\OtlpJson;
-use Anantrp\Refract\Export\Platform;
-use Anantrp\Refract\Export\Platforms\Langfuse\LangfusePlatform;
-use Anantrp\Refract\Export\Platforms\Otlp\OtlpPlatform;
+use Anantrp\Refract\Export\PlatformFactory;
 use Anantrp\Refract\Support\Settings;
 use Anantrp\Refract\Transport\NullTransport;
 use Anantrp\Refract\Transport\QueueTransport;
@@ -48,7 +46,7 @@ class RefractServiceProvider extends ServiceProvider
         ));
 
         $this->app->singleton(Exporter::class, function (Application $app) {
-            $platform = $this->platform(Settings::choice('destination', ['otlp', 'langfuse'], 'otlp'));
+            $platform = PlatformFactory::fromConfig();
 
             return $platform === null ? new NullExporter : new HttpExporter(
                 $platform,
@@ -64,17 +62,6 @@ class RefractServiceProvider extends ServiceProvider
             'queue' => new QueueTransport($app, $app->make(Exporter::class)),
             default => new NullTransport,
         });
-    }
-
-    /**
-     * Build the given destination's platform from its config, or get null when it is not configured.
-     */
-    protected function platform(string $destination): ?Platform
-    {
-        return match ($destination) {
-            'langfuse' => LangfusePlatform::fromConfig('destinations.langfuse'),
-            default => OtlpPlatform::fromConfig('destinations.otlp'),
-        };
     }
 
     /**

@@ -67,6 +67,18 @@ class Settings
     }
 
     /**
+     * Get the string keys of the given configuration array, or none when it is not an array.
+     *
+     * @return list<string>
+     */
+    public static function keys(string $key): array
+    {
+        $value = config("refract.{$key}");
+
+        return is_array($value) ? array_values(array_filter(array_keys($value), is_string(...))) : [];
+    }
+
+    /**
      * Get the given configuration value as one of the allowed strings.
      *
      * @param  list<string>  $allowed

@@ -1,5 +1,8 @@
 <?php
 
+use Anantrp\Refract\Export\Platforms\Langfuse\LangfusePlatform;
+use Anantrp\Refract\Export\Platforms\Otlp\OtlpPlatform;
+
 return [
 
     /*
@@ -58,7 +61,8 @@ return [
     | Destination
     |--------------------------------------------------------------------------
     |
-    | The backend that receives the exported traces.
+    | The backend that receives the exported traces: one of the keys under
+    | "destinations" below.
     |
     | Supported: "otlp", "langfuse"
     |
@@ -117,7 +121,8 @@ return [
     | Destinations
     |--------------------------------------------------------------------------
     |
-    | Where each destination sends its traces.
+    | Where each destination sends its traces. "platform" is the class that
+    | builds the destination's requests from the rest of its config.
     |
     | "otlp": REFRACT_OTLP_ENDPOINT is the full URL traces are posted to,
     | sent with REFRACT_OTLP_HEADERS only. When it is not set, the standard
@@ -135,6 +140,7 @@ return [
     'destinations' => [
 
         'otlp' => [
+            'platform' => OtlpPlatform::class,
             'endpoint' => env('REFRACT_OTLP_ENDPOINT'),
             'headers' => env('REFRACT_OTLP_HEADERS'),
 
@@ -145,6 +151,7 @@ return [
         ],
 
         'langfuse' => [
+            'platform' => LangfusePlatform::class,
             'url' => env('LANGFUSE_BASE_URL'),
             'public_key' => env('LANGFUSE_PUBLIC_KEY'),
             'secret_key' => env('LANGFUSE_SECRET_KEY'),
