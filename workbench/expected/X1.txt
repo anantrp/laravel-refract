@@ -1,0 +1,4 @@
+environment: local
+user: 42
+invoke_agent ChatAgent  ok
+  chat fake  ok

@@ -6,11 +6,26 @@ use InvalidArgumentException;
 use OpenTelemetry\API\Trace\Span;
 use OpenTelemetry\API\Trace\SpanContext;
 use OpenTelemetry\API\Trace\TraceFlags;
+use Workbench\App\Ai\Agents\ChatAgent;
 use Workbench\App\Ai\Agents\SupervisorAgent;
 use Workbench\App\Ai\Agents\TimeAgent;
+use Workbench\App\Models\User;
 
 class Scenarios
 {
+    /**
+     * Get the environment variables the row's scenario process runs with.
+     *
+     * @return array<string, string>
+     */
+    public function environment(string $row): array
+    {
+        return match ($row) {
+            'X9' => ['APP_ENV' => 'Staging EU 1'],
+            default => [],
+        };
+    }
+
     /**
      * Run a matrix row inside a fresh active OTel span and return its trace id.
      */
@@ -21,6 +36,8 @@ class Scenarios
             'R2' => $this->r2(...),
             'R4' => $this->r4(...),
             'R5' => $this->r5(...),
+            'X1' => $this->x1(...),
+            'X9' => $this->r1(...),
             default => throw new InvalidArgumentException("No scenario for row [{$row}] yet."),
         };
 
@@ -81,5 +98,21 @@ class Scenarios
         foreach (TimeAgent::make()->stream('What time is it?') as $event) {
             break;
         }
+    }
+
+    /**
+     * A saved run with a User participant (id 42).
+     */
+    protected function x1(): void
+    {
+        $user = User::query()->updateOrCreate(['id' => 42], [
+            'name' => 'Refract X1',
+            'email' => 'x1@refract.test',
+            'password' => 'not-used',
+        ]);
+
+        ChatAgent::fake(['Hello.']);
+
+        ChatAgent::make()->forUser($user)->prompt('Hello');
     }
 }

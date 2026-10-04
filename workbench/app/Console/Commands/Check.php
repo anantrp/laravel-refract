@@ -8,6 +8,7 @@ use SebastianBergmann\Diff\Differ;
 use SebastianBergmann\Diff\Output\UnifiedDiffOutputBuilder;
 use Throwable;
 use Workbench\App\Langfuse\TreeReader;
+use Workbench\App\Scenarios;
 
 use function Orchestra\Testbench\package_path;
 
@@ -17,7 +18,7 @@ class Check extends Command
 
     protected $description = 'Run a row scenario, read its tree from Langfuse and compare it to workbench/expected/{row}.txt';
 
-    public function handle(TreeReader $reader): int
+    public function handle(TreeReader $reader, Scenarios $scenarios): int
     {
         $row = $this->argument('row');
         $row = is_string($row) ? strtoupper($row) : '';
@@ -33,6 +34,7 @@ class Check extends Command
 
             // A separate process, so Refract flushes when that command ends.
             $scenario = Process::path(package_path())
+                ->env($scenarios->environment($row))
                 ->timeout(120)
                 ->run([PHP_BINARY, 'vendor/bin/testbench', 'refract:scenario', $row]);
 

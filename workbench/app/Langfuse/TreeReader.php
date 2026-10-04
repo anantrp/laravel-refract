@@ -6,9 +6,11 @@ use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\Http;
 
 /**
- * Reads a trace's observations back from Langfuse and prints them as a tree.
+ * Reads a trace's observations back from Langfuse and prints them as a tree,
+ * with a user line when the trace has a user id (Langfuse keeps it on the
+ * observations, so the rate-limited traces endpoint is not needed).
  *
- * @phpstan-type Observation array{id: string, parent: ?string, name: string, start: float, status: string, environment: string}
+ * @phpstan-type Observation array{id: string, parent: ?string, name: string, start: float, status: string, environment: string, user: string}
  */
 class TreeReader
 {
@@ -119,6 +121,7 @@ class TreeReader
             'start' => $start === '' ? 0.0 : CarbonImmutable::parse($start)->getPreciseTimestamp(3),
             'status' => $status,
             'environment' => $this->string($row, 'environment'),
+            'user' => $this->string($row, 'userId'),
         ];
     }
 
@@ -156,6 +159,12 @@ class TreeReader
         $environments = array_unique(array_column($observations, 'environment'));
 
         $output = ['environment: '.implode(', ', $environments)];
+
+        $users = array_filter(array_unique(array_column($observations, 'user')), fn (string $user) => $user !== '');
+
+        if ($users !== []) {
+            $output[] = 'user: '.implode(', ', $users);
+        }
 
         foreach ($lines as [$label, $observation]) {
             $output[] = $withTimes
