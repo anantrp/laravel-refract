@@ -58,13 +58,18 @@ abstract class TestCase extends Orchestra
 
     /**
      * Get the SQLite file the tests use. It outlives an app refresh inside a test, unlike :memory:.
+     *
+     * Each process has its own file, so parallel and concurrent runs never
+     * share one. The file is deleted when the process ends.
      */
     protected static function sqliteFile(): string
     {
-        $path = sys_get_temp_dir().'/refract-tests.sqlite';
+        $path = sys_get_temp_dir().'/refract-tests-'.getmypid().'.sqlite';
 
         if (! is_file($path)) {
             touch($path);
+
+            register_shutdown_function(fn () => is_file($path) && unlink($path));
         }
 
         return $path;
