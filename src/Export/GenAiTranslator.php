@@ -166,7 +166,7 @@ class GenAiTranslator
 
     /**
      * Encode neutral messages as OTel GenAI messages: a tool call's arguments
-     * become an object when they are valid JSON, and a media reference
+     * become JSON again when they are valid JSON, and a media reference
      * becomes a "uri" part (URL), a "file" part (provider file id) or stays
      * a "media" part (no bytes are ever recorded, so never a "blob" part).
      */
@@ -203,9 +203,10 @@ class GenAiTranslator
         $type = $part['type'] ?? null;
 
         if ($type === 'tool_call' && is_string($part['arguments'] ?? null)) {
-            $arguments = json_decode($part['arguments'], true);
+            // Decoded to objects, so "{}" stays an object when encoded again.
+            $arguments = json_decode($part['arguments']);
 
-            return is_array($arguments) ? [...$part, 'arguments' => $arguments] : $part;
+            return is_object($arguments) || is_array($arguments) ? [...$part, 'arguments' => $arguments] : $part;
         }
 
         if ($type === 'media' && isset($part['uri'])) {

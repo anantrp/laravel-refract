@@ -235,6 +235,23 @@ it('P2: content is exported as the OTel GenAI input, output and tool call attrib
         ->and($tool['gen_ai.tool.call.result'])->toBe($result);
 });
 
+it('P2: empty tool call arguments are exported as a JSON object, not a list', function () {
+    $this->refreshApplicationWithConfig(contentConfig(['refract.capture.content' => true]));
+
+    Http::fake();
+
+    TimeAgent::fakeTwoSteps();
+    TimeAgent::make()->prompt('What time is it?');
+
+    app(Recorder::class)->flush();
+
+    [$first] = exportedAttributes('chat');
+    [$tool] = exportedAttributes('execute_tool');
+
+    expect($first['gen_ai.output.messages'])->toContain('"arguments":{}')
+        ->and($tool['gen_ai.tool.call.arguments'])->toBe('{}');
+});
+
 it('P2: a stream records the same content as prompt()', function () {
     $this->environmentConfig = contentConfig(['refract.capture.content' => true]);
     $memory = $this->captureNeutralSpans();
