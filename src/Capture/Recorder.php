@@ -11,8 +11,9 @@ use OpenTelemetry\API\Trace\Span;
  * Times are read from the monotonic clock while recording and turned into
  * wall clock times at each flush.
  *
- * @phpstan-type OpenSpan array{trace_id: string, span_id: string, parent_span_id: ?string, kind: string, start: int, call: array<string, mixed>}
- * @phpstan-type FinishedSpan array{trace_id: string, span_id: string, parent_span_id: ?string, kind: string, start: int, end: int, status: string, status_message: ?string, call: array<string, mixed>}
+ * @phpstan-type SpanEvent array{kind: string, time: int, call: array<string, mixed>}
+ * @phpstan-type OpenSpan array{trace_id: string, span_id: string, parent_span_id: ?string, kind: string, start: int, call: array<string, mixed>, events: list<SpanEvent>}
+ * @phpstan-type FinishedSpan array{trace_id: string, span_id: string, parent_span_id: ?string, kind: string, start: int, end: int, status: string, status_message: ?string, call: array<string, mixed>, events: list<SpanEvent>}
  */
 class Recorder
 {
@@ -36,6 +37,13 @@ class Recorder
     protected array $finished = [];
 
     /**
+     * The index in the finished spans of each span ended since the last flush, keyed by its capture key.
+     *
+     * @var array<string, int>
+     */
+    protected array $ended = [];
+
+    /**
      * Create a new recorder instance.
      */
     public function __construct(protected Transport $transport) {}
@@ -43,10 +51,16 @@ class Recorder
     /**
      * Start a span under the given parent, or under the app's active trace.
      *
+     * A span still open under the same key is closed as abandoned first.
+     *
      * @param  array<string, mixed>  $call
      */
     public function start(string $key, string $kind, ?string $parentKey, array $call): void
     {
+        if (isset($this->open[$key])) {
+            $this->abandon($key);
+        }
+
         $parent = $parentKey === null ? null : ($this->open[$parentKey] ?? null);
 
         if ($parent !== null) {
@@ -63,7 +77,16 @@ class Recorder
             'kind' => $kind,
             'start' => $this->monotonic(),
             'call' => $call,
+            'events' => [],
         ];
+    }
+
+    /**
+     * Check whether a span is open under the given key.
+     */
+    public function isOpen(string $key): bool
+    {
+        return isset($this->open[$key]);
     }
 
     /**
@@ -88,13 +111,81 @@ class Recorder
             'status' => $status,
             'status_message' => $message,
         ];
+
+        $this->ended[$key] = array_key_last($this->finished);
     }
 
     /**
-     * Hand the finished spans to the transport as one batch.
+     * Add an event to the given span.
+     *
+     * A span that already ended keeps the event at its end, so the event
+     * stays inside the span's time.
+     *
+     * @param  array<string, mixed>  $call
+     */
+    public function event(string $key, string $kind, array $call = []): void
+    {
+        $time = $this->monotonic();
+
+        if (isset($this->open[$key])) {
+            $this->open[$key]['events'][] = ['kind' => $kind, 'time' => $time, 'call' => $call];
+
+            return;
+        }
+
+        $index = $this->ended[$key] ?? null;
+
+        if ($index === null) {
+            return;
+        }
+
+        $span = $this->finished[$index];
+        $span['events'][] = ['kind' => $kind, 'time' => min($time, $span['end']), 'call' => $call];
+        $this->finished[$index] = $span;
+    }
+
+    /**
+     * Close the given open span and every open span under it as abandoned.
+     */
+    public function abandon(string $key): void
+    {
+        $span = $this->open[$key] ?? null;
+
+        if ($span === null) {
+            return;
+        }
+
+        $ids = [$span['span_id'] => true];
+        $keys = [$key];
+
+        do {
+            $found = false;
+
+            foreach ($this->open as $openKey => $open) {
+                if (! in_array($openKey, $keys, true) && isset($ids[$open['parent_span_id'] ?? ''])) {
+                    $ids[$open['span_id']] = true;
+                    $keys[] = $openKey;
+                    $found = true;
+                }
+            }
+        } while ($found);
+
+        foreach (array_reverse($keys) as $openKey) {
+            $this->end($openKey, 'abandoned');
+        }
+    }
+
+    /**
+     * Close every open span as abandoned, then hand the finished spans to the transport as one batch.
      */
     public function flush(): void
     {
+        foreach (array_keys($this->open) as $key) {
+            $this->end($key, 'abandoned');
+        }
+
+        $this->ended = [];
+
         if ($this->finished === []) {
             return;
         }
@@ -117,7 +208,11 @@ class Recorder
             'call' => $span['call'],
             'content' => [],
             'context' => [],
-            'events' => [],
+            'events' => array_map(fn (array $event) => [
+                'kind' => $event['kind'],
+                'time' => $event['time'] + $offset,
+                'call' => $event['call'],
+            ], $span['events']),
         ], $finished));
     }
 

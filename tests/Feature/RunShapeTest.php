@@ -3,6 +3,8 @@
 use Anantrp\Refract\Capture\Recorder;
 use Anantrp\Refract\Tests\Support\Otlp;
 use Illuminate\Support\Facades\Http;
+use Laravel\Ai\Contracts\Providers\TextProvider;
+use Laravel\Ai\Exceptions\RateLimitedException;
 use Workbench\App\Ai\Agents\SupervisorAgent;
 use Workbench\App\Ai\Agents\TimeAgent;
 
@@ -95,4 +97,44 @@ it('R2: a sub-agent run called from a tool nests under that tool span', function
         ->and(array_unique(array_column($spans, 'traceId')))->toHaveCount(1)
         ->and($subRun['startTimeUnixNano'] >= $tool['startTimeUnixNano'])->toBeTrue()
         ->and($subRun['endTimeUnixNano'] <= $tool['endTimeUnixNano'])->toBeTrue();
+});
+
+it('R3: provider failover gives one run span with the failover as an event', function () {
+    config(['ai.providers.anthropic' => ['driver' => 'anthropic', 'key' => 'test']]);
+
+    TimeAgent::fake(fn (string $prompt, $attachments, TextProvider $provider) => $provider->name() === 'openai'
+        ? throw RateLimitedException::forProvider('openai')
+        : 'It is 12:00.');
+
+    TimeAgent::make()->prompt('What time is it?', provider: ['openai' => 'gpt-a', 'anthropic' => 'claude-b']);
+
+    app(Recorder::class)->flush();
+
+    $spans = Otlp::spans();
+
+    expect(array_column($spans, 'name'))->toBe([
+        'invoke_agent TimeAgent',
+        'chat gpt-a',
+        'chat claude-b',
+    ]);
+
+    [$run, $failed, $answered] = $spans;
+
+    expect($run['status']['code'])->toBe(1)
+        ->and($failed['status'])->toBe(['code' => 2, 'message' => RateLimitedException::class])
+        ->and($answered['status']['code'])->toBe(1)
+        ->and($failed['parentSpanId'])->toBe($run['spanId'])
+        ->and($answered['parentSpanId'])->toBe($run['spanId'])
+        ->and($run['events'])->toHaveCount(1);
+
+    $event = $run['events'][0];
+
+    expect($event['name'])->toBe('laravel.ai.failover')
+        ->and(Otlp::attributes($event))->toBe([
+            'gen_ai.provider.name' => 'openai',
+            'gen_ai.request.model' => 'gpt-a',
+            'error.type' => RateLimitedException::class,
+        ])
+        ->and($event['timeUnixNano'] >= $failed['endTimeUnixNano'])->toBeTrue()
+        ->and($event['timeUnixNano'] <= $answered['startTimeUnixNano'])->toBeTrue();
 });

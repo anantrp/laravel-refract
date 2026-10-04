@@ -6,6 +6,7 @@ use Illuminate\Contracts\Events\Dispatcher;
 use Laravel\Ai\Contracts\Agent;
 use Laravel\Ai\Contracts\CanActAsTool;
 use Laravel\Ai\Events\AgentFailed;
+use Laravel\Ai\Events\AgentFailedOver;
 use Laravel\Ai\Events\AgentPrompted;
 use Laravel\Ai\Events\AgentStreamed;
 use Laravel\Ai\Events\InvokingTool;
@@ -25,6 +26,13 @@ use Laravel\Ai\Tools\ToolNameResolver;
 class RecordAgentRuns
 {
     /**
+     * The invocation ids that failed over and are waiting for their next attempt.
+     *
+     * @var array<string, true>
+     */
+    protected array $failingOver = [];
+
+    /**
      * Create a new listener instance.
      */
     public function __construct(protected Recorder $recorder) {}
@@ -37,6 +45,7 @@ class RecordAgentRuns
         $events->listen([PromptingAgent::class, StreamingAgent::class], $this->promptingAgent(...));
         $events->listen([AgentPrompted::class, AgentStreamed::class], $this->agentPrompted(...));
         $events->listen(AgentFailed::class, $this->agentFailed(...));
+        $events->listen(AgentFailedOver::class, $this->agentFailedOver(...));
         $events->listen(StartingStep::class, $this->startingStep(...));
         $events->listen(StepCompleted::class, $this->stepCompleted(...));
         $events->listen(StepFailed::class, $this->stepFailed(...));
@@ -47,9 +56,19 @@ class RecordAgentRuns
 
     /**
      * Start the run span. A sub-agent run nests under the tool span that called it.
+     *
+     * The attempt after a failover keeps the run span it failed over from.
      */
     public function promptingAgent(PromptingAgent $event): void
     {
+        if (isset($this->failingOver[$event->invocationId])) {
+            unset($this->failingOver[$event->invocationId]);
+
+            if ($this->recorder->isOpen($this->runKey($event->invocationId))) {
+                return;
+            }
+        }
+
         $agent = $event->prompt->agent;
         $parentTool = $event->prompt->parentToolInvocationId;
 
@@ -70,6 +89,20 @@ class RecordAgentRuns
     public function agentFailed(AgentFailed $event): void
     {
         $this->recorder->end($this->runKey($event->invocationId), 'error', $event->exception::class);
+    }
+
+    /**
+     * Record the failover as an event on the run span. The next attempt continues that span.
+     */
+    public function agentFailedOver(AgentFailedOver $event): void
+    {
+        $this->failingOver[$event->invocationId] = true;
+
+        $this->recorder->event($this->runKey($event->invocationId), 'failover', [
+            'provider' => $this->providerName($event->provider),
+            'model' => $event->model,
+            'error' => $event->exception::class,
+        ]);
     }
 
     public function startingStep(StartingStep $event): void

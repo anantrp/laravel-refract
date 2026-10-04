@@ -53,7 +53,7 @@ class GenAiTranslator
                 ['gen_ai.operation.name' => $kind, ...$attributes],
                 fn (mixed $value) => $value !== null,
             ),
-            'events' => [],
+            'events' => $this->events($span['events'] ?? null),
             'status' => [
                 'code' => $error ? self::STATUS_ERROR : self::STATUS_OK,
                 'message' => $error && is_string($message) ? $message : null,
@@ -111,6 +111,45 @@ class GenAiTranslator
             'gen_ai.tool.type' => 'function',
             'laravel.ai.tool_invocation_id' => $call['tool_invocation_id'] ?? null,
         ]];
+    }
+
+    /**
+     * Translate the neutral span's events.
+     *
+     * @return list<array{name: string, time: int, attributes: array<string, mixed>}>
+     */
+    protected function events(mixed $events): array
+    {
+        if (! is_array($events)) {
+            return [];
+        }
+
+        $translated = [];
+
+        foreach ($events as $event) {
+            if (! is_array($event)) {
+                continue;
+            }
+
+            $call = is_array($event['call'] ?? null) ? $event['call'] : [];
+
+            [$name, $attributes] = match ($this->string($event, 'kind')) {
+                'failover' => ['laravel.ai.failover', [
+                    'gen_ai.provider.name' => $call['provider'] ?? null,
+                    'gen_ai.request.model' => $call['model'] ?? null,
+                    'error.type' => $call['error'] ?? null,
+                ]],
+                default => [$this->string($event, 'kind'), []],
+            };
+
+            $translated[] = [
+                'name' => $name,
+                'time' => $this->int($event, 'time'),
+                'attributes' => array_filter($attributes, fn (mixed $value) => $value !== null),
+            ];
+        }
+
+        return $translated;
     }
 
     /**
