@@ -65,6 +65,14 @@ class GenAiTranslator
         $parent = $span['parent_span_id'] ?? null;
         $message = $span['status_message'] ?? null;
 
+        $own = [
+            'gen_ai.operation.name' => $kind,
+            ...$attributes,
+            ...$this->content($kind, $content),
+            ...$this->context($context),
+            'laravel.ai.abandoned' => $abandoned ?: null,
+        ];
+
         return [
             'trace_id' => $this->string($span, 'trace_id'),
             'span_id' => $this->string($span, 'span_id'),
@@ -73,16 +81,8 @@ class GenAiTranslator
             'kind' => $spanKind,
             'start' => $this->int($span, 'start'),
             'end' => $this->int($span, 'end'),
-            'attributes' => array_filter(
-                [
-                    'gen_ai.operation.name' => $kind,
-                    ...$attributes,
-                    ...$this->content($kind, $content),
-                    ...$this->context($context),
-                    'laravel.ai.abandoned' => $abandoned ?: null,
-                ],
-                fn (mixed $value) => $value !== null,
-            ) + $this->mapped($context),
+            // A mapped value never takes the name of a real attribute, even one that is empty here.
+            'attributes' => array_filter($own, fn (mixed $value) => $value !== null) + array_diff_key($this->mapped($context), $own),
             'events' => $this->events($span['events'] ?? null),
             'status' => [
                 'code' => match (true) {
@@ -256,7 +256,7 @@ class GenAiTranslator
     }
 
     /**
-     * Translate the mapped Laravel Context values. A real attribute of the same name wins over them.
+     * Translate the mapped Laravel Context values. A real attribute of the same name wins over them, set or not.
      *
      * @param  array<array-key, mixed>  $context
      * @return array<string, mixed>

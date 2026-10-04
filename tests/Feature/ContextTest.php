@@ -216,6 +216,37 @@ it('X8: a mapped Context key named like a GenAI attribute loses to the real valu
     ]);
 });
 
+it('X8: a mapped Context key never fills a real attribute that is empty, so it cannot make a participant or user.id', function () {
+    $this->refreshApplicationWithConfig([
+        ...$this->environmentConfig,
+        'refract.context.attributes' => [
+            'owner_type' => 'laravel.ai.participant.type',
+            'owner_id' => 'laravel.ai.participant.id',
+            'thread' => 'session.id',
+            'tenant' => 'app.tenant',
+        ],
+    ]);
+
+    Http::fake();
+
+    Context::add('owner_type', User::class);
+    Context::add('owner_id', '42');
+    Context::add('thread', 'thread-1');
+    Context::add('tenant', 'acme');
+
+    TimeAgent::fakeTwoSteps();
+
+    TimeAgent::make()->prompt('What time is it?');
+
+    [$run] = runAttributes();
+
+    expect($run)->not->toHaveKey('laravel.ai.participant.type')
+        ->and($run)->not->toHaveKey('laravel.ai.participant.id')
+        ->and($run)->not->toHaveKey('user.id')
+        ->and($run)->not->toHaveKey('session.id')
+        ->and($run)->toHaveKey('app.tenant', 'acme');
+});
+
 it('X9: APP_ENV "Staging EU 1" is sent to Langfuse as staging-eu-1', function () {
     $this->refreshApplicationWithConfig([
         ...$this->environmentConfig,
