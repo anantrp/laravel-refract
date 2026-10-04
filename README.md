@@ -242,7 +242,7 @@ How values are recorded:
 - **Byte cap.** Each value is cut at `REFRACT_CAPTURE_MAX_BYTES` (default 128 KB, at least 64), at a character border, and marked with its original size: `…[cut, original size N bytes]`.
 - **No files or media.** Attachments and files are never recorded, with capture on or off: no bytes, no name, no URL, no size. A file inside a value, for example a tool that returns an image, becomes `[file]`.
 - **Tool results in step history.** In a `chat` span's input messages, a tool result is only a reference (tool name and call id). The result itself is on the `execute_tool` span.
-- **Tool results.** A string is recorded as is. Arrays and Collections are recorded in full as JSON. A top-level `Stringable` result is cast with `__toString()`, as the SDK does. Any other object, and every object inside an array or Collection, is recorded as its class name, and none of its methods run. A value that cannot be encoded as JSON is recorded as `[not encodable as JSON]`, with one warning.
+- **Tool results.** A string is recorded as is. Arrays and Collections are recorded in full as JSON. A top-level `Stringable` result is cast with `__toString()`, as the SDK does. Inside an array or Collection, nested arrays and Collections are walked, enums keep their value, files become `[file]`, and any other object is recorded as its class name, with none of its methods run. Any other top-level object is recorded as its class name too. A value that cannot be encoded as JSON is recorded as `[not encodable as JSON]`, with one warning.
 - **No built-in redaction.** Refract does not look for secrets. Use a `mask`.
 
 ### Mask
