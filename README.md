@@ -1,6 +1,6 @@
 # Laravel Refract
 
-Refract records every [Laravel AI SDK](https://github.com/laravel/ai) agent run as an OpenTelemetry trace. It sends the trace as OTLP JSON over HTTP to [Langfuse](https://langfuse.com) or to any OTLP backend.
+Refract records every [Laravel AI SDK](https://github.com/laravel/ai) agent run as OpenTelemetry spans. It sends them as OTLP JSON over HTTP to [Langfuse](https://langfuse.com) or to any OTLP backend.
 
 Install it, set a few environment variables, and you are done. There is no API to learn and no code to change.
 
@@ -50,7 +50,7 @@ To export from a queue worker instead of after the response, add:
 REFRACT_TRANSPORT=queue
 ```
 
-Run any agent. Each run becomes one trace.
+Run any agent. Each run is recorded as a tree of spans. A run starts a new trace, or joins your app's active OpenTelemetry trace when there is one. A sub-agent run nests inside the run that called it.
 
 ## Configuration
 
@@ -105,7 +105,7 @@ If you edit `destinations` in a published config, keep each destination's `'plat
 
 ## What a Trace Looks Like
 
-Each agent run is one `invoke_agent` span. Each model call in the run is a `chat` span under it. Each tool call is an `execute_tool` span under it. Children are in start order.
+Each agent run is one `invoke_agent` span, named after the agent's class. Each model call in the run is a `chat` span under it. Each tool call is an `execute_tool` span under it. Children are in start order.
 
 ```text
 invoke_agent SupportAgent
@@ -114,12 +114,12 @@ invoke_agent SupportAgent
   chat gpt-5
 ```
 
-- **Sub-agents.** An agent called from a tool nests under that tool's span. It uses the session and participant of its parent run.
+- **Sub-agents.** An agent called from a tool nests under that tool's span, in the same trace. Its run is named after that tool. It uses the session and participant of its parent run.
 - **Failover.** When a provider fails and the next one answers, there is still one run span. It shows the provider and model that answered. The failed attempt is a `laravel.ai.failover` event with its provider, model and exception class.
 - **Tool approvals.** Requests and decisions are `laravel.ai.tool_approval.requested` and `laravel.ai.tool_approval.resolved` events on the run span. A run resumed from approvals records no prompt, since none was sent.
 - **Streams.** A stream read to the end gives the same tree as `prompt()`. A stream read again after it stopped is a separate run.
 - **Abandoned spans.** A span still open when Refract exports (for example, a stream the app stopped reading) is closed as abandoned. It has no OTel status and the attribute `laravel.ai.abandoned=true`. Langfuse shows it as a warning with the message `abandoned`.
-- **Errors.** A run that throws gets status `error` with the exception class. Your app gets the same exception. The exception message is never recorded.
+- **Errors.** A run, model call or tool that throws gets status `error` and the attribute `error.type`, both the exception class. Your app gets the same exception. The exception message is never recorded.
 
 ### Attributes
 
@@ -135,6 +135,7 @@ invoke_agent SupportAgent
 | `laravel.ai.tool_invocation_id` | `execute_tool` |
 | `session.id`, `gen_ai.conversation.id` | `invoke_agent`, from the SDK conversation id |
 | `laravel.ai.participant.type`, `laravel.ai.participant.id` | `invoke_agent`. See [Participant](#participant) |
+| `error.type` | any span that failed: the exception class |
 | your mapped `Context` keys | `invoke_agent`. See [Context Attributes](#context-attributes) |
 
 Every trace also carries the resource attributes `service.name` and `deployment.environment.name`.
@@ -143,7 +144,7 @@ Content attributes (`gen_ai.input.messages`, `gen_ai.output.messages`, `gen_ai.t
 
 ### Joining an Active Trace
 
-If your app already has an active OpenTelemetry span (through `open-telemetry/api`), the run joins that trace as a child of that span. Otherwise each run starts a new trace.
+If your app already has an active OpenTelemetry span (through `open-telemetry/api`), the run joins that trace as a child of that span. Otherwise each top-level run starts a new trace; a sub-agent run stays in the trace of the run that called it.
 
 ## Destinations
 
@@ -180,6 +181,7 @@ LANGFUSE_SECRET_KEY=sk-lf-...
 - Langfuse names tool observations by the tool name, so `execute_tool LookupOrder` shows as `LookupOrder`.
 - Langfuse stores times in milliseconds. Spans that start in the same millisecond are moved to distinct milliseconds, so they keep their order. Parents still cover their children and events stay inside their span.
 - `user.id` is set only from a user participant: the participant type must implement `Illuminate\Contracts\Auth\Authenticatable`. A `Team` participant gets no `user.id`. A `Context` mapping never sets `user.id`.
+- A `Context` mapping never sets a `langfuse.*` attribute. Refract sets those itself, for example on abandoned spans.
 
 ## Transports
 
@@ -209,9 +211,11 @@ The job goes to your default queue connection and its default queue.
 | --- | --- | --- |
 | 2xx | Done | Done |
 | Network error, 408, 429, 5xx | Dropped, one warning | Retried (3 tries, 10 s apart), then one warning |
-| Any other status (400, 401, 403, 404, ...) | Dropped, one warning | Dropped, one warning |
+| Any other status (3xx, 400, 401, 403, 404, ...) | Dropped, one warning | Dropped, one warning |
 
-A rejected batch's warning names the status and the first 200 characters of the response body. Header lines and `Authorization`, `Bearer` and `Basic` values echoed in the body are removed. The HTTP timeout is 5 seconds.
+A rejected batch's warning names the status and the first 200 characters of the response body. Credentials the destination echoes in the body are masked as `[removed]`: values under key names that contain `key`, `token`, `secret`, `auth`, `password`, `passwd`, `credential` or `cookie` (in JSON, in header lines and in `key=value` pairs), and `Bearer` and `Basic` tokens. Other text, such as a plain error line, is kept.
+
+Redirects are never followed, so your keys and headers never go to another host. A 3xx is dropped like any other rejected status. The HTTP timeout is 5 seconds.
 
 ### No Endpoint
 
@@ -238,7 +242,7 @@ How values are recorded:
 - **Byte cap.** Each value is cut at `REFRACT_CAPTURE_MAX_BYTES` (default 128 KB, at least 64), at a character border, and marked with its original size: `…[cut, original size N bytes]`.
 - **No files or media.** Attachments and files are never recorded, with capture on or off: no bytes, no name, no URL, no size. A file inside a value, for example a tool that returns an image, becomes `[file]`.
 - **Tool results in step history.** In a `chat` span's input messages, a tool result is only a reference (tool name and call id). The result itself is on the `execute_tool` span.
-- **Tool results.** A string is recorded as is. Arrays and Collections are recorded in full as JSON. Any other object, at the top or inside an array, is recorded as its class name, and none of its methods run. A value that cannot be encoded as JSON is recorded as `[not encodable as JSON]`, with one warning.
+- **Tool results.** A string is recorded as is. Arrays and Collections are recorded in full as JSON. A top-level `Stringable` result is cast with `__toString()`, as the SDK does. Any other object, and every object inside an array or Collection, is recorded as its class name, and none of its methods run. A value that cannot be encoded as JSON is recorded as `[not encodable as JSON]`, with one warning.
 - **No built-in redaction.** Refract does not look for secrets. Use a `mask`.
 
 ### Mask
@@ -330,12 +334,13 @@ Context::add('trigger', 'schedule');
 
 - Only scalar values are copied, and only onto the `invoke_agent` span. Sub-agents use their parent run's values.
 - A mapped key never replaces an attribute Refract sets on the run span, even an empty one.
-- A mapped key never sets `user.id`.
+- A mapped key never sets `user.id`, and on Langfuse never sets a `langfuse.*` attribute.
+- A numeric attribute name, such as `'123'`, is sent as the string `"123"`.
 
 ## Safety
 
 - **Refract never breaks your app.** Every listener and lifecycle hook is guarded. A failure inside Refract logs one warning and the run goes on. Your app's own exceptions pass through unchanged.
-- **No extra calls.** Refract never calls agent methods that run your code (`instructions()`, `tools()`) and runs no queries.
+- **No extra calls.** Refract never calls agent methods that run your code (`instructions()`, `tools()`) and runs no queries. A run is named without calling the agent's `name()`. To name a tool span, Refract reads the tool name the way the SDK does, which calls `name()` of an agent used as a tool.
 - **Warnings.** Each warning is logged at the `warning` level, prefixed `[refract]`, once per kind per process. After 10 different warnings, Refract stays silent.
 - **Bounded memory.** The buffer holds at most 1,000 spans per request, job or command. Past that, new spans are dropped and one warning is logged.
 

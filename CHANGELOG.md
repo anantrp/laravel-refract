@@ -2,15 +2,19 @@
 
 All notable changes to this project are documented in this file.
 
-## Unreleased
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-### 0.1.0
+## [Unreleased]
+
+## [0.1.0] - unreleased
 
 First release.
 
-- Records every Laravel AI SDK agent run as an OpenTelemetry trace: `invoke_agent`, `chat` and `execute_tool` spans, sub-agents nested under their tool, failover and tool approvals as events, streams traced like `prompt()`.
-- OTel GenAI attributes plus `laravel.ai.*`, `session.id`, the run's participant, `service.name` and `deployment.environment.name`. Joins an active OpenTelemetry trace.
-- Destinations: `otlp` (any OTLP/HTTP JSON backend) and `langfuse`.
+### Added
+
+- Records every Laravel AI SDK agent run as OpenTelemetry spans: `invoke_agent`, `chat` and `execute_tool` spans, sub-agents nested under their tool, failover and tool approvals as events, streams traced like `prompt()`.
+- OTel GenAI attributes plus `laravel.ai.*`, `session.id`, the run's participant, `service.name` and `deployment.environment.name`. `error.type` on failed spans. Joins an active OpenTelemetry trace.
+- Destinations: `otlp` (any OTLP/HTTP JSON backend) and `langfuse`. Redirects are never followed.
 - Transports: `sync`, `queue` (async drivers only) and `null`. No network call before the response.
 - Opt-in content capture with a byte cap per value and an optional `mask` class. Files and media are never recorded.
 - Laravel `Context` keys mapped to span attributes through the config.
