@@ -3,6 +3,7 @@
 use Anantrp\Refract\Capture\Recorder;
 use Anantrp\Refract\Tests\Support\Otlp;
 use Illuminate\Support\Facades\Http;
+use Workbench\App\Ai\Agents\SupervisorAgent;
 use Workbench\App\Ai\Agents\TimeAgent;
 
 beforeEach(function () {
@@ -61,4 +62,37 @@ it('R1: prompt() with 2 steps and 1 tool gives invoke_agent > chat, execute_tool
     Http::assertSentCount(1);
     Http::assertSent(fn ($request) => $request->url() === 'https://cloud.langfuse.com/api/public/otel/v1/traces'
         && $request->hasHeader('Authorization', 'Basic '.base64_encode('pk-test:sk-test')));
+});
+
+it('R2: a sub-agent run called from a tool nests under that tool span', function () {
+    SupervisorAgent::fakeTwoSteps();
+
+    SupervisorAgent::make()->prompt('Ask for the time.');
+
+    app(Recorder::class)->flush();
+
+    $spans = Otlp::spans();
+
+    expect(array_column($spans, 'name'))->toBe([
+        'invoke_agent SupervisorAgent',
+        'chat fake',
+        'execute_tool TimeAgent',
+        'invoke_agent TimeAgent',
+        'chat fake',
+        'execute_tool CurrentTime',
+        'chat fake',
+        'chat fake',
+    ]);
+
+    [$run, $first, $tool, $subRun, $subFirst, $subTool, $subSecond, $second] = $spans;
+
+    expect($tool['parentSpanId'])->toBe($run['spanId'])
+        ->and($subRun['parentSpanId'])->toBe($tool['spanId'])
+        ->and($subFirst['parentSpanId'])->toBe($subRun['spanId'])
+        ->and($subTool['parentSpanId'])->toBe($subRun['spanId'])
+        ->and($subSecond['parentSpanId'])->toBe($subRun['spanId'])
+        ->and($second['parentSpanId'])->toBe($run['spanId'])
+        ->and(array_unique(array_column($spans, 'traceId')))->toHaveCount(1)
+        ->and($subRun['startTimeUnixNano'] >= $tool['startTimeUnixNano'])->toBeTrue()
+        ->and($subRun['endTimeUnixNano'] <= $tool['endTimeUnixNano'])->toBeTrue();
 });

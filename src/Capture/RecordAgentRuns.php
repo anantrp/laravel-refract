@@ -45,11 +45,15 @@ class RecordAgentRuns
         $events->listen(ToolFailed::class, $this->toolFailed(...));
     }
 
+    /**
+     * Start the run span. A sub-agent run nests under the tool span that called it.
+     */
     public function promptingAgent(PromptingAgent $event): void
     {
         $agent = $event->prompt->agent;
+        $parentTool = $event->prompt->parentToolInvocationId;
 
-        $this->recorder->start($this->runKey($event->invocationId), 'invoke_agent', null, [
+        $this->recorder->start($this->runKey($event->invocationId), 'invoke_agent', $parentTool === null ? null : $this->toolKey($parentTool), [
             'invocation_id' => $event->invocationId,
             'agent' => $this->agentName($agent),
             'agent_class' => $agent::class,

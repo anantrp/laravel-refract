@@ -2,12 +2,15 @@
 
 namespace Anantrp\Refract\Export\Platforms\Langfuse;
 
+use Anantrp\Refract\Export\GenAiTranslator;
 use Anantrp\Refract\Export\Platform;
 
 /**
  * Langfuse: Basic auth, its ingestion header and its OTLP path.
  *
  * @see https://langfuse.com/integrations/native/opentelemetry
+ *
+ * @phpstan-import-type TranslatedSpan from GenAiTranslator
  */
 class LangfusePlatform implements Platform
 {
@@ -62,67 +65,134 @@ class LangfusePlatform implements Platform
      * Move siblings that start in the same millisecond to distinct milliseconds.
      *
      * Langfuse stores times in milliseconds and orders tied siblings at
-     * random. Parents are moved before their children, so a child never
-     * starts before its parent, and a parent is stretched to cover its
-     * children. A span outside the parent tree (a cycle)
-     * is left as it is.
+     * random. Each trace is walked in start order, and every move shifts all
+     * later times of that trace by the same amount, so a parent still covers
+     * its children, a span that started after another ended still does, and
+     * events stay inside their span.
      */
     public function prepare(array $spans): array
     {
-        $ids = [];
-
-        foreach ($spans as $span) {
-            $ids[$span['trace_id'].'/'.$span['span_id']] = true;
-        }
-
-        $children = [];
+        $traces = [];
 
         foreach ($spans as $index => $span) {
-            $parent = $span['trace_id'].'/'.($span['parent_span_id'] ?? '');
-            $children[isset($ids[$parent]) ? $parent : $span['trace_id'].'/'][] = $index;
+            $traces[$span['trace_id']][] = $index;
         }
 
-        $roots = array_keys(array_diff_key($children, $ids));
-        $queue = array_map(fn (string $key) => [$key, PHP_INT_MIN, null], $roots);
-        $order = [];
-
-        while ($queue !== []) {
-            [$parent, $floor, $parentIndex] = array_shift($queue);
-
-            $group = $children[$parent] ?? [];
-            usort($group, fn (int $a, int $b) => $spans[$a]['start'] <=> $spans[$b]['start']);
-
-            $previous = null;
-
-            foreach ($group as $index) {
-                $span = $spans[$index];
-                $start = max($span['start'], $floor);
-                $millisecond = intdiv($start, self::MILLISECOND);
-
-                if ($previous !== null && $millisecond <= $previous) {
-                    $millisecond = $previous + 1;
-                    $start = $millisecond * self::MILLISECOND;
-                }
-
-                $previous = $millisecond;
-                $span['start'] = $start;
-                $span['end'] = max($span['end'], $start);
-                $spans[$index] = $span;
-
-                $order[] = [$index, $parentIndex];
-                $queue[] = [$span['trace_id'].'/'.$span['span_id'], $start, $index];
-            }
-        }
-
-        // Children first, so a parent still covers every child it moved.
-        foreach (array_reverse($order) as [$index, $parentIndex]) {
-            if ($parentIndex !== null && $spans[$parentIndex]['end'] < $spans[$index]['end']) {
-                $parentSpan = $spans[$parentIndex];
-                $parentSpan['end'] = $spans[$index]['end'];
-                $spans[$parentIndex] = $parentSpan;
-            }
+        foreach ($traces as $indexes) {
+            $spans = $this->spread($spans, $indexes);
         }
 
         return $spans;
+    }
+
+    /**
+     * Spread the tied siblings of one trace.
+     *
+     * @param  list<TranslatedSpan>  $spans
+     * @param  list<int>  $indexes
+     * @return list<TranslatedSpan>
+     */
+    protected function spread(array $spans, array $indexes): array
+    {
+        $depths = $this->depths($spans, $indexes);
+
+        usort($indexes, fn (int $a, int $b) => [$spans[$a]['start'], $depths[$a]] <=> [$spans[$b]['start'], $depths[$b]]);
+
+        $shift = 0;
+        $shifts = [];
+        $steps = [];
+        $lastMillisecond = [];
+
+        foreach ($indexes as $index) {
+            $original = $spans[$index]['start'];
+            $start = $original + $shift;
+            $millisecond = intdiv($start, self::MILLISECOND);
+            $parent = $spans[$index]['parent_span_id'] ?? '';
+
+            if (isset($lastMillisecond[$parent]) && $millisecond <= $lastMillisecond[$parent]) {
+                $millisecond = $lastMillisecond[$parent] + 1;
+                $start = $millisecond * self::MILLISECOND;
+            }
+
+            $lastMillisecond[$parent] = $millisecond;
+            $shift = $start - $original;
+            $shifts[$index] = $shift;
+            $steps[] = [$original, $shift];
+        }
+
+        foreach ($indexes as $index) {
+            $span = $spans[$index];
+            $start = $span['start'] + $shifts[$index];
+            $end = max($this->move($span['end'], $steps), $start);
+
+            $span['start'] = $start;
+            $span['end'] = $end;
+            $span['events'] = array_map(fn (array $event) => [
+                ...$event,
+                'time' => min(max($this->move($event['time'], $steps), $start), $end),
+            ], $span['events']);
+
+            $spans[$index] = $span;
+        }
+
+        return $spans;
+    }
+
+    /**
+     * Get the depth of each span in its trace, so a parent sorts before a child that starts with it.
+     *
+     * @param  list<TranslatedSpan>  $spans
+     * @param  list<int>  $indexes
+     * @return array<int, int>
+     */
+    protected function depths(array $spans, array $indexes): array
+    {
+        $parents = [];
+
+        foreach ($indexes as $index) {
+            $parents[$spans[$index]['span_id']] = $spans[$index]['parent_span_id'];
+        }
+
+        $depths = [];
+
+        foreach ($indexes as $index) {
+            $depth = 0;
+            $parent = $spans[$index]['parent_span_id'];
+
+            // Bounded by the span count, so a cycle cannot loop forever.
+            while ($parent !== null && isset($parents[$parent]) && $depth < count($indexes)) {
+                $parent = $parents[$parent];
+                $depth++;
+            }
+
+            $depths[$index] = $depth;
+        }
+
+        return $depths;
+    }
+
+    /**
+     * Shift a time by the move of the last span that started at or before it.
+     *
+     * @param  list<array{int, int}>  $steps  The original start and the shift of each span, in start order.
+     */
+    protected function move(int $time, array $steps): int
+    {
+        $low = 0;
+        $high = count($steps) - 1;
+        $shift = 0;
+
+        while ($low <= $high) {
+            $middle = intdiv($low + $high, 2);
+
+            if ($steps[$middle][0] <= $time) {
+                $shift = $steps[$middle][1];
+                $low = $middle + 1;
+            } else {
+                $high = $middle - 1;
+            }
+        }
+
+        return $time + $shift;
     }
 }
