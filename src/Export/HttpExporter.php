@@ -25,6 +25,7 @@ class HttpExporter implements Exporter
         protected GenAiTranslator $translator,
         protected OtlpJson $encoder,
         protected string $environment,
+        protected string $serviceName,
     ) {}
 
     public function export(array $spans): ExportResult
@@ -32,6 +33,7 @@ class HttpExporter implements Exporter
         $translated = $this->platform->prepare(array_map($this->translator->translate(...), $spans));
 
         $body = $this->encoder->encode($translated, $this->platform->resource([
+            'service.name' => $this->serviceName,
             'deployment.environment.name' => $this->environment,
         ]));
 

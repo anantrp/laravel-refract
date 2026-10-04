@@ -21,7 +21,7 @@ class Settings
             return $default;
         }
 
-        if (! is_scalar($value)) {
+        if (! is_string($value) && ! is_int($value) && ! is_float($value)) {
             Diagnostics::warn("config.{$key}", "Refract config [refract.{$key}] is invalid. Using the default.");
 
             return $default;

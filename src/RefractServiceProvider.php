@@ -39,6 +39,7 @@ class RefractServiceProvider extends ServiceProvider
             new GenAiTranslator,
             new OtlpJson,
             Settings::string('environment', $app->environment()),
+            Settings::string('service_name', $this->appName()),
         ));
 
         $this->app->singleton(Transport::class, function (Application $app) {
@@ -49,6 +50,16 @@ class RefractServiceProvider extends ServiceProvider
                 ? new SyncTransport($app->make(Exporter::class))
                 : new NullTransport;
         });
+    }
+
+    /**
+     * Get the application's name, the service name when OTEL_SERVICE_NAME is not set.
+     */
+    protected function appName(): string
+    {
+        $name = config('app.name');
+
+        return is_string($name) && $name !== '' ? $name : 'Laravel';
     }
 
     public function boot(): void

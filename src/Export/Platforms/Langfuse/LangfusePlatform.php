@@ -30,6 +30,11 @@ class LangfusePlatform implements Platform
     public const INGESTION_VERSION = '4';
 
     /**
+     * The longest environment name Langfuse accepts.
+     */
+    protected const ENVIRONMENT_LENGTH = 40;
+
+    /**
      * The nanoseconds in the millisecond Langfuse stores times with.
      */
     protected const MILLISECOND = 1_000_000;
@@ -56,8 +61,20 @@ class LangfusePlatform implements Platform
         ];
     }
 
+    /**
+     * Normalize the environment name to what Langfuse accepts: lowercase
+     * letters, digits, "-" and "_", at most 40 characters.
+     */
     public function resource(array $attributes): array
     {
+        $environment = $attributes['deployment.environment.name'] ?? null;
+
+        if (is_string($environment)) {
+            $normalized = trim(preg_replace('/[^a-z0-9_-]+/', '-', strtolower($environment)) ?? '', '-');
+
+            $attributes['deployment.environment.name'] = $normalized === '' ? 'default' : substr($normalized, 0, self::ENVIRONMENT_LENGTH);
+        }
+
         return $attributes;
     }
 

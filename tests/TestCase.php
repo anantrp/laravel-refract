@@ -63,6 +63,13 @@ abstract class TestCase extends Orchestra
 
         $app['config']->set($this->environmentConfig);
 
+        // The app environment comes from APP_ENV, which config('app.env') stands in for here.
+        $environment = $this->environmentConfig['app.env'] ?? null;
+
+        if (is_string($environment)) {
+            $app->detectEnvironment(fn () => $environment);
+        }
+
         if ($this->memoryTransport !== null) {
             $transport = $this->memoryTransport;
 
