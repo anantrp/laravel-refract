@@ -112,6 +112,7 @@ class GenAiTranslator
             'gen_ai.usage.input_tokens' => $call['input_tokens'] ?? null,
             'gen_ai.usage.output_tokens' => $call['output_tokens'] ?? null,
             'laravel.ai.step' => $call['step'] ?? null,
+            'laravel.ai.final_step' => $call['final_step'] ?? null,
         ]];
     }
 

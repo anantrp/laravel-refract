@@ -397,3 +397,16 @@ it('R10: two runs in one trace each keep their own session.id', function () {
         ->and($sessions)->toBe([$first->conversationId, $second->conversationId, $first->conversationId])
         ->and(Otlp::attributes($runs[1]))->toHaveKey('gen_ai.conversation.id', $second->conversationId);
 });
+
+it('R12: chat spans export the final_step flag as laravel.ai.final_step', function () {
+    TimeAgent::fakeTwoSteps();
+
+    TimeAgent::make()->prompt('What time is it?');
+
+    app(Recorder::class)->flush();
+
+    $chats = array_values(array_filter(Otlp::spans(), fn (array $span) => str_starts_with($span['name'], 'chat')));
+
+    expect(array_map(fn (array $chat) => Otlp::attributes($chat)['laravel.ai.final_step'] ?? null, $chats))
+        ->toBe([false, true]);
+});

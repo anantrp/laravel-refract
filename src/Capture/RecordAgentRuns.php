@@ -127,6 +127,7 @@ class RecordAgentRuns
             'provider' => $this->providerName($event->provider),
             'model' => $event->model,
             'step' => $event->stepNumber,
+            'final_step' => $event->isFinalStep,
         ]);
     }
 
