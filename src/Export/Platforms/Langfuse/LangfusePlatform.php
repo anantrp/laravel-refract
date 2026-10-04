@@ -4,6 +4,7 @@ namespace Anantrp\Refract\Export\Platforms\Langfuse;
 
 use Anantrp\Refract\Export\GenAiTranslator;
 use Anantrp\Refract\Export\Platform;
+use Anantrp\Refract\Support\Settings;
 use Illuminate\Contracts\Auth\Authenticatable;
 
 /**
@@ -48,6 +49,18 @@ class LangfusePlatform implements Platform
         protected string $publicKey,
         protected string $secretKey,
     ) {}
+
+    /**
+     * Create the platform from the config.
+     */
+    public static function fromConfig(string $key): ?self
+    {
+        return new self(
+            url: Settings::string("{$key}.url"),
+            publicKey: Settings::string("{$key}.public_key"),
+            secretKey: Settings::string("{$key}.secret_key"),
+        );
+    }
 
     public function endpoint(): string
     {

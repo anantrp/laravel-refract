@@ -89,7 +89,34 @@ return [
         ],
     ],
 
+    /*
+    |--------------------------------------------------------------------------
+    | Destinations
+    |--------------------------------------------------------------------------
+    |
+    | Where each destination sends its traces.
+    |
+    | "otlp": REFRACT_OTLP_ENDPOINT is the full URL traces are posted to,
+    | sent with REFRACT_OTLP_HEADERS only. When it is not set, the standard
+    | OTEL_EXPORTER_OTLP_ENDPOINT is used with "/v1/traces" appended, sent
+    | with OTEL_EXPORTER_OTLP_HEADERS and REFRACT_OTLP_HEADERS. Headers use
+    | the OpenTelemetry format: "key1=value1,key2=value2", URL-encoded values.
+    |
+    | "langfuse": LANGFUSE_BASE_URL defaults to Langfuse Cloud.
+    |
+    */
+
     'destinations' => [
+
+        'otlp' => [
+            'endpoint' => env('REFRACT_OTLP_ENDPOINT'),
+            'headers' => env('REFRACT_OTLP_HEADERS'),
+
+            'otel' => [
+                'endpoint' => env('OTEL_EXPORTER_OTLP_ENDPOINT'),
+                'headers' => env('OTEL_EXPORTER_OTLP_HEADERS'),
+            ],
+        ],
 
         'langfuse' => [
             'url' => env('LANGFUSE_BASE_URL'),

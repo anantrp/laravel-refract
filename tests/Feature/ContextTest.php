@@ -271,3 +271,45 @@ it('X11: service.name is OTEL_SERVICE_NAME when set, else the app name', functio
     'set' => ['checkout-api', 'checkout-api'],
     'not set' => [null, 'Shop'],
 ]);
+
+it('X1: the OTLP destination gets the participant attributes and no user.id', function () {
+    $this->refreshApplicationWithConfig([
+        ...$this->environmentConfig,
+        'refract.destination' => 'otlp',
+        'refract.destinations.otlp.endpoint' => 'https://otlp.test/v1/traces',
+    ]);
+
+    Http::fake();
+
+    ChatAgent::fake(['Hello.']);
+
+    ChatAgent::make()->forUser((new User)->forceFill(['id' => 42]))->prompt('Hello');
+
+    [$run] = runAttributes();
+
+    expect(Http::recorded()->first()[0]->url())->toBe('https://otlp.test/v1/traces')
+        ->and($run)->toMatchArray([
+            'laravel.ai.participant.type' => User::class,
+            'laravel.ai.participant.id' => '42',
+        ])->and($run)->not->toHaveKey('user.id');
+});
+
+it('X9: the OTLP destination gets the environment name as it is', function () {
+    $this->refreshApplicationWithConfig([
+        ...$this->environmentConfig,
+        'app.env' => 'Staging EU 1',
+        'refract.destination' => 'otlp',
+        'refract.destinations.otlp.endpoint' => 'https://otlp.test/v1/traces',
+    ]);
+
+    Http::fake();
+
+    TimeAgent::fakeTwoSteps();
+
+    TimeAgent::make()->prompt('What time is it?');
+
+    app(Recorder::class)->flush();
+
+    expect(Http::recorded()->first()[0]->url())->toBe('https://otlp.test/v1/traces')
+        ->and(Otlp::resource())->toHaveKey('deployment.environment.name', 'Staging EU 1');
+});

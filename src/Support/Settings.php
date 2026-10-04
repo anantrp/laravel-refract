@@ -85,6 +85,65 @@ class Settings
     }
 
     /**
+     * Get the given configuration value as an http or https URL.
+     */
+    public static function url(string $key, string $default = ''): string
+    {
+        $value = self::string($key, $default);
+
+        if ($value === $default) {
+            return $default;
+        }
+
+        $scheme = parse_url($value, PHP_URL_SCHEME);
+
+        if (filter_var($value, FILTER_VALIDATE_URL) === false || ! is_string($scheme) || ! in_array(strtolower($scheme), ['http', 'https'], true)) {
+            Diagnostics::warn("config.{$key}", "Refract config [refract.{$key}] must be an http or https URL. Using the default.");
+
+            return $default;
+        }
+
+        return $value;
+    }
+
+    /**
+     * Get the given configuration value as HTTP headers in the OpenTelemetry
+     * format: "name1=value1,name2=value2", with URL-encoded values.
+     *
+     * Names are lowercased. Any entry that is not a valid header makes the
+     * whole value invalid.
+     *
+     * @see https://opentelemetry.io/docs/specs/otel/protocol/exporter/#specifying-headers-via-environment-variables
+     *
+     * @return array<string, string>
+     */
+    public static function headers(string $key): array
+    {
+        $value = self::string($key);
+        $headers = [];
+
+        foreach (explode(',', $value) as $entry) {
+            if (trim($entry) === '') {
+                continue;
+            }
+
+            $pair = explode('=', $entry, 2);
+            $name = strtolower(trim($pair[0]));
+            $header = isset($pair[1]) ? trim(rawurldecode($pair[1])) : null;
+
+            if ($header === null || preg_match('/^[!#$%&\'*+.^_`|~0-9a-z-]+$/', $name) !== 1 || preg_match('/[\x00-\x1F\x7F]/', $header) === 1) {
+                Diagnostics::warn("config.{$key}", "Refract config [refract.{$key}] must be headers like \"name1=value1,name2=value2\". Using the default.");
+
+                return [];
+            }
+
+            $headers[$name] = $header;
+        }
+
+        return $headers;
+    }
+
+    /**
      * Get the given configuration value as a boolean.
      */
     public static function bool(string $key, bool $default): bool

@@ -9,9 +9,11 @@ use Anantrp\Refract\Contracts\Exporter;
 use Anantrp\Refract\Contracts\Transport;
 use Anantrp\Refract\Export\GenAiTranslator;
 use Anantrp\Refract\Export\HttpExporter;
+use Anantrp\Refract\Export\NullExporter;
 use Anantrp\Refract\Export\OtlpJson;
 use Anantrp\Refract\Export\Platform;
 use Anantrp\Refract\Export\Platforms\Langfuse\LangfusePlatform;
+use Anantrp\Refract\Export\Platforms\Otlp\OtlpPlatform;
 use Anantrp\Refract\Support\Settings;
 use Anantrp\Refract\Transport\NullTransport;
 use Anantrp\Refract\Transport\SyncTransport;
@@ -35,28 +37,33 @@ class RefractServiceProvider extends ServiceProvider
             keys: array_keys(Settings::map('context.attributes')),
         ));
 
-        $this->app->singleton(Platform::class, fn () => new LangfusePlatform(
-            url: Settings::string('destinations.langfuse.url'),
-            publicKey: Settings::string('destinations.langfuse.public_key'),
-            secretKey: Settings::string('destinations.langfuse.secret_key'),
-        ));
+        $this->app->singleton(Exporter::class, function (Application $app) {
+            $platform = $this->platform(Settings::choice('destination', ['otlp', 'langfuse'], 'otlp'));
 
-        $this->app->singleton(Exporter::class, fn (Application $app) => new HttpExporter(
-            $app->make(Platform::class),
-            new GenAiTranslator(Settings::map('context.attributes')),
-            new OtlpJson,
-            Settings::string('environment', $app->environment()),
-            Settings::string('service_name', $this->appName()),
-        ));
-
-        $this->app->singleton(Transport::class, function (Application $app) {
-            $transport = Settings::choice('transport', ['sync', 'queue', 'null'], 'sync');
-            $destination = Settings::choice('destination', ['otlp', 'langfuse'], 'otlp');
-
-            return $transport === 'sync' && $destination === 'langfuse'
-                ? new SyncTransport($app->make(Exporter::class))
-                : new NullTransport;
+            return $platform === null ? new NullExporter : new HttpExporter(
+                $platform,
+                new GenAiTranslator(Settings::map('context.attributes')),
+                new OtlpJson,
+                Settings::string('environment', $app->environment()),
+                Settings::string('service_name', $this->appName()),
+            );
         });
+
+        $this->app->singleton(Transport::class, fn (Application $app) => match (Settings::choice('transport', ['sync', 'queue', 'null'], 'sync')) {
+            'sync' => new SyncTransport($app->make(Exporter::class)),
+            default => new NullTransport,
+        });
+    }
+
+    /**
+     * Build the given destination's platform from its config, or get null when it is not configured.
+     */
+    protected function platform(string $destination): ?Platform
+    {
+        return match ($destination) {
+            'langfuse' => LangfusePlatform::fromConfig('destinations.langfuse'),
+            default => OtlpPlatform::fromConfig('destinations.otlp'),
+        };
     }
 
     /**
