@@ -33,6 +33,11 @@ class HttpExporter implements Exporter
     protected const BODY_EXCERPT = 200;
 
     /**
+     * The characters of a rejected response's body cleaned of credentials before the excerpt is cut.
+     */
+    protected const BODY_SCAN = 4_096;
+
+    /**
      * Create a new exporter instance.
      */
     public function __construct(
@@ -85,10 +90,27 @@ class HttpExporter implements Exporter
             return ExportResult::Retryable;
         }
 
-        $excerpt = mb_substr($response->body(), 0, self::BODY_EXCERPT);
+        $excerpt = mb_substr($this->withoutCredentials(mb_substr($response->body(), 0, self::BODY_SCAN)), 0, self::BODY_EXCERPT);
 
         Diagnostics::warn('export.rejected', "Spans were rejected by the destination with HTTP {$status}: {$excerpt}. The batch was dropped.");
 
         return ExportResult::Rejected;
+    }
+
+    /**
+     * Remove header lines ("Name: value") and credentials (Authorization values,
+     * Bearer and Basic tokens) that a destination may echo in its body.
+     */
+    protected function withoutCredentials(string $body): string
+    {
+        return preg_replace([
+            '/^[ \t]*[A-Za-z0-9-]+[ \t]*:[^\r\n]*$/m',
+            '/(["\']?(?:proxy-)?authorization["\']?\s*[:=]\s*)(["\']?)[^"\'\r\n,}]*\2/i',
+            '/\b(Bearer|Basic)\s+[A-Za-z0-9._~+\/=-]+/i',
+        ], [
+            '[header removed]',
+            '$1$2[removed]$2',
+            '$1 [removed]',
+        ], $body) ?? '';
     }
 }

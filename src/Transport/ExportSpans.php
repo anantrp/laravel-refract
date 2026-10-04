@@ -135,6 +135,12 @@ class ExportSpans implements ShouldQueue
             return;
         }
 
+        if ($this->job === null) {
+            Diagnostics::warn('queue.no_job', 'A batch of spans could not be exported and cannot be tried again: its export job did not run on a queue. The batch was dropped.');
+
+            return;
+        }
+
         if ($this->attempts() < $this->tries) {
             $this->release($this->backoff);
 
@@ -146,10 +152,13 @@ class ExportSpans implements ShouldQueue
     }
 
     /**
-     * Warn that the batch was given up on. Also called by the queue when the job fails another way.
+     * Warn that the batch was given up on. Also called by the queue when the job fails another way
+     * (a timeout, or more attempts than its tries), with that exception.
      */
     public function failed(?Throwable $e = null): void
     {
-        Diagnostics::warn('queue.failed', "A queued batch of spans could not be exported after {$this->tries} tries: the destination could not be reached or answered 408, 429 or 5xx. The batch was dropped.");
+        Diagnostics::warn('queue.failed', $e === null
+            ? "A queued batch of spans could not be exported in {$this->tries} tries: the destination could not be reached or answered 408, 429 or 5xx. The batch was dropped."
+            : 'The export job of a queued batch of spans failed ('.$e::class."), within its {$this->tries} tries. The batch was dropped.");
     }
 }

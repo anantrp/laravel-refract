@@ -302,6 +302,7 @@ it('E5: failed() called by the queue logs one warning and does not throw', funct
 
     expect($log->warnings)->toHaveCount(1)
         ->and($log->warnings[0])->toContain('3 tries')
+        ->and($log->warnings[0])->toContain('dropped')
         ->and($job->tries)->toBe(3)
         ->and($job->backoff)->toBe(10);
 });
@@ -327,3 +328,55 @@ it('E6: a 401 and then an outage in one process give two different warnings', fu
         ->and($log->warnings[0])->toContain('401')
         ->and($log->warnings[1])->not->toBe($log->warnings[0]);
 })->with(['sync', 'queue']);
+
+it('E2: the body excerpt in the warning leaves out header lines and credentials the destination echoed', function () {
+    $log = bootExport('sync');
+    fakeDestination(401, implode("\n", [
+        '{"error":"bad key","authorization":"Basic cGstdGVzdDpzay10ZXN0"}',
+        'Authorization: Basic SEVBREVSLVNFQ1JFVA==',
+        'X-Api-Key: KEY-SECRET',
+        'token Bearer TOKEN-SECRET.abc',
+        "auth 'Basic QkFTSUMtU0VDUkVU'",
+    ]));
+
+    sendSpan();
+
+    expect($log->warnings)->toHaveCount(1)
+        ->and($log->warnings[0])->toContain('401')
+        ->and($log->warnings[0])->toContain('bad key');
+
+    foreach (['cGstdGVzdDpzay10ZXN0', 'SEVBREVSLVNFQ1JFVA', 'KEY-SECRET', 'TOKEN-SECRET', 'QkFTSUMtU0VDUkVU', 'X-Api-Key'] as $secret) {
+        expect($log->warnings[0])->not->toContain($secret);
+    }
+});
+
+it('E5: failed() called by the queue for another cause names that cause, not a network error or status', function () {
+    $log = bootExport('queue');
+
+    (new ExportSpans(''))->failed(new RuntimeException('The job timed out.'));
+
+    expect($log->warnings)->toHaveCount(1)
+        ->and($log->warnings[0])->toContain(RuntimeException::class)
+        ->and($log->warnings[0])->not->toContain('408')
+        ->and($log->warnings[0])->not->toContain('could not be reached')
+        ->and($log->warnings[0])->not->toContain('timed out');
+});
+
+it('E3: a batch that cannot be retried because the export job is not on a queue is dropped with one warning', function () {
+    $log = bootExport('queue');
+    fakeDestination(503);
+
+    $job = ExportSpans::of([[
+        'v' => 1, 'trace_id' => str_repeat('a', 32), 'span_id' => str_repeat('b', 16), 'parent_span_id' => null,
+        'kind' => 'invoke_agent', 'start' => 1, 'end' => 2, 'status' => 'ok', 'status_message' => null,
+        'call' => [], 'content' => [], 'context' => [], 'events' => [],
+    ]]);
+
+    expect($job)->not->toBeNull();
+
+    $job?->handle(app());
+
+    Http::assertSentCount(1);
+    expect($log->warnings)->toHaveCount(1)
+        ->and($log->warnings[0])->toContain('dropped');
+});
