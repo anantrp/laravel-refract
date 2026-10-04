@@ -15,6 +15,7 @@ use Laravel\Ai\Responses\TextResponse;
 use OpenTelemetry\API\Trace\Span;
 use OpenTelemetry\API\Trace\SpanContext;
 use OpenTelemetry\API\Trace\TraceFlags;
+use Workbench\App\Ai\Agents\ChatAgent;
 use Workbench\App\Ai\Agents\SupervisorAgent;
 use Workbench\App\Ai\Agents\TimeAgent;
 
@@ -368,4 +369,31 @@ it('R9: a run joins the app\'s active OTel trace as a child', function () {
 
     expect(array_unique(array_column($spans, 'traceId')))->toBe([$traceId])
         ->and($spans[0]['parentSpanId'])->toBe($spanId);
+});
+
+it('R10: two runs in one trace each keep their own session.id', function () {
+    $this->loadMigrationsFrom(dirname(__DIR__, 2).'/vendor/laravel/ai/database/migrations');
+
+    ChatAgent::fake(['First.', 'Second.', 'Third.']);
+
+    $scope = Span::wrap(SpanContext::create(str_repeat('ab', 16), str_repeat('cd', 8), TraceFlags::SAMPLED))->activate();
+
+    try {
+        $first = ChatAgent::make()->forUser((object) ['id' => 1])->prompt('Hello');
+        $second = ChatAgent::make()->forUser((object) ['id' => 2])->prompt('Hello');
+        ChatAgent::make()->continue((string) $first->conversationId, as: (object) ['id' => 1])->prompt('Again');
+    } finally {
+        $scope->detach();
+    }
+
+    app(Recorder::class)->flush();
+
+    $runs = array_values(array_filter(Otlp::spans(), fn (array $span) => str_starts_with($span['name'], 'invoke_agent')));
+    $sessions = array_map(fn (array $run) => Otlp::attributes($run)['session.id'] ?? null, $runs);
+
+    expect(array_unique(array_column($runs, 'traceId')))->toHaveCount(1)
+        ->and($first->conversationId)->not->toBeNull()
+        ->and($second->conversationId)->not->toBe($first->conversationId)
+        ->and($sessions)->toBe([$first->conversationId, $second->conversationId, $first->conversationId])
+        ->and(Otlp::attributes($runs[1]))->toHaveKey('gen_ai.conversation.id', $second->conversationId);
 });

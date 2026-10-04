@@ -5,6 +5,7 @@ namespace Anantrp\Refract\Capture;
 use Illuminate\Contracts\Events\Dispatcher;
 use Laravel\Ai\Contracts\Agent;
 use Laravel\Ai\Contracts\CanActAsTool;
+use Laravel\Ai\Contracts\RemembersConversations;
 use Laravel\Ai\Events\AgentFailed;
 use Laravel\Ai\Events\AgentFailedOver;
 use Laravel\Ai\Events\AgentPrompted;
@@ -85,12 +86,20 @@ class RecordAgentRuns
             'provider' => $this->providerName($event->prompt->provider),
             'model' => $event->prompt->model,
             ...($event->prompt->hasApprovalDecisions() ? ['resumed' => true] : []),
-        ]);
+        ], $this->session($agent));
     }
 
+    /**
+     * End the run span. A new conversation has its id only now.
+     */
     public function agentPrompted(AgentPrompted $event): void
     {
-        $this->recorder->end($this->runKey($event->invocationId));
+        $conversationId = $event->response->conversationId;
+
+        $this->recorder->end(
+            $this->runKey($event->invocationId),
+            context: $conversationId === null ? [] : ['session' => $conversationId],
+        );
     }
 
     public function agentFailed(AgentFailed $event): void
@@ -200,6 +209,22 @@ class RecordAgentRuns
     protected function toolKey(string $toolInvocationId): string
     {
         return "tool:{$toolInvocationId}";
+    }
+
+    /**
+     * Get the session context of a run that continues a saved conversation.
+     *
+     * @return array<string, string>
+     */
+    protected function session(Agent $agent): array
+    {
+        if (! $agent instanceof RemembersConversations) {
+            return [];
+        }
+
+        $conversationId = $agent->currentConversation();
+
+        return $conversationId === null ? [] : ['session' => $conversationId];
     }
 
     protected function agentName(Agent $agent): string

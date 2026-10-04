@@ -34,6 +34,7 @@ class GenAiTranslator
     {
         $kind = $this->string($span, 'kind');
         $call = is_array($span['call'] ?? null) ? $span['call'] : [];
+        $context = is_array($span['context'] ?? null) ? $span['context'] : [];
 
         [$name, $spanKind, $attributes] = match ($kind) {
             'invoke_agent' => $this->agent($call),
@@ -57,7 +58,12 @@ class GenAiTranslator
             'start' => $this->int($span, 'start'),
             'end' => $this->int($span, 'end'),
             'attributes' => array_filter(
-                ['gen_ai.operation.name' => $kind, ...$attributes, 'laravel.ai.abandoned' => $abandoned ?: null],
+                [
+                    'gen_ai.operation.name' => $kind,
+                    ...$attributes,
+                    ...$this->context($context),
+                    'laravel.ai.abandoned' => $abandoned ?: null,
+                ],
                 fn (mixed $value) => $value !== null,
             ),
             'events' => $this->events($span['events'] ?? null),
@@ -122,6 +128,22 @@ class GenAiTranslator
             'gen_ai.tool.type' => 'function',
             'laravel.ai.tool_invocation_id' => $call['tool_invocation_id'] ?? null,
         ]];
+    }
+
+    /**
+     * Translate the neutral span's context bucket.
+     *
+     * @param  array<array-key, mixed>  $context
+     * @return array<string, mixed>
+     */
+    protected function context(array $context): array
+    {
+        $session = $context['session'] ?? null;
+
+        return [
+            'session.id' => $session,
+            'gen_ai.conversation.id' => $session,
+        ];
     }
 
     /**

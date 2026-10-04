@@ -12,8 +12,8 @@ use OpenTelemetry\API\Trace\Span;
  * wall clock times at each flush.
  *
  * @phpstan-type SpanEvent array{kind: string, time: int, call: array<string, mixed>}
- * @phpstan-type OpenSpan array{trace_id: string, span_id: string, parent_span_id: ?string, kind: string, start: int, call: array<string, mixed>, events: list<SpanEvent>}
- * @phpstan-type FinishedSpan array{trace_id: string, span_id: string, parent_span_id: ?string, kind: string, start: int, end: int, status: string, status_message: ?string, call: array<string, mixed>, events: list<SpanEvent>}
+ * @phpstan-type OpenSpan array{trace_id: string, span_id: string, parent_span_id: ?string, kind: string, start: int, call: array<string, mixed>, context: array<string, mixed>, events: list<SpanEvent>}
+ * @phpstan-type FinishedSpan array{trace_id: string, span_id: string, parent_span_id: ?string, kind: string, start: int, end: int, status: string, status_message: ?string, call: array<string, mixed>, context: array<string, mixed>, events: list<SpanEvent>}
  */
 class Recorder
 {
@@ -54,8 +54,9 @@ class Recorder
      * A span still open under the same key is closed as abandoned first.
      *
      * @param  array<string, mixed>  $call
+     * @param  array<string, mixed>  $context
      */
-    public function start(string $key, string $kind, ?string $parentKey, array $call): void
+    public function start(string $key, string $kind, ?string $parentKey, array $call, array $context = []): void
     {
         if (isset($this->open[$key])) {
             $this->abandon($key);
@@ -77,6 +78,7 @@ class Recorder
             'kind' => $kind,
             'start' => $this->monotonic(),
             'call' => $call,
+            'context' => $context,
             'events' => [],
         ];
     }
@@ -90,11 +92,12 @@ class Recorder
     }
 
     /**
-     * End the given span, merging in the call data known only at its end.
+     * End the given span, merging in the call and context data known only at its end.
      *
      * @param  array<string, mixed>  $call
+     * @param  array<string, mixed>  $context
      */
-    public function end(string $key, string $status = 'ok', ?string $message = null, array $call = []): void
+    public function end(string $key, string $status = 'ok', ?string $message = null, array $call = [], array $context = []): void
     {
         $span = $this->open[$key] ?? null;
 
@@ -107,6 +110,7 @@ class Recorder
         $this->finished[] = [
             ...$span,
             'call' => [...$span['call'], ...$call],
+            'context' => [...$span['context'], ...$context],
             'end' => $this->monotonic(),
             'status' => $status,
             'status_message' => $message,
@@ -207,7 +211,7 @@ class Recorder
             'status_message' => $span['status_message'],
             'call' => $span['call'],
             'content' => [],
-            'context' => [],
+            'context' => $span['context'],
             'events' => array_map(fn (array $event) => [
                 'kind' => $event['kind'],
                 'time' => $event['time'] + $offset,
