@@ -85,7 +85,7 @@ class Settings
     }
 
     /**
-     * Get the given configuration value as an http or https URL.
+     * Get the given configuration value as an http or https URL with a host.
      */
     public static function url(string $key, string $default = ''): string
     {
@@ -95,9 +95,12 @@ class Settings
             return $default;
         }
 
-        $scheme = parse_url($value, PHP_URL_SCHEME);
+        // Not FILTER_VALIDATE_URL: it rejects valid hosts like "otel_collector" (docker-compose names) and IDN hosts.
+        $parts = parse_url($value);
+        $scheme = is_array($parts) ? ($parts['scheme'] ?? '') : '';
+        $host = is_array($parts) ? ($parts['host'] ?? '') : '';
 
-        if (filter_var($value, FILTER_VALIDATE_URL) === false || ! is_string($scheme) || ! in_array(strtolower($scheme), ['http', 'https'], true)) {
+        if (! in_array(strtolower($scheme), ['http', 'https'], true) || $host === '') {
             Diagnostics::warn("config.{$key}", "Refract config [refract.{$key}] must be an http or https URL. Using the default.");
 
             return $default;

@@ -267,6 +267,50 @@ it('C3: an invalid env var gives the default and one warning', function (string 
         ->and($about)->toHaveCount(1);
 })->with('env vars');
 
+/**
+ * The URL env vars, the env each is tested in, a value with an underscore or
+ * non-ASCII host, and the URL Refract posts to with that value.
+ *
+ * @return array<string, array{array<string, string|null>, string, string, string}>
+ */
+function urlHostCases(): array
+{
+    return [
+        'REFRACT_OTLP_ENDPOINT underscore' => [[], 'REFRACT_OTLP_ENDPOINT', 'http://otel_collector:4318/v1/traces', 'http://otel_collector:4318/v1/traces'],
+        'OTEL_EXPORTER_OTLP_ENDPOINT underscore' => [['REFRACT_OTLP_ENDPOINT' => null], 'OTEL_EXPORTER_OTLP_ENDPOINT', 'http://otel_collector:4318', 'http://otel_collector:4318/v1/traces'],
+        'LANGFUSE_BASE_URL underscore' => [LANGFUSE_ENV, 'LANGFUSE_BASE_URL', 'http://langfuse_web:3000', 'http://langfuse_web:3000/api/public/otel/v1/traces'],
+        'LANGFUSE_BASE_URL non-ASCII' => [LANGFUSE_ENV, 'LANGFUSE_BASE_URL', 'https://langfuse.bücher.test', 'https://langfuse.bücher.test/api/public/otel/v1/traces'],
+    ];
+}
+
+it('C1: a URL with an underscore or non-ASCII host is used, not the default', function (array $env, string $var, string $value, string $url) {
+    Env::set([...BASE_ENV, ...$env, $var => $value]);
+
+    loadRefract();
+
+    expect(exported()['url'] ?? null)->toBe($url);
+})->with(urlHostCases());
+
+it('C3: a URL with an underscore or non-ASCII host is not invalid and gives no warning', function (array $env, string $var, string $value) {
+    Env::set([...BASE_ENV, ...$env, $var => $value]);
+
+    $log = loadRefract();
+    exported();
+
+    expect($log->warnings)->toBe([]);
+})->with(urlHostCases());
+
+it('C3: a URL with a scheme other than http or https, or with no host, is invalid', function (array $env, string $var) {
+    foreach (['ftp://otel_collector:4318', 'http://', 'otel_collector:4318', 'http:///v1/traces'] as $value) {
+        Env::set([...BASE_ENV, ...$env, $var => $value]);
+
+        $log = loadRefract();
+
+        expect(exported()['url'] ?? '')->not->toContain('otel_collector')
+            ->and(array_filter($log->warnings, fn (string $message) => str_contains($message, 'must be an http or https URL')))->toHaveCount(1);
+    }
+})->with(urlHostCases());
+
 it('C4: OTEL headers are not sent to the REFRACT_OTLP_ENDPOINT', function () {
     Env::set([
         ...BASE_ENV,
