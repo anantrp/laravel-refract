@@ -369,3 +369,24 @@ it('X9: the OTLP destination gets the environment name as it is', function () {
     expect(Http::recorded()->first()[0]->url())->toBe('https://otlp.test/v1/traces')
         ->and(Otlp::resource())->toHaveKey('deployment.environment.name', 'Staging EU 1');
 });
+
+it('X12: a Context key mapped to a numeric attribute name is sent with the name as a JSON string', function () {
+    $this->refreshApplicationWithConfig([
+        ...$this->environmentConfig,
+        'refract.context.attributes' => ['tenant' => '123'],
+    ]);
+
+    Http::fake();
+
+    Context::add('tenant', 'acme');
+
+    TimeAgent::fakeTwoSteps();
+
+    TimeAgent::make()->prompt('What time is it?');
+
+    [$run] = runAttributes();
+
+    expect($run)->toHaveKey('123', 'acme')
+        ->and(Http::recorded()->first()[0]->body())->toContain('{"key":"123","value":{"stringValue":"acme"}}')
+        ->not->toContain('"key":123');
+});

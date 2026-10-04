@@ -72,7 +72,10 @@ class OtlpJson
     }
 
     /**
-     * @param  array<string, mixed>  $attributes
+     * Encode the given attributes. A numeric name, such as "123", is an int
+     * key in a PHP array; it is sent as a string, as OTLP requires.
+     *
+     * @param  array<array-key, mixed>  $attributes
      * @return list<array{key: string, value: array<string, mixed>}>
      */
     protected function attributes(array $attributes): array
@@ -80,7 +83,7 @@ class OtlpJson
         $encoded = [];
 
         foreach ($attributes as $key => $value) {
-            $encoded[] = ['key' => $key, 'value' => $this->value($value)];
+            $encoded[] = ['key' => (string) $key, 'value' => $this->value($value)];
         }
 
         return $encoded;
