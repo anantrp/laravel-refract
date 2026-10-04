@@ -1,6 +1,7 @@
 <?php
 
 use Anantrp\Refract\Capture\Recorder;
+use Anantrp\Refract\Tests\Support\Ai\BrokenToolAgent;
 use Anantrp\Refract\Tests\Support\Otlp;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
@@ -382,6 +383,54 @@ it('R8: a run that throws closes its open children as abandoned before it ends',
 
     foreach ($children as $child) {
         expect($child['endTimeUnixNano'] <= $run['endTimeUnixNano'])->toBeTrue();
+    }
+});
+
+it('R13: a failed run and its failed step have error.type set to the exception class', function () {
+    TimeAgent::fake(fn () => throw new RuntimeException('secret detail from the provider'));
+
+    rescue(fn () => TimeAgent::make()->prompt('What time is it?'), report: false);
+
+    app(Recorder::class)->flush();
+
+    [$run, $step] = Otlp::spans();
+
+    expect($run['name'])->toBe('invoke_agent TimeAgent')
+        ->and(Otlp::attributes($run))->toHaveKey('error.type', RuntimeException::class)
+        ->and($step['name'])->toBe('chat fake')
+        ->and(Otlp::attributes($step))->toHaveKey('error.type', RuntimeException::class);
+});
+
+it('R13: a failed tool has error.type set to the exception class', function () {
+    BrokenToolAgent::fakeSteps();
+
+    rescue(fn () => BrokenToolAgent::make()->prompt('Use the tool.'), report: false);
+
+    app(Recorder::class)->flush();
+
+    $spans = collect(Otlp::spans())->keyBy('name');
+    $tool = $spans['execute_tool BrokenTool'];
+
+    expect($tool['status'])->toBe(['code' => 2, 'message' => LogicException::class])
+        ->and(Otlp::attributes($tool))->toHaveKey('error.type', LogicException::class)
+        ->and(Otlp::attributes($spans['invoke_agent BrokenToolAgent']))->toHaveKey('error.type', LogicException::class)
+        ->and(json_encode(Http::recorded()[0][0]->data()))->not->toContain('secret detail');
+});
+
+it('R13: a span that did not fail has no error.type', function () {
+    TimeAgent::fakeTwoSteps();
+    TimeAgent::make()->prompt('What time is it?');
+
+    TimeAgent::fakeTwoSteps();
+
+    foreach (TimeAgent::make()->stream('What time is it?') as $event) {
+        break;
+    }
+
+    app(Recorder::class)->flush();
+
+    foreach (Otlp::spans() as $span) {
+        expect(Otlp::attributes($span))->not->toHaveKey('error.type');
     }
 });
 

@@ -8,7 +8,9 @@ use JsonException;
  * Turns neutral spans into spans with OTel GenAI attributes.
  *
  * A span closed at flush without its end event (status "abandoned") has
- * no OTel status and the laravel.ai.abandoned attribute.
+ * no OTel status and the laravel.ai.abandoned attribute. A failed span
+ * (status "error") has the error status and error.type, both the
+ * exception class.
  *
  * @see https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-agent-spans/
  *
@@ -20,6 +22,11 @@ class GenAiTranslator
      * The OTel user attribute. A Context mapping never sets it.
      */
     public const USER_ID = 'user.id';
+
+    /**
+     * The error.type of a failed span whose exception class is not known.
+     */
+    public const OTHER_ERROR = '_OTHER';
 
     public const KIND_INTERNAL = 1;
 
@@ -76,6 +83,8 @@ class GenAiTranslator
             ...$this->content($kind, $content),
             ...$this->context($context),
             'laravel.ai.abandoned' => $abandoned ?: null,
+            // The exception class, per the OTel conventions; "_OTHER" when it is not known.
+            'error.type' => $error ? (is_string($message) && $message !== '' ? $message : self::OTHER_ERROR) : null,
         ];
 
         return [
