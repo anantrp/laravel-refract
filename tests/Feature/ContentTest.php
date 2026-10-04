@@ -21,20 +21,39 @@ use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Laravel\Ai\Approvals\Decision;
 use Laravel\Ai\Approvals\PendingApproval;
+use Laravel\Ai\Contracts\Files\HasContent;
 use Laravel\Ai\Contracts\Providers\TextProvider;
+use Laravel\Ai\Events\AddingFileToStore;
+use Laravel\Ai\Events\CreatingStore;
+use Laravel\Ai\Events\FileAddedToStore;
+use Laravel\Ai\Events\FileDeleted;
+use Laravel\Ai\Events\FileRemovedFromStore;
+use Laravel\Ai\Events\RemovingFileFromStore;
+use Laravel\Ai\Events\StoreCreated;
 use Laravel\Ai\Exceptions\RateLimitedException;
 use Laravel\Ai\Files\Audio;
 use Laravel\Ai\Files\Document;
 use Laravel\Ai\Files\Image;
+use Laravel\Ai\Files\S3Document;
 use Laravel\Ai\Messages\AssistantMessage;
 use Laravel\Ai\Messages\Message;
 use Laravel\Ai\Messages\ToolResultMessage;
 use Laravel\Ai\Messages\UserMessage;
+use Laravel\Ai\Providers\Provider;
+use Laravel\Ai\Responses\AddedDocumentResponse;
+use Laravel\Ai\Responses\AudioResponse;
+use Laravel\Ai\Responses\Data\GeneratedImage;
+use Laravel\Ai\Responses\Data\ImageUsage;
 use Laravel\Ai\Responses\Data\Meta;
 use Laravel\Ai\Responses\Data\TextUsage;
 use Laravel\Ai\Responses\Data\ToolCall;
 use Laravel\Ai\Responses\Data\ToolResult;
+use Laravel\Ai\Responses\Data\Usage;
+use Laravel\Ai\Responses\FileResponse;
+use Laravel\Ai\Responses\ImageResponse;
+use Laravel\Ai\Responses\StoredFileResponse;
 use Laravel\Ai\Responses\TextResponse;
+use Laravel\Ai\Store;
 use Workbench\App\Ai\Agents\ChatAgent;
 use Workbench\App\Ai\Agents\SupervisorAgent;
 use Workbench\App\Ai\Agents\TimeAgent;
@@ -603,6 +622,76 @@ it('P2: a tool result in the history of a saved conversation is a reference only
     expect(json_decode($step['gen_ai.input.messages'], true))->toContain(
         ['role' => 'tool', 'parts' => [['type' => 'tool_call_response', 'id' => 'call_0', 'name' => 'FileTool', 'response' => GenAiTranslator::TOOL_RESULT_REFERENCE]]],
     )->and(sentBodies())->not->toContain('SECRET');
+});
+
+it('P6: each kind of file in a tool result records [file], directly or inside a value', function (Closure $file) {
+    $this->environmentConfig = contentConfig(['refract.capture.content' => true]);
+    $this->refreshApplication();
+
+    $content = app(Content::class);
+    $json = new class($file()) implements JsonSerializable
+    {
+        public function __construct(protected mixed $file) {}
+
+        public function jsonSerialize(): mixed
+        {
+            return ['file' => $this->file, 'n' => 1];
+        }
+    };
+
+    expect($content->toolResult($file()))->toBe(['result' => '[file]'])
+        ->and($content->toolResult(['file' => $file(), 'n' => 1]))->toBe(['result' => '{"file":"[file]","n":1}'])
+        ->and($content->toolResult(collect(['file' => $file(), 'n' => 1])))->toBe(['result' => '{"file":"[file]","n":1}'])
+        ->and($content->toolResult(['json' => $json]))->toBe(['result' => '{"json":{"file":"[file]","n":1}}']);
+})->with([
+    'an SDK file' => [fn () => new S3Document('s3://bucket/SECRET.pdf')],
+    'a file with content' => [fn () => new class implements HasContent
+    {
+        public function content(): string
+        {
+            return 'BYTES-SECRET';
+        }
+
+        public function __toString(): string
+        {
+            return 'BYTES-SECRET';
+        }
+    }],
+    'an upload' => [fn () => UploadedFile::fake()->create('SECRET.pdf', 1)],
+    'GeneratedImage' => [fn () => new GeneratedImage('BYTES-SECRET', 'image/png')],
+    'ImageResponse' => [fn () => new ImageResponse(collect([new GeneratedImage('BYTES-SECRET')]), new ImageUsage, new Meta)],
+    'AudioResponse' => [fn () => new AudioResponse('BYTES-SECRET', new Usage, new Meta)],
+    'FileResponse' => [fn () => new FileResponse('file-SECRET', 'image/png', 'BYTES-SECRET')],
+    'StoredFileResponse' => [fn () => new StoredFileResponse('file-SECRET')],
+    'AddedDocumentResponse' => [fn () => new AddedDocumentResponse('doc-SECRET', 'file-SECRET')],
+    'AddingFileToStore' => [fn () => new AddingFileToStore('run', Mockery::mock(Provider::class), 'store', 'file-SECRET')],
+    'FileAddedToStore' => [fn () => new FileAddedToStore('run', Mockery::mock(Provider::class), 'store', 'file-SECRET', 'doc-SECRET')],
+    'FileDeleted' => [fn () => new FileDeleted('run', Mockery::mock(Provider::class), 'file-SECRET')],
+    'RemovingFileFromStore' => [fn () => new RemovingFileFromStore('run', Mockery::mock(Provider::class), 'store', 'doc-SECRET')],
+    'FileRemovedFromStore' => [fn () => new FileRemovedFromStore('run', Mockery::mock(Provider::class), 'store', 'doc-SECRET')],
+    'CreatingStore' => [fn () => new CreatingStore('run', Mockery::mock(Provider::class), 'Docs', null, collect(['file-SECRET']), null)],
+    'StoreCreated' => [fn () => new StoreCreated('run', Mockery::mock(Provider::class), 'Docs', null, collect(['file-SECRET']), null, Mockery::mock(Store::class))],
+]);
+
+it('P6: SDK file responses returned by a tool leave no bytes or id in the tool span or the next step', function () {
+    $this->environmentConfig = contentConfig(['refract.capture.content' => true]);
+    $memory = $this->captureNeutralSpans();
+
+    FileTool::$result = collect([
+        'download' => new FileResponse('file-SECRET', 'image/png', 'BYTES-SECRET'),
+        'stored' => new StoredFileResponse('file-SECRET'),
+        'added' => new AddedDocumentResponse('doc-SECRET', 'file-SECRET'),
+    ]);
+
+    FileAgent::fakeTwoSteps();
+    FileAgent::make()->prompt('Get the file.');
+
+    app(Recorder::class)->flush();
+
+    [$tool] = ofKind($memory->spans, 'execute_tool');
+
+    expect($tool['content']['result'])->toBe('{"download":"[file]","stored":"[file]","added":"[file]"}')
+        ->and(json_encode($memory->spans))->not->toContain('SECRET');
 });
 
 it('P11: a tool result object (Collection) is recorded as text', function () {

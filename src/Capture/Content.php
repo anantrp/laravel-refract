@@ -9,6 +9,14 @@ use Illuminate\Support\Enumerable;
 use JsonException;
 use JsonSerializable;
 use Laravel\Ai\Contracts\Files\HasContent;
+use Laravel\Ai\Contracts\Files\HasProviderId;
+use Laravel\Ai\Events\AddingFileToStore;
+use Laravel\Ai\Events\CreatingStore;
+use Laravel\Ai\Events\FileAddedToStore;
+use Laravel\Ai\Events\FileDeleted;
+use Laravel\Ai\Events\FileRemovedFromStore;
+use Laravel\Ai\Events\RemovingFileFromStore;
+use Laravel\Ai\Events\StoreCreated;
 use Laravel\Ai\Files\File;
 use Laravel\Ai\Gateway\StepResponse;
 use Laravel\Ai\Messages\AssistantMessage;
@@ -22,6 +30,7 @@ use Laravel\Ai\Responses\AudioResponse;
 use Laravel\Ai\Responses\Data\GeneratedImage;
 use Laravel\Ai\Responses\Data\ToolCall;
 use Laravel\Ai\Responses\Data\ToolResult;
+use Laravel\Ai\Responses\FileResponse;
 use Laravel\Ai\Responses\ImageResponse;
 use SplFileInfo;
 use Stringable;
@@ -352,16 +361,28 @@ class Content
     }
 
     /**
-     * Determine if the given value is a file: an SDK file or generated media, or a file on disk or uploaded.
+     * Determine if the given value is a file: an SDK file, generated media or
+     * file response, anything with a provider file id (stored files, added
+     * documents), an SDK file or store event holding a provider file id, or
+     * a file on disk or uploaded.
      */
     protected function isFile(mixed $value): bool
     {
         return $value instanceof File
             || $value instanceof HasContent
+            || $value instanceof HasProviderId
             || $value instanceof SplFileInfo
             || $value instanceof GeneratedImage
             || $value instanceof ImageResponse
-            || $value instanceof AudioResponse;
+            || $value instanceof AudioResponse
+            || $value instanceof FileResponse
+            || $value instanceof AddingFileToStore
+            || $value instanceof FileAddedToStore
+            || $value instanceof FileDeleted
+            || $value instanceof RemovingFileFromStore
+            || $value instanceof FileRemovedFromStore
+            || $value instanceof CreatingStore
+            || $value instanceof StoreCreated;
     }
 
     /**
