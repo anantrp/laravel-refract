@@ -3,19 +3,37 @@
 namespace Anantrp\Refract\Transport;
 
 use Anantrp\Refract\Contracts\Exporter;
+use Anantrp\Refract\Contracts\ExportResult;
 use Anantrp\Refract\Support\Diagnostics;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Queue\InteractsWithQueue;
+use Throwable;
 
 /**
  * Exports one batch of neutral spans from a queue worker.
  *
  * The batch travels as gzipped JSON, base64 encoded: the queue payload is
  * JSON, so invalid UTF-8 becomes U+FFFD and floats keep their fraction.
+ *
+ * A retryable result (network error, 408, 429, 5xx) is tried again 10 s
+ * later, 3 tries in all. The job never throws for it: after the last try
+ * it deletes itself and warns once from failed(), so it is not reported
+ * to the exception handler, not stored as a failed job and fires no
+ * JobFailed event. Error trackers never see it.
  */
 class ExportSpans implements ShouldQueue
 {
     use InteractsWithQueue;
+
+    /**
+     * The number of times the batch is tried.
+     */
+    public int $tries = 3;
+
+    /**
+     * The fixed seconds to wait between tries.
+     */
+    public int $backoff = 10;
 
     /**
      * The flags the batch is encoded with.
@@ -86,9 +104,7 @@ class ExportSpans implements ShouldQueue
     }
 
     /**
-     * Export the batch.
-     *
-     * Rule 8 (retry, backoff, failed()) acts on the export result here.
+     * Export the batch, and try again later when the destination could not take it now.
      */
     public function handle(Exporter $exporter): void
     {
@@ -100,6 +116,25 @@ class ExportSpans implements ShouldQueue
             return;
         }
 
-        $exporter->export($spans);
+        if ($exporter->export($spans) !== ExportResult::Retryable) {
+            return;
+        }
+
+        if ($this->attempts() < $this->tries) {
+            $this->release($this->backoff);
+
+            return;
+        }
+
+        $this->delete();
+        $this->failed();
+    }
+
+    /**
+     * Warn that the batch was given up on. Also called by the queue when the job fails another way.
+     */
+    public function failed(?Throwable $e = null): void
+    {
+        Diagnostics::warn('queue.failed', "A queued batch of spans could not be exported after {$this->tries} tries: the destination could not be reached or answered 408, 429 or 5xx. The batch was dropped.");
     }
 }

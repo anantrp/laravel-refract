@@ -14,7 +14,8 @@ use Throwable;
  *
  * A job is dispatched only on an async driver in the allow-list. Every
  * other driver (sync, deferred, background, failover, custom), a batch too
- * big for the queue, or a failed dispatch exports in this process instead.
+ * big for the queue, or a failed dispatch exports in this process instead,
+ * like the sync transport: no retry.
  */
 class QueueTransport implements Transport
 {
@@ -34,9 +35,17 @@ class QueueTransport implements Transport
     public const ENVELOPE = 2_048;
 
     /**
+     * The transport for the batches exported in this process.
+     */
+    protected SyncTransport $inProcess;
+
+    /**
      * Create a new queue transport instance.
      */
-    public function __construct(protected Container $container, protected Exporter $exporter) {}
+    public function __construct(protected Container $container, Exporter $exporter)
+    {
+        $this->inProcess = new SyncTransport($exporter);
+    }
 
     public function send(array $spans): void
     {
@@ -44,7 +53,7 @@ class QueueTransport implements Transport
         $driver = is_string($connection) ? config("queue.connections.{$connection}.driver") : null;
 
         if (! is_string($connection) || ! in_array($driver, self::ASYNC_DRIVERS, true)) {
-            $this->exporter->export($spans);
+            $this->inProcess->send($spans);
 
             return;
         }
@@ -54,7 +63,7 @@ class QueueTransport implements Transport
         if ($job === null || strlen((string) json_encode(serialize($job))) > self::MAX_PAYLOAD - self::ENVELOPE) {
             Diagnostics::warn('queue.too_big', 'A batch of spans is too big for the queue. It was exported in this process.');
 
-            $this->exporter->export($spans);
+            $this->inProcess->send($spans);
 
             return;
         }
@@ -64,7 +73,7 @@ class QueueTransport implements Transport
         } catch (Throwable $e) {
             Diagnostics::warn('queue.dispatch', 'A batch of spans could not be queued ('.$e::class.'). It was exported in this process.');
 
-            $this->exporter->export($spans);
+            $this->inProcess->send($spans);
         }
     }
 }
