@@ -108,9 +108,14 @@ class Settings
      */
     public static function destinationUrl(string $key): ?string
     {
-        $value = self::string($key);
+        // Not self::string(): it turns an invalid value (a boolean from env "true") into the empty default.
+        $value = config("refract.{$key}");
 
-        if ($value === '' || self::isUrl($value)) {
+        if ($value === null || $value === '') {
+            return '';
+        }
+
+        if (is_string($value) && self::isUrl($value)) {
             return $value;
         }
 

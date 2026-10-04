@@ -301,8 +301,8 @@ it('C3: an invalid env var gives the default and one warning', function (string 
         ->and($about)->toHaveCount(1);
 })->with('env vars');
 
-it('C3: an invalid LANGFUSE_BASE_URL or REFRACT_OTLP_ENDPOINT exports nothing, with one warning, to no fallback host', function (array $env, string $var) {
-    Env::set([...BASE_ENV, ...$env, $var => 'not a url']);
+it('C3: an invalid LANGFUSE_BASE_URL or REFRACT_OTLP_ENDPOINT exports nothing, with one warning, to no fallback host', function (array $env, string $var, string $value) {
+    Env::set([...BASE_ENV, ...$env, $var => $value]);
 
     $log = loadRefract();
 
@@ -314,6 +314,11 @@ it('C3: an invalid LANGFUSE_BASE_URL or REFRACT_OTLP_ENDPOINT exports nothing, w
 })->with([
     'LANGFUSE_BASE_URL' => [LANGFUSE_ENV, 'LANGFUSE_BASE_URL'],
     'REFRACT_OTLP_ENDPOINT' => [['OTEL_EXPORTER_OTLP_ENDPOINT' => 'https://collector.test:4318', 'REFRACT_OTLP_HEADERS' => 'x-secret=1'], 'REFRACT_OTLP_ENDPOINT'],
+])->with([
+    // env() turns "true" and "(false)" into booleans, which are not URLs either.
+    'text' => 'not a url',
+    'true' => 'true',
+    '(false)' => '(false)',
 ]);
 
 /**
