@@ -175,9 +175,9 @@ class Settings
     }
 
     /**
-     * Get the given configuration value as a whole number above zero.
+     * Get the given configuration value as a whole number of at least the given minimum (above zero).
      */
-    public static function positiveInt(string $key, int $default): int
+    public static function positiveInt(string $key, int $default, int $min = 1): int
     {
         $value = config("refract.{$key}");
 
@@ -186,11 +186,11 @@ class Settings
         }
 
         $number = is_int($value) || (is_string($value) && preg_match('/^\s*\d+\s*$/', $value) === 1)
-            ? filter_var($value, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]])
+            ? filter_var($value, FILTER_VALIDATE_INT, ['options' => ['min_range' => max(1, $min)]])
             : false;
 
         if (! is_int($number)) {
-            Diagnostics::warn("config.{$key}", "Refract config [refract.{$key}] must be a whole number above zero. Using the default.");
+            Diagnostics::warn("config.{$key}", "Refract config [refract.{$key}] must be a whole number of at least ".max(1, $min).'. Using the default.');
 
             return $default;
         }

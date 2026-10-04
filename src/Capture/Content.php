@@ -86,6 +86,11 @@ class Content
     public const MAX_BYTES = 131_072;
 
     /**
+     * The smallest byte cap: room for the cut marker of any original size.
+     */
+    public const MIN_BYTES = 64;
+
+    /**
      * The JSON flags tool arguments and results are encoded with, the same the SDK uses.
      */
     protected const JSON_FLAGS = JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE | JSON_PRESERVE_ZERO_FRACTION;

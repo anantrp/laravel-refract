@@ -79,7 +79,7 @@ const CHANGED_ENV = [
     'REFRACT_CONTEXT_PARTICIPANT_TYPE' => 'changed_type',
     'REFRACT_CONTEXT_PARTICIPANT_ID' => 'changed_id',
     'OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT' => 'true',
-    'REFRACT_CAPTURE_MAX_BYTES' => '10',
+    'REFRACT_CAPTURE_MAX_BYTES' => '1000',
 ];
 
 /**
@@ -365,13 +365,20 @@ it('C3: a URL with a scheme other than http or https, or with no host, is invali
     }
 })->with(urlHostCases());
 
-it('C3: a byte cap of 0, negative, a fraction or text gives 128 KB and one warning', function (string $value) {
+it('C3: a byte cap under 64, 0, negative, a fraction or text gives 128 KB and one warning', function (string $value) {
     [$result, $warnings] = runEnvCase('REFRACT_CAPTURE_MAX_BYTES', $value);
 
     expect($result)->toBe(131_072)
         ->and($warnings)->toHaveCount(1)
         ->and($warnings[0])->toContain('refract.capture.max_bytes');
-})->with(['0', '-5', '1.5', '1e3', '128KB']);
+})->with(['63', '1', '0', '-5', '1.5', '1e3', '128KB']);
+
+it('C1: a byte cap of 64, the minimum, is used', function () {
+    [$result, $warnings] = runEnvCase('REFRACT_CAPTURE_MAX_BYTES', '64');
+
+    expect($result)->toBe(64)
+        ->and($warnings)->toBe([]);
+});
 
 it('C1: capture turned on and a byte cap set are used', function () {
     Env::set([...BASE_ENV, 'OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT' => 'true', 'REFRACT_CAPTURE_MAX_BYTES' => '1000']);

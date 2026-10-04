@@ -369,6 +369,22 @@ it('P3: a cut never splits a multibyte character', function () {
         ->and($cut)->toStartWith('éé');
 });
 
+it('P3: at the minimum byte cap of 64 a cut value, marker included, never exceeds the cap', function (string $value) {
+    $this->environmentConfig = contentConfig(['refract.capture.content' => true, 'refract.capture.max_bytes' => 64]);
+    $this->refreshApplication();
+
+    $cut = app(Content::class)->value($value);
+
+    expect(strlen($cut))->toBeLessThanOrEqual(64)
+        ->and(mb_check_encoding($cut, 'UTF-8'))->toBeTrue()
+        ->and($cut)->toEndWith('[cut, original size '.strlen($value).' bytes]');
+})->with([
+    '65 bytes' => [str_repeat('a', 65)],
+    '1 KB of multibyte text' => [str_repeat('é', 512)],
+    '1 MB' => [str_repeat('a', 1_000_000)],
+    '10 MB' => [str_repeat('a', 10_000_000)],
+]);
+
 it('P3: the default byte cap is 128 KB', function () {
     $this->environmentConfig = contentConfig(['refract.capture.content' => true]);
     $memory = $this->captureNeutralSpans();

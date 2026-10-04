@@ -43,7 +43,7 @@ class RefractServiceProvider extends ServiceProvider
         $this->app->singleton(Content::class, fn (Application $app) => new Content(
             $app,
             enabled: Settings::bool('capture.content', false),
-            maxBytes: Settings::positiveInt('capture.max_bytes', Content::MAX_BYTES),
+            maxBytes: Settings::positiveInt('capture.max_bytes', Content::MAX_BYTES, Content::MIN_BYTES),
             maskClass: config('refract.capture.mask'),
         ));
 

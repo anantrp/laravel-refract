@@ -96,9 +96,9 @@ return [
     |
     | When "content" is on, prompts, step messages, outputs, tool arguments
     | and tool results are recorded. It is off by default. Each value is cut
-    | at "max_bytes" (default 131072, 128 KB) and marked with its original
-    | size. Attachments and files are never recorded: a file in a value
-    | becomes "[file]".
+    | at "max_bytes" (default 131072, 128 KB, at least 64) and marked with
+    | its original size. Attachments and files are never recorded: a file
+    | in a value becomes "[file]".
     |
     | "mask" is the class name of an invokable class, made from the
     | container, that is given every captured string and returns it masked.
