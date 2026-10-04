@@ -153,7 +153,7 @@ afterEach(function () {
 });
 
 it('S1: a listener that throws lets every kind of run continue, with one warning that names no value', function () {
-    $this->extenders[Recorder::class] = fn (Recorder $recorder, Application $app) => new ThrowingRecorder($app->make(Transport::class));
+    $this->extenders[Recorder::class] = fn (Recorder $recorder, Application $app) => new ThrowingRecorder($app);
     $log = bootSafety();
 
     runEveryKindOfRun();
@@ -167,7 +167,7 @@ it('S1: a listener that throws lets every kind of run continue, with one warning
 });
 
 it('S1: the app gets its own exception unchanged when the listener for the failure throws', function () {
-    $this->extenders[Recorder::class] = fn (Recorder $recorder, Application $app) => new ThrowingRecorder($app->make(Transport::class));
+    $this->extenders[Recorder::class] = fn (Recorder $recorder, Application $app) => new ThrowingRecorder($app);
     $log = bootSafety();
 
     $error = new RuntimeException('The agent failed.');
@@ -218,7 +218,7 @@ it('S1: a run whose context cannot be read is recorded without its context, with
 });
 
 it('S2: a log that cannot be written throws nothing to the app', function () {
-    $this->extenders[Recorder::class] = fn (Recorder $recorder, Application $app) => new ThrowingRecorder($app->make(Transport::class));
+    $this->extenders[Recorder::class] = fn (Recorder $recorder, Application $app) => new ThrowingRecorder($app);
     bootSafety();
 
     Log::swap(new class
@@ -322,7 +322,7 @@ it('S3: a flush that fails while building the batch, or a reset that throws, sti
     $transport = new FlakyTransport;
     $transport->throws = false;
     $this->extenders[Transport::class] = fn () => $transport;
-    $this->extenders[Recorder::class] = fn (Recorder $recorder, Application $app) => new class($app->make(Transport::class)) extends Recorder
+    $this->extenders[Recorder::class] = fn (Recorder $recorder, Application $app) => new class($app) extends Recorder
     {
         public bool $broken = true;
 

@@ -6,6 +6,7 @@ use Anantrp\Refract\Contracts\Transport;
 use Anantrp\Refract\Support\Diagnostics;
 use Anantrp\Refract\Support\Guard;
 use Closure;
+use Illuminate\Contracts\Container\Container;
 use OpenTelemetry\API\Trace\Span;
 
 /**
@@ -59,9 +60,9 @@ class Recorder
     protected array $resets = [];
 
     /**
-     * Create a new recorder instance.
+     * Create a new recorder instance. The transport is made from the container on the first send, not before.
      */
-    public function __construct(protected Transport $transport) {}
+    public function __construct(protected Container $container) {}
 
     /**
      * Start a span under the given parent, or under the app's active trace.
@@ -288,7 +289,7 @@ class Recorder
         }
 
         if ($batch !== []) {
-            $this->transport->send($batch);
+            $this->container->make(Transport::class)->send($batch);
         }
     }
 

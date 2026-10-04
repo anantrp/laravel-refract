@@ -554,7 +554,7 @@ it('L16: span times stay correct in a worker that runs for days, through the que
     $second = 1_000_000_000;
     $day = 86_400 * $second;
 
-    $recorder = new ClockRecorder(app(Transport::class));
+    $recorder = new ClockRecorder(app());
 
     // Three days after the worker started.
     $recorder->monotonicNow = 3 * $day;

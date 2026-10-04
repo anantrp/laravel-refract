@@ -1,8 +1,10 @@
 <?php
 
 use Anantrp\Refract\Capture\Content;
+use Anantrp\Refract\Capture\FlushPoints;
 use Anantrp\Refract\Capture\RecordAgentRuns;
 use Anantrp\Refract\Capture\RunContext;
+use Anantrp\Refract\Contracts\Exporter;
 use Anantrp\Refract\Contracts\Transport;
 use Anantrp\Refract\Export\Platforms\Langfuse\LangfusePlatform;
 use Anantrp\Refract\Export\Platforms\Otlp\OtlpPlatform;
@@ -474,6 +476,32 @@ it('C5: no OTLP endpoint at all exports nothing and warns once', function () {
     expect(exported())->toBeNull()
         ->and(exported())->toBeNull()
         ->and($log->warnings)->toHaveCount(1);
+});
+
+it('C5: the transport and exporter are built on the first send, so no endpoint warns only once spans are sent', function () {
+    $this->refreshApplicationWithConfig(['refract.transport' => 'sync', 'refract.destination' => 'otlp']);
+
+    expect(app()->resolved(Transport::class))->toBeFalse()
+        ->and(app()->resolved(Exporter::class))->toBeFalse();
+
+    Diagnostics::reset();
+    Log::swap($log = new WarningLog);
+    Http::fake();
+
+    // A flush point with nothing recorded, as in a request or command that runs no agent.
+    app(FlushPoints::class)->flush();
+
+    expect($log->warnings)->toBe([])
+        ->and(app()->resolved(Transport::class))->toBeFalse();
+
+    TimeAgent::fakeTwoSteps();
+    TimeAgent::make()->prompt('What time is it?');
+    app(FlushPoints::class)->flush();
+
+    expect($log->warnings)->toHaveCount(1)
+        ->and($log->warnings[0])->toContain('No OTLP endpoint')
+        ->and(app()->resolved(Exporter::class))->toBeTrue();
+    Http::assertNothingSent();
 });
 
 it('C6: LANGFUSE_BASE_URL empty sends to Langfuse Cloud', function () {
