@@ -4,6 +4,7 @@ namespace Anantrp\Refract\Export\Platforms\Langfuse;
 
 use Anantrp\Refract\Export\GenAiTranslator;
 use Anantrp\Refract\Export\Platform;
+use Anantrp\Refract\Support\Diagnostics;
 use Anantrp\Refract\Support\Settings;
 use Illuminate\Contracts\Auth\Authenticatable;
 
@@ -51,15 +52,23 @@ class LangfusePlatform implements Platform
     ) {}
 
     /**
-     * Create the platform from the config.
+     * Create the platform from the config, or get null and one warning when a key is missing.
+     *
+     * An empty base URL means Langfuse Cloud.
      */
     public static function fromConfig(string $key): ?self
     {
-        return new self(
-            url: Settings::string("{$key}.url"),
-            publicKey: Settings::string("{$key}.public_key"),
-            secretKey: Settings::string("{$key}.secret_key"),
-        );
+        $url = Settings::url("{$key}.url");
+        $publicKey = Settings::string("{$key}.public_key");
+        $secretKey = Settings::string("{$key}.secret_key");
+
+        if ($publicKey === '' || $secretKey === '') {
+            Diagnostics::warn('langfuse.keys', 'Langfuse keys missing. Set LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY. Nothing is exported.');
+
+            return null;
+        }
+
+        return new self($url, $publicKey, $secretKey);
     }
 
     public function endpoint(): string

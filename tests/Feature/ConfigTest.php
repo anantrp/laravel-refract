@@ -43,6 +43,20 @@ const BASE_ENV = [
 ];
 
 /**
+ * The env of a working Langfuse destination.
+ */
+const LANGFUSE_ENV = [
+    'REFRACT_DESTINATION' => 'langfuse',
+    'LANGFUSE_PUBLIC_KEY' => 'pk-test',
+    'LANGFUSE_SECRET_KEY' => 'sk-test',
+];
+
+/**
+ * The traces URL of Langfuse Cloud.
+ */
+const LANGFUSE_CLOUD = 'https://cloud.langfuse.com/api/public/otel/v1/traces';
+
+/**
  * Load config/refract.php again from the current env, rebuild Refract's services and record warnings.
  */
 function loadRefract(): WarningLog
@@ -157,6 +171,15 @@ function envCases(): array
         'OTEL_EXPORTER_OTLP_HEADERS' => [
             'env' => $collector, 'invalid' => 'x-team', 'read' => $headers, 'default' => [], 'warnings' => 0,
         ],
+        'LANGFUSE_BASE_URL' => [
+            'env' => LANGFUSE_ENV, 'invalid' => 'not a url', 'read' => $url, 'default' => LANGFUSE_CLOUD, 'warnings' => 0,
+        ],
+        'LANGFUSE_PUBLIC_KEY' => [
+            'env' => LANGFUSE_ENV, 'invalid' => 'true', 'read' => fn () => exported(), 'default' => null, 'warnings' => 1,
+        ],
+        'LANGFUSE_SECRET_KEY' => [
+            'env' => LANGFUSE_ENV, 'invalid' => 'true', 'read' => fn () => exported(), 'default' => null, 'warnings' => 1,
+        ],
     ];
 }
 
@@ -262,6 +285,37 @@ it('C5: no OTLP endpoint at all exports nothing and warns once', function () {
         ->and(exported())->toBeNull()
         ->and($log->warnings)->toHaveCount(1);
 });
+
+it('C6: LANGFUSE_BASE_URL empty sends to Langfuse Cloud', function () {
+    Env::set([...BASE_ENV, ...LANGFUSE_ENV, 'LANGFUSE_BASE_URL' => '']);
+
+    $log = loadRefract();
+
+    expect(exported()['url'] ?? null)->toBe(LANGFUSE_CLOUD)
+        ->and($log->warnings)->toBe([]);
+});
+
+it('C6: LANGFUSE_BASE_URL set sends to that Langfuse', function () {
+    Env::set([...BASE_ENV, ...LANGFUSE_ENV, 'LANGFUSE_BASE_URL' => 'https://langfuse.example.test/']);
+
+    loadRefract();
+
+    expect(exported()['url'] ?? null)->toBe('https://langfuse.example.test/api/public/otel/v1/traces');
+});
+
+it('C8: Langfuse keys missing export nothing and warn once', function (array $keys) {
+    Env::set([...BASE_ENV, ...LANGFUSE_ENV, ...$keys]);
+
+    $log = loadRefract();
+
+    expect(exported())->toBeNull()
+        ->and(exported())->toBeNull()
+        ->and($log->warnings)->toHaveCount(1);
+})->with([
+    'both' => [['LANGFUSE_PUBLIC_KEY' => null, 'LANGFUSE_SECRET_KEY' => null]],
+    'public key' => [['LANGFUSE_PUBLIC_KEY' => null]],
+    'secret key' => [['LANGFUSE_SECRET_KEY' => '']],
+]);
 
 /**
  * Get the participant a run not saved records under the given key names.
