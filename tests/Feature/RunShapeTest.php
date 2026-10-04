@@ -12,6 +12,9 @@ use Laravel\Ai\Responses\Data\Meta;
 use Laravel\Ai\Responses\Data\TextUsage;
 use Laravel\Ai\Responses\Data\ToolResult;
 use Laravel\Ai\Responses\TextResponse;
+use OpenTelemetry\API\Trace\Span;
+use OpenTelemetry\API\Trace\SpanContext;
+use OpenTelemetry\API\Trace\TraceFlags;
 use Workbench\App\Ai\Agents\SupervisorAgent;
 use Workbench\App\Ai\Agents\TimeAgent;
 
@@ -318,4 +321,51 @@ it('R7: approval events are exported with the tool name, call id and decision', 
         expect($event['timeUnixNano'] >= $run['startTimeUnixNano'])->toBeTrue()
             ->and($event['timeUnixNano'] <= $run['endTimeUnixNano'])->toBeTrue();
     }
+});
+
+it('R8: a run that throws has status error with the exception class and the app gets the same exception', function () {
+    $thrown = new RuntimeException('secret detail from the provider');
+
+    TimeAgent::fake(fn () => throw $thrown);
+
+    $caught = null;
+
+    try {
+        TimeAgent::make()->prompt('What time is it?');
+    } catch (Throwable $e) {
+        $caught = $e;
+    }
+
+    app(Recorder::class)->flush();
+
+    expect($caught)->toBe($thrown);
+
+    [$run, $step] = Otlp::spans();
+
+    expect($run['name'])->toBe('invoke_agent TimeAgent')
+        ->and($run['status'])->toBe(['code' => 2, 'message' => RuntimeException::class])
+        ->and($step['status'])->toBe(['code' => 2, 'message' => RuntimeException::class])
+        ->and(json_encode(Http::recorded()[0][0]->data()))->not->toContain('secret detail');
+});
+
+it('R9: a run joins the app\'s active OTel trace as a child', function () {
+    $traceId = str_repeat('ab', 16);
+    $spanId = str_repeat('cd', 8);
+
+    $scope = Span::wrap(SpanContext::create($traceId, $spanId, TraceFlags::SAMPLED))->activate();
+
+    try {
+        TimeAgent::fakeTwoSteps();
+
+        TimeAgent::make()->prompt('What time is it?');
+    } finally {
+        $scope->detach();
+    }
+
+    app(Recorder::class)->flush();
+
+    $spans = Otlp::spans();
+
+    expect(array_unique(array_column($spans, 'traceId')))->toBe([$traceId])
+        ->and($spans[0]['parentSpanId'])->toBe($spanId);
 });
