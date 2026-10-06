@@ -18,7 +18,8 @@ use Illuminate\Support\Facades\Schema;
 
 /*
  * Rule 8: retry on a network error, 408, 429 and 5xx; drop every other
- * status with one warning. The queue job tries 3 times, 10 s apart.
+ * status with one warning. The queue job tries 3 times, 10 s then 60 s
+ * apart, or after the Retry-After seconds of a 429 or 503 (at most 300).
  */
 
 /**
@@ -96,6 +97,22 @@ function workExportJob(): void
 function fakeDestination(int|string $status, string $body = ''): void
 {
     Http::fake(fn () => $status === 'network' ? Http::failedConnection() : Http::response($body, (int) $status));
+}
+
+/**
+ * Fake every request to the destination with the given status and Retry-After header.
+ */
+function fakeRetryAfter(int $status, string $retryAfter): void
+{
+    Http::fake(fn () => Http::response('', $status, ['Retry-After' => $retryAfter]));
+}
+
+/**
+ * Get the seconds until the queued export job is available again.
+ */
+function secondsUntilRetry(): int
+{
+    return DB::table('jobs')->value('available_at') - now()->getTimestamp();
 }
 
 dataset('retryable', ['408' => 408, '429' => 429, '500' => 500, '503' => 503, 'network error' => 'network']);
@@ -239,7 +256,7 @@ it('E2: a request exception that carries a response is judged by its status', fu
         ->and($log->warnings[0])->toContain('no key');
 });
 
-it('E3: a 408, 429, 5xx or network error on queue is retried, 3 tries, 10 s apart', function (int|string $status) {
+it('E3: a 408, 429, 5xx or network error on queue is retried, 3 tries, 10 s then 60 s apart', function (int|string $status) {
     $log = bootExport('queue');
     // The backoff is checked to the second: a clock tick during the test must not change it.
     $this->freezeTime();
@@ -252,7 +269,7 @@ it('E3: a 408, 429, 5xx or network error on queue is retried, 3 tries, 10 s apar
 
     Http::assertSentCount(1);
     expect(DB::table('jobs')->count())->toBe(1)
-        ->and(DB::table('jobs')->value('available_at') - now()->getTimestamp())->toBe(10)
+        ->and(secondsUntilRetry())->toBe(10)
         ->and($log->warnings)->toBe([]);
 
     $this->travel(9)->seconds();
@@ -264,16 +281,22 @@ it('E3: a 408, 429, 5xx or network error on queue is retried, 3 tries, 10 s apar
     workExportJob();
 
     Http::assertSentCount(2);
-    expect($log->warnings)->toBe([]);
+    expect(secondsUntilRetry())->toBe(60)
+        ->and($log->warnings)->toBe([]);
 
-    $this->travel(10)->seconds();
+    $this->travel(59)->seconds();
+    workExportJob();
+
+    Http::assertSentCount(2);
+
+    $this->travel(1)->seconds();
     workExportJob();
 
     Http::assertSentCount(3);
     expect(DB::table('jobs')->count())->toBe(0)
         ->and($log->warnings)->toHaveCount(1);
 
-    $this->travel(60)->seconds();
+    $this->travel(300)->seconds();
     workExportJob();
 
     Http::assertSentCount(3);
@@ -294,6 +317,90 @@ it('E3: a queued batch that succeeds on a later try logs nothing', function () {
     expect(DB::table('jobs')->count())->toBe(0)
         ->and($log->warnings)->toBe([]);
 });
+
+it('E7: a 429 or 503 with Retry-After in seconds on queue waits that long before the next try', function (int $status) {
+    $log = bootExport('queue');
+    $this->freezeTime();
+    fakeRetryAfter($status, '3');
+    useExportQueue();
+
+    sendSpan();
+
+    workExportJob();
+
+    expect(secondsUntilRetry())->toBe(3);
+
+    $this->travel(2)->seconds();
+    workExportJob();
+
+    Http::assertSentCount(1);
+
+    $this->travel(1)->seconds();
+    workExportJob();
+
+    Http::assertSentCount(2);
+    expect(secondsUntilRetry())->toBe(3)
+        ->and($log->warnings)->toBe([]);
+})->with(['429' => 429, '503' => 503]);
+
+it('E7: a Retry-After over 300 s waits 300 s', function (string $retryAfter) {
+    bootExport('queue');
+    $this->freezeTime();
+    fakeRetryAfter(429, $retryAfter);
+    useExportQueue();
+
+    sendSpan();
+
+    workExportJob();
+
+    expect(secondsUntilRetry())->toBe(300);
+})->with(['301', '3600', '99999999999999999999999']);
+
+it('E7: a Retry-After that is not whole seconds, or on another status, is ignored and the backoff is used', function (int $status, string $retryAfter) {
+    bootExport('queue');
+    $this->freezeTime();
+    fakeRetryAfter($status, $retryAfter);
+    useExportQueue();
+
+    sendSpan();
+
+    workExportJob();
+
+    expect(secondsUntilRetry())->toBe(10);
+})->with([
+    'HTTP date' => [503, 'Wed, 21 Oct 2026 07:28:00 GMT'],
+    'negative' => [429, '-5'],
+    'text' => [429, 'soon'],
+    'fraction' => [503, '1.5'],
+    'empty' => [503, ''],
+    'on 500' => [500, '3'],
+    'on 408' => [408, '3'],
+]);
+
+it('E7: a Retry-After of 0 s on queue tries again at once', function () {
+    bootExport('queue');
+    $this->freezeTime();
+    fakeRetryAfter(503, '0');
+    useExportQueue();
+
+    sendSpan();
+
+    workExportJob();
+    workExportJob();
+
+    Http::assertSentCount(2);
+});
+
+it('E7: a Retry-After on sync is not waited for: no retry and one warning, like E4', function (int $status) {
+    $log = bootExport('sync');
+    fakeRetryAfter($status, '3');
+
+    sendSpan();
+
+    Http::assertSentCount(1);
+    expect($log->warnings)->toHaveCount(1)
+        ->and($log->warnings[0])->toContain('dropped');
+})->with(['429' => 429, '503' => 503]);
 
 it('E4: a 408, 429, 5xx or network error on sync is not retried and logs one warning', function (int|string $status) {
     $log = bootExport('sync');
@@ -343,9 +450,9 @@ it('E5: a queue job that gives up logs one warning from failed() and is not sent
 
     sendSpan();
 
-    foreach (range(1, 3) as $try) {
+    foreach ([10, 60, 300] as $wait) {
         workExportJob();
-        $this->travel(10)->seconds();
+        $this->travel($wait)->seconds();
     }
 
     Http::assertSentCount(3);
@@ -367,7 +474,7 @@ it('E5: failed() called by the queue logs one warning and does not throw', funct
         ->and($log->warnings[0])->toContain('3 tries')
         ->and($log->warnings[0])->toContain('dropped')
         ->and($job->tries)->toBe(3)
-        ->and($job->backoff)->toBe(10);
+        ->and($job->backoff)->toBe([10, 60, 300]);
 });
 
 it('E6: a 401 and then an outage in one process give two different warnings', function (string $transport) {
@@ -379,9 +486,9 @@ it('E6: a 401 and then an outage in one process give two different warnings', fu
     sendSpan();
 
     if ($transport === 'queue') {
-        foreach (range(1, 4) as $try) {
+        foreach ([0, 10, 60, 300] as $wait) {
             workExportJob();
-            $this->travel(10)->seconds();
+            $this->travel($wait)->seconds();
         }
 
         Http::assertSentCount(4);

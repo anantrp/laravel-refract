@@ -202,7 +202,8 @@ The job goes to your default queue connection and its default queue.
 - A job is pushed only when the connection's driver is `redis`, `database`, `sqs` or `beanstalkd`. Every other driver (`sync`, `deferred`, `background`, `failover`, custom) exports with `sync` instead.
 - The batch is gzipped. When it is still too big for a queue message (256 KB minus room for the job envelope), it is exported with `sync` instead and one warning is logged.
 - When the push fails, the batch is exported with `sync` and one warning is logged.
-- The job tries 3 times, 10 seconds apart, when the destination cannot be reached or answers 408, 429 or 5xx.
+- The job tries 3 times when the destination cannot be reached or answers 408, 429 or 5xx. It waits 10 seconds before the second try and 60 seconds before the third.
+- On a 429 or 503 with `Retry-After` in whole seconds, the job waits that long instead, at most 300 seconds. An HTTP date, a negative number or text is ignored. `sync` never waits or retries.
 - When the job gives up, it logs one warning. It does not throw, so nothing goes to your error tracker or the `failed_jobs` table.
 
 ### Export Failures
@@ -211,7 +212,7 @@ The job goes to your default queue connection and its default queue.
 | --- | --- | --- |
 | 2xx | Done | Done |
 | 2xx whose `partialSuccess` refuses spans or has a message | Done, one warning | Done, one warning |
-| Network error, 408, 429, 5xx | Dropped, one warning | Retried (3 tries, 10 s apart), then one warning |
+| Network error, 408, 429, 5xx | Dropped, one warning | Retried (3 tries, 10 s then 60 s apart, or the `Retry-After` seconds of a 429 or 503, at most 300 s), then one warning |
 | Any other status (3xx, 400, 401, 403, 404, ...) | Dropped, one warning | Dropped, one warning |
 
 A rejected batch's warning names the status and the first 200 characters of the response body. Credentials the destination echoes in the body are masked as `[removed]`: values under key names that contain `key`, `token`, `secret`, `auth`, `password`, `passwd`, `credential` or `cookie` (in JSON, in header lines and in `key=value` pairs), and `Bearer` and `Basic` tokens. Other text, such as a plain error line, is kept.
@@ -352,7 +353,6 @@ Context::add('trigger', 'schedule');
 - **(L12)** A long command exports its spans only when it ends. They cannot be sent earlier.
 - **(L17)** Laravel Octane is not supported.
 - **(X10)** With a morph map, the participant type is the full class name, so it does not match the `participant_type` column of the `agent_conversations` table (which holds the alias).
-- **(E7)** A `Retry-After` header from the destination is ignored. The queue job always waits 10 seconds.
 - **(P12)** With no `mask` set, a secret inside captured content is sent as is.
 
 ## Contributing

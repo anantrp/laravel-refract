@@ -4,6 +4,7 @@ namespace Anantrp\Refract\Transport;
 
 use Anantrp\Refract\Contracts\Exporter;
 use Anantrp\Refract\Contracts\ExportResult;
+use Anantrp\Refract\Contracts\RetryAfter;
 use Anantrp\Refract\Support\Diagnostics;
 use Illuminate\Contracts\Container\Container;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -16,11 +17,12 @@ use Throwable;
  * The batch travels as gzipped JSON, base64 encoded: the queue payload is
  * JSON, so invalid UTF-8 becomes U+FFFD and floats keep their fraction.
  *
- * A retryable result (network error, 408, 429, 5xx) is tried again 10 s
- * later, 3 tries in all. The job never throws for it: after the last try
- * it deletes itself and warns once from failed(), so it is not reported
- * to the exception handler, not stored as a failed job and fires no
- * JobFailed event. Error trackers never see it. Nothing else in the job
+ * A retryable result (network error, 408, 429, 5xx) is tried again, 3
+ * tries in all: after the Retry-After seconds the exporter read from a 429
+ * or 503, else after the backoff of the attempt (10 s, then 60 s). The job
+ * never throws for it: after the last try it deletes itself and warns once
+ * from failed(), so it is not reported to the exception handler, not
+ * stored as a failed job and fires no JobFailed event. Error trackers never see it. Nothing else in the job
  * throws either: a failure to decode or export drops the batch with one
  * warning.
  */
@@ -34,9 +36,11 @@ class ExportSpans implements ShouldQueue
     public int $tries = 3;
 
     /**
-     * The fixed seconds to wait between tries.
+     * The seconds to wait before each next try, by attempt.
+     *
+     * @var list<int>
      */
-    public int $backoff = 10;
+    public array $backoff = [10, 60, 300];
 
     /**
      * The flags the batch is encoded with.
@@ -131,7 +135,9 @@ class ExportSpans implements ShouldQueue
             return;
         }
 
-        if ($container->make(Exporter::class)->export($spans) !== ExportResult::Retryable) {
+        $exporter = $container->make(Exporter::class);
+
+        if ($exporter->export($spans) !== ExportResult::Retryable) {
             return;
         }
 
@@ -142,7 +148,9 @@ class ExportSpans implements ShouldQueue
         }
 
         if ($this->attempts() < $this->tries) {
-            $this->release($this->backoff);
+            $asked = $exporter instanceof RetryAfter ? $exporter->retryAfter() : null;
+
+            $this->release($asked ?? $this->backoff[min($this->attempts(), count($this->backoff)) - 1]);
 
             return;
         }

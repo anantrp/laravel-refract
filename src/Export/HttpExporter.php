@@ -4,6 +4,7 @@ namespace Anantrp\Refract\Export;
 
 use Anantrp\Refract\Contracts\Exporter;
 use Anantrp\Refract\Contracts\ExportResult;
+use Anantrp\Refract\Contracts\RetryAfter;
 use Anantrp\Refract\Support\Diagnostics;
 use Anantrp\Refract\Support\Guard;
 use Illuminate\Http\Client\ConnectionException;
@@ -17,12 +18,14 @@ use Throwable;
  *
  * A 2xx is ok, with one warning when its OTLP partialSuccess refuses
  * spans (never retried). A network error, 408, 429 or 5xx is retryable: the
- * transport decides whether to try again. Every other status, a redirect
- * too (it is never followed), is rejected and warned about here, with the status and the start of the body. Any
+ * transport decides whether to try again, and when. A 429 or 503 may say
+ * when with Retry-After, read in whole seconds only and capped at 300.
+ * Every other status, a redirect too (it is never followed), is rejected
+ * and warned about here, with the status and the start of the body. Any
  * other error, from the HTTP client or from translating and encoding the
  * spans, is rejected with one warning.
  */
-class HttpExporter implements Exporter
+class HttpExporter implements Exporter, RetryAfter
 {
     /**
      * The seconds to wait for the destination.
@@ -40,6 +43,16 @@ class HttpExporter implements Exporter
     protected const BODY_SCAN = 4_096;
 
     /**
+     * The most seconds a Retry-After may ask to wait.
+     */
+    protected const MAX_RETRY_AFTER = 300;
+
+    /**
+     * The seconds the destination asked to wait after the last export, or null.
+     */
+    protected ?int $retryAfter = null;
+
+    /**
      * Create a new exporter instance.
      */
     public function __construct(
@@ -52,6 +65,8 @@ class HttpExporter implements Exporter
 
     public function export(array $spans): ExportResult
     {
+        $this->retryAfter = null;
+
         try {
             $translated = $this->platform->prepare(array_map($this->translator->translate(...), $spans));
 
@@ -94,6 +109,8 @@ class HttpExporter implements Exporter
         $status = $response->status();
 
         if ($status === 408 || $status === 429 || $status >= 500) {
+            $this->retryAfter = $status === 429 || $status === 503 ? $this->retryAfterSeconds($response->header('Retry-After')) : null;
+
             return ExportResult::Retryable;
         }
 
@@ -102,6 +119,29 @@ class HttpExporter implements Exporter
         Diagnostics::warn('export.rejected', "Spans were rejected by the destination with HTTP {$status}: {$excerpt}. The batch was dropped.");
 
         return ExportResult::Rejected;
+    }
+
+    public function retryAfter(): ?int
+    {
+        return $this->retryAfter;
+    }
+
+    /**
+     * Get the seconds of a Retry-After header, capped, or null when it is
+     * not a whole number of seconds (an HTTP date, a negative number or text).
+     */
+    protected function retryAfterSeconds(string $header): ?int
+    {
+        $header = trim($header);
+
+        if (! ctype_digit($header)) {
+            return null;
+        }
+
+        // A number too long for an int is over the cap too, so compare digit counts first.
+        $digits = ltrim($header, '0');
+
+        return strlen($digits) > strlen((string) self::MAX_RETRY_AFTER) ? self::MAX_RETRY_AFTER : min((int) $digits, self::MAX_RETRY_AFTER);
     }
 
     /**
