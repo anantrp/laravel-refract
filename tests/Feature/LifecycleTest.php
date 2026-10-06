@@ -780,6 +780,64 @@ it('L12: a sub-agent run ending does not send its own tree away from its parent 
     expect($transport->spans)->toBe([]);
 });
 
+it('L12: runs under 1,000 spans each never hit the cap in a console process, the held run is sent when the buffer is full', function (int $runs, int $size) {
+    $transport = $this->captureNeutralSpans();
+    Diagnostics::reset();
+    Log::swap($log = new WarningLog);
+    $recorder = app(Recorder::class);
+
+    for ($run = 0; $run < $runs; $run++) {
+        $recorder->start("run:{$run}", 'invoke_agent', null, ['agent' => 'Done']);
+
+        for ($i = 1; $i < $size; $i++) {
+            $recorder->start("tool:{$run}:{$i}", 'execute_tool', "run:{$run}", ['agent' => 'Done']);
+            $recorder->end("tool:{$run}:{$i}");
+        }
+
+        $recorder->end("run:{$run}");
+    }
+
+    $recorder->flush();
+
+    expect($transport->spans)->toHaveCount($runs * $size)
+        ->and(array_unique(array_column($transport->spans, 'span_id')))->toHaveCount($runs * $size)
+        ->and(array_unique(array_column($transport->spans, 'status')))->toBe(['ok'])
+        ->and($log->warnings)->toBe([]);
+})->with([
+    '3 runs of 600 spans' => [3, 600],
+    '4 runs of 400 spans' => [4, 400],
+    '3 runs of 999 spans' => [3, 999],
+]);
+
+it('L12: a full buffer in a console process sends only finished runs, an open run stays whole and open', function () {
+    $transport = $this->captureNeutralSpans();
+    $recorder = app(Recorder::class);
+
+    $recorder->start('run:done', 'invoke_agent', null, ['agent' => 'Done']);
+
+    for ($i = 0; $i < 400; $i++) {
+        $recorder->start("tool:done:{$i}", 'execute_tool', 'run:done', ['agent' => 'Done']);
+        $recorder->end("tool:done:{$i}");
+    }
+
+    $recorder->end('run:done');
+    $recorder->start('run:open', 'invoke_agent', null, ['agent' => 'Open']);
+
+    for ($i = 0; $i < 700; $i++) {
+        $recorder->start("tool:open:{$i}", 'execute_tool', 'run:open', ['agent' => 'Open']);
+        $recorder->end("tool:open:{$i}");
+    }
+
+    expect($transport->spans)->toHaveCount(401)
+        ->and(array_unique(array_column(array_column($transport->spans, 'call'), 'agent')))->toBe(['Done'])
+        ->and($recorder->isOpen('run:open'))->toBeTrue();
+
+    $recorder->end('run:open');
+    $recorder->flush();
+
+    expect($transport->spans)->toHaveCount(1_102);
+});
+
 it('L18: a partial send leaves open runs, their open spans and the reset state alone', function () {
     $transport = $this->captureNeutralSpans();
     $recorder = app(Recorder::class);

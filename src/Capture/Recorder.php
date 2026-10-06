@@ -77,6 +77,13 @@ class Recorder
     protected array $runEnds = [];
 
     /**
+     * The callbacks run when the buffer is full, before a new span is dropped.
+     *
+     * @var list<Closure(): mixed>
+     */
+    protected array $fulls = [];
+
+    /**
      * The monotonic time of the last send, or of the recorder's start before the first one.
      */
     protected int $lastSend;
@@ -107,7 +114,13 @@ class Recorder
             $this->abandon($key);
         }
 
-        if (count($this->open) + count($this->finished) >= self::MAX_SPANS) {
+        if ($this->full()) {
+            foreach ($this->fulls as $callback) {
+                $callback();
+            }
+        }
+
+        if ($this->full()) {
             Diagnostics::warn('buffer.full', 'The buffer holds '.self::MAX_SPANS.' spans, the most it can between two flushes. New spans are dropped until the next flush.');
 
             return;
@@ -340,6 +353,35 @@ class Recorder
     }
 
     /**
+     * Run the given callback when the buffer is full, before a new span is dropped.
+     *
+     * @param  Closure(): mixed  $callback
+     */
+    public function whenFull(Closure $callback): void
+    {
+        $this->fulls[] = $callback;
+    }
+
+    /**
+     * Determine if the buffer holds the most spans it can.
+     */
+    protected function full(): bool
+    {
+        return count($this->open) + count($this->finished) >= self::MAX_SPANS;
+    }
+
+    /**
+     * Hand every finished span tree to the transport now, the held run's too, leaving every open span and the state kept between flushes alone.
+     *
+     * Used when the buffer is full: by then the SDK has added its events to
+     * the run that ended last, since a new span is starting.
+     */
+    public function flushAllFinished(): void
+    {
+        $this->send($this->sendablePositions(null));
+    }
+
+    /**
      * Hand the finished span trees to the transport, leaving every open span and the state kept between flushes alone.
      *
      * A span tree is a top-level span and every span under it, sub-agent
@@ -359,7 +401,21 @@ class Recorder
 
         $positions = $this->sendablePositions($heldKey);
 
-        if ($positions === [] || (! $due && count($positions) < self::PARTIAL_SPANS)) {
+        if (! $due && count($positions) < self::PARTIAL_SPANS) {
+            return;
+        }
+
+        $this->send($positions);
+    }
+
+    /**
+     * Hand the finished spans at the given positions to the transport and forget them.
+     *
+     * @param  list<int>  $positions
+     */
+    protected function send(array $positions): void
+    {
+        if ($positions === []) {
             return;
         }
 
@@ -380,7 +436,7 @@ class Recorder
      *
      * @return list<int>
      */
-    protected function sendablePositions(string $heldKey): array
+    protected function sendablePositions(?string $heldKey): array
     {
         $parents = [];
 
@@ -414,7 +470,7 @@ class Recorder
             $held[$root($span['span_id'])] = true;
         }
 
-        $index = $this->ended[$heldKey] ?? null;
+        $index = $heldKey === null ? null : ($this->ended[$heldKey] ?? null);
 
         if ($index !== null) {
             $held[$root($this->finished[$index]['span_id'])] = true;

@@ -54,6 +54,7 @@ class FlushPoints
         $events->listen(CommandFinished::class, fn (CommandFinished $event) => $this->guard(fn () => $this->commandFinished($event)));
 
         $this->recorder->whenRunEnds(fn (string $key) => $this->guard(fn () => $this->runEnded($key)));
+        $this->recorder->whenFull(fn () => $this->guard($this->bufferFull(...)));
     }
 
     /**
@@ -85,6 +86,18 @@ class FlushPoints
     {
         if ($this->app->runningInConsole()) {
             $this->recorder->flushFinished($key);
+        }
+    }
+
+    /**
+     * Send every finished run when the buffer is full in a console process, so only one run over the cap loses spans.
+     *
+     * A web request keeps its one send, after the response.
+     */
+    public function bufferFull(): void
+    {
+        if ($this->app->runningInConsole()) {
+            $this->recorder->flushAllFinished();
         }
     }
 
