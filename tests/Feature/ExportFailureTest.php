@@ -118,6 +118,67 @@ it('E1: a 2xx is done with no log', function (string $transport, int $status) {
     expect($log->warnings)->toBe([]);
 })->with(['sync', 'queue'])->with([200, 202, 204]);
 
+it('E8: a 2xx that refuses some spans is done, not retried, and logs one warning with the count and the message', function (string $transport, string $body, string $count, string $message) {
+    $log = bootExport($transport);
+    fakeDestination(200, $body);
+    useExportQueue();
+
+    sendSpan();
+
+    if ($transport === 'queue') {
+        workExportJob();
+
+        expect(DB::table('jobs')->count())->toBe(0);
+    }
+
+    Http::assertSentCount(1);
+    expect($log->warnings)->toHaveCount(1)
+        ->and($log->warnings[0])->toContain($count)
+        ->and($log->warnings[0])->toContain($message);
+})->with(['sync', 'queue'])->with([
+    'count and message' => ['{"partialSuccess":{"rejectedSpans":2,"errorMessage":"test reject"}}', '2 span', 'test reject'],
+    'count as an int64 string' => ['{"partialSuccess":{"rejectedSpans":"3","errorMessage":"too old"}}', '3 span', 'too old'],
+    'count only' => ['{"partialSuccess":{"rejectedSpans":5}}', '5 span', 'no message'],
+    'count too big for an int' => ['{"partialSuccess":{"rejectedSpans":99999999999999999999}}', (string) PHP_INT_MAX.' span', 'no message'],
+    'message only' => ['{"partialSuccess":{"errorMessage":"slow down"}}', '0 span', 'slow down'],
+]);
+
+it('E8: the partial success message leaves out credentials the destination echoed', function () {
+    $log = bootExport('sync');
+    fakeDestination(200, json_encode(['partialSuccess' => [
+        'rejectedSpans' => 1,
+        'errorMessage' => 'bad span, Authorization: Bearer TOKEN-SECRET.abc, api_key=K1-SECRET',
+    ]]));
+
+    sendSpan();
+
+    expect($log->warnings)->toHaveCount(1)
+        ->and($log->warnings[0])->toContain('bad span')
+        ->and($log->warnings[0])->not->toContain('TOKEN-SECRET')
+        ->and($log->warnings[0])->not->toContain('K1-SECRET');
+});
+
+it('E8: a 2xx with no refused spans logs nothing', function (string $body) {
+    $log = bootExport('sync');
+    fakeDestination(200, $body);
+
+    sendSpan();
+
+    Http::assertSentCount(1);
+    expect($log->warnings)->toBe([]);
+})->with([
+    'empty object' => '{}',
+    'empty body' => '',
+    'not JSON' => 'ok',
+    'a JSON list' => '[1]',
+    'zero and no message' => '{"partialSuccess":{"rejectedSpans":0}}',
+    'zero and an empty message' => '{"partialSuccess":{"rejectedSpans":"0","errorMessage":""}}',
+    'empty partial success' => '{"partialSuccess":{}}',
+    'partial success not an object' => '{"partialSuccess":"yes"}',
+    'count not a number' => '{"partialSuccess":{"rejectedSpans":"many"}}',
+    'negative count' => '{"partialSuccess":{"rejectedSpans":-1}}',
+]);
+
 it('E2: a 400, 401, 403 or 404 is not retried and logs one warning with the status and the first 200 chars of the body', function (string $transport, int $status) {
     $log = bootExport($transport);
     fakeDestination($status, str_repeat('é', 200).'TAIL');

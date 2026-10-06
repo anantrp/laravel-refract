@@ -210,10 +210,13 @@ The job goes to your default queue connection and its default queue.
 | Result | `sync` | `queue` |
 | --- | --- | --- |
 | 2xx | Done | Done |
+| 2xx whose `partialSuccess` refuses spans or has a message | Done, one warning | Done, one warning |
 | Network error, 408, 429, 5xx | Dropped, one warning | Retried (3 tries, 10 s apart), then one warning |
 | Any other status (3xx, 400, 401, 403, 404, ...) | Dropped, one warning | Dropped, one warning |
 
 A rejected batch's warning names the status and the first 200 characters of the response body. Credentials the destination echoes in the body are masked as `[removed]`: values under key names that contain `key`, `token`, `secret`, `auth`, `password`, `passwd`, `credential` or `cookie` (in JSON, in header lines and in `key=value` pairs), and `Bearer` and `Basic` tokens. Other text, such as a plain error line, is kept.
+
+A 2xx can carry an OTLP `partialSuccess` (JSON answers only). When it refuses spans or has a message, one warning names the refused count and the message, masked the same way. The answer does not say which spans were refused. They are not retried, as the OTLP spec asks. An empty body, `{}` or a body that is not JSON logs nothing.
 
 Redirects are never followed, so your keys and headers never go to another host. A 3xx is dropped like any other rejected status. The HTTP timeout is 5 seconds.
 
@@ -350,7 +353,6 @@ Context::add('trigger', 'schedule');
 - **(L17)** Laravel Octane is not supported.
 - **(X10)** With a morph map, the participant type is the full class name, so it does not match the `participant_type` column of the `agent_conversations` table (which holds the alias).
 - **(E7)** A `Retry-After` header from the destination is ignored. The queue job always waits 10 seconds.
-- **(E8)** An OTLP partial success response (some spans rejected) is not logged.
 - **(P12)** With no `mask` set, a secret inside captured content is sent as is.
 
 ## Contributing

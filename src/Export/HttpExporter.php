@@ -5,6 +5,7 @@ namespace Anantrp\Refract\Export;
 use Anantrp\Refract\Contracts\Exporter;
 use Anantrp\Refract\Contracts\ExportResult;
 use Anantrp\Refract\Support\Diagnostics;
+use Anantrp\Refract\Support\Guard;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\RequestException;
 use Illuminate\Http\Client\Response;
@@ -14,7 +15,8 @@ use Throwable;
 /**
  * Translates neutral spans, applies the platform's changes and posts OTLP JSON.
  *
- * A 2xx is ok. A network error, 408, 429 or 5xx is retryable: the
+ * A 2xx is ok, with one warning when its OTLP partialSuccess refuses
+ * spans (never retried). A network error, 408, 429 or 5xx is retryable: the
  * transport decides whether to try again. Every other status, a redirect
  * too (it is never followed), is rejected and warned about here, with the status and the start of the body. Any
  * other error, from the HTTP client or from translating and encoding the
@@ -28,12 +30,12 @@ class HttpExporter implements Exporter
     protected const TIMEOUT = 5;
 
     /**
-     * The characters of a rejected response's body put in the warning.
+     * The characters of a rejected response's body, or of a partial success message, put in the warning.
      */
     protected const BODY_EXCERPT = 200;
 
     /**
-     * The characters of a rejected response's body cleaned of credentials before the excerpt is cut.
+     * The characters of a rejected response's body, or of a partial success message, cleaned of credentials before the excerpt is cut.
      */
     protected const BODY_SCAN = 4_096;
 
@@ -83,6 +85,9 @@ class HttpExporter implements Exporter
     protected function result(Response $response): ExportResult
     {
         if ($response->successful()) {
+            // The batch was delivered, so a failure here must not read as a dropped batch.
+            Guard::run('export.partial', 'to read a partial success answer', fn () => $this->warnOfRefusedSpans($response));
+
             return ExportResult::Ok;
         }
 
@@ -92,11 +97,61 @@ class HttpExporter implements Exporter
             return ExportResult::Retryable;
         }
 
-        $excerpt = mb_substr($this->withoutCredentials(mb_substr($response->body(), 0, self::BODY_SCAN)), 0, self::BODY_EXCERPT);
+        $excerpt = $this->excerpt($response->body());
 
         Diagnostics::warn('export.rejected', "Spans were rejected by the destination with HTTP {$status}: {$excerpt}. The batch was dropped.");
 
         return ExportResult::Rejected;
+    }
+
+    /**
+     * Warn once when a 2xx body's OTLP partialSuccess refuses spans or
+     * carries a message. The answer does not say which spans, so only the
+     * count and the message are logged. Any other body is ignored.
+     */
+    protected function warnOfRefusedSpans(Response $response): void
+    {
+        $body = json_decode($response->body(), true);
+        $partial = is_array($body) ? $body['partialSuccess'] ?? null : null;
+
+        if (! is_array($partial)) {
+            return;
+        }
+
+        $rejected = $this->refusedCount($partial['rejectedSpans'] ?? 0);
+        $message = is_string($partial['errorMessage'] ?? null) ? $this->excerpt($partial['errorMessage']) : '';
+
+        if ($rejected === 0 && $message === '') {
+            return;
+        }
+
+        $shown = $message === '' ? 'no message' : $message;
+
+        Diagnostics::warn('export.partial', "The destination refused {$rejected} span(s) of a batch it accepted: {$shown}. They are not retried.");
+    }
+
+    /**
+     * Get the refused span count of a partialSuccess, or 0 when it is not a positive number.
+     *
+     * An int64 is a JSON string in OTLP JSON, and a count too big for an int is decoded as a float.
+     */
+    protected function refusedCount(mixed $count): int
+    {
+        return match (true) {
+            is_int($count) => max(0, $count),
+            is_string($count) && ctype_digit($count) => (int) $count,
+            is_float($count) && $count >= PHP_INT_MAX => PHP_INT_MAX,
+            is_float($count) && $count >= 1 => (int) $count,
+            default => 0,
+        };
+    }
+
+    /**
+     * Get the start of the given text, cleaned of credentials.
+     */
+    protected function excerpt(string $text): string
+    {
+        return mb_substr($this->withoutCredentials(mb_substr($text, 0, self::BODY_SCAN)), 0, self::BODY_EXCERPT);
     }
 
     /**
