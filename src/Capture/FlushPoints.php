@@ -21,6 +21,10 @@ use Illuminate\Queue\Jobs\SyncJob;
  * request or another command never owns the buffer: its spans leave with
  * its caller. A flush closes every open span, so a flush from a process
  * that does not own the buffer would cut a live run short.
+ *
+ * A console process (command, queue worker, tinker) also sends its
+ * finished runs while it keeps going, checked when a top-level run ends.
+ * That partial flush leaves open spans alone, so any process may run it.
  */
 class FlushPoints
 {
@@ -48,6 +52,8 @@ class FlushPoints
         $events->listen(JobAttempted::class, fn (JobAttempted $event) => $this->guard(fn () => $this->jobAttempted($event)));
         $events->listen(CommandStarting::class, fn (CommandStarting $event) => $this->guard(fn () => $this->commandStarting($event)));
         $events->listen(CommandFinished::class, fn (CommandFinished $event) => $this->guard(fn () => $this->commandFinished($event)));
+
+        $this->recorder->whenRunEnds(fn (string $key) => $this->guard(fn () => $this->runEnded($key)));
     }
 
     /**
@@ -67,6 +73,18 @@ class FlushPoints
     {
         if (! $event->job instanceof SyncJob) {
             $this->flush();
+        }
+    }
+
+    /**
+     * Send the finished runs while a console process keeps going.
+     *
+     * A web request sends once, after the response.
+     */
+    public function runEnded(string $key): void
+    {
+        if ($this->app->runningInConsole()) {
+            $this->recorder->flushFinished($key);
         }
     }
 

@@ -55,6 +55,7 @@ class Scenarios
             'X9' => $this->r1(...),
             'L6' => $this->l6(...),
             'E10' => $this->e10(...),
+            'L12' => $this->l12(...),
             default => throw new InvalidArgumentException("No scenario for row [{$row}] yet."),
         };
 
@@ -95,6 +96,22 @@ class Scenarios
 
             TimeAgent::make()->prompt("Run {$run}: answer at length.");
         }
+    }
+
+    /**
+     * 400 R1-shaped runs (1,600 spans), then a 30 s sleep before the
+     * command ends. Finished runs are sent while it runs. The trace id goes
+     * to stderr before the sleep, for `refract:tree` in a second terminal.
+     */
+    protected function l12(): void
+    {
+        foreach (range(1, 400) as $run) {
+            $this->r1();
+        }
+
+        fwrite(STDERR, 'sleeping 30 s, trace '.Span::getCurrent()->getContext()->getTraceId().PHP_EOL);
+
+        sleep(30);
     }
 
     /**

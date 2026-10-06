@@ -32,6 +32,16 @@ class Recorder
     public const MAX_SPANS = 1_000;
 
     /**
+     * The finished spans that start a partial flush.
+     */
+    public const PARTIAL_SPANS = 500;
+
+    /**
+     * The time since the last send, in nanoseconds, that starts a partial flush.
+     */
+    public const PARTIAL_INTERVAL = 5_000_000_000;
+
+    /**
      * The spans started but not ended yet, keyed by their capture key.
      *
      * @var array<string, OpenSpan>
@@ -60,9 +70,24 @@ class Recorder
     protected array $resets = [];
 
     /**
+     * The callbacks run when a top-level run ends, given the run's capture key.
+     *
+     * @var list<Closure(string): mixed>
+     */
+    protected array $runEnds = [];
+
+    /**
+     * The monotonic time of the last send, or of the recorder's start before the first one.
+     */
+    protected int $lastSend;
+
+    /**
      * Create a new recorder instance. The transport is made from the container on the first send, not before.
      */
-    public function __construct(protected Container $container) {}
+    public function __construct(protected Container $container)
+    {
+        $this->lastSend = $this->monotonic();
+    }
 
     /**
      * Start a span under the given parent, or under the app's active trace.
@@ -189,6 +214,34 @@ class Recorder
         ];
 
         $this->ended[$key] = array_key_last($this->finished);
+
+        if ($span['kind'] === 'invoke_agent' && $status !== 'abandoned' && ! $this->hasParent($span)) {
+            foreach ($this->runEnds as $callback) {
+                $callback($key);
+            }
+        }
+    }
+
+    /**
+     * Check whether the given span's parent is a span in the buffer, open or finished.
+     *
+     * @param  OpenSpan|FinishedSpan  $span
+     */
+    protected function hasParent(array $span): bool
+    {
+        $parent = $span['parent_span_id'];
+
+        if ($parent === null) {
+            return false;
+        }
+
+        foreach ([...array_values($this->open), ...$this->finished] as $other) {
+            if ($other['span_id'] === $parent) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -275,6 +328,133 @@ class Recorder
     }
 
     /**
+     * Run the given callback when a top-level run ends, with the run's capture key.
+     *
+     * A run closed as abandoned does not count.
+     *
+     * @param  Closure(string): mixed  $callback
+     */
+    public function whenRunEnds(Closure $callback): void
+    {
+        $this->runEnds[] = $callback;
+    }
+
+    /**
+     * Hand the finished span trees to the transport, leaving every open span and the state kept between flushes alone.
+     *
+     * A span tree is a top-level span and every span under it, sub-agent
+     * runs included. It is finished when none of its spans is open. The
+     * flush runs only when the finished trees hold PARTIAL_SPANS spans, or
+     * PARTIAL_INTERVAL passed since the last send. The tree of the given
+     * span is held for the next send, as the SDK adds events to a run right
+     * after it ends.
+     */
+    public function flushFinished(string $heldKey): void
+    {
+        $due = $this->monotonic() - $this->lastSend >= self::PARTIAL_INTERVAL;
+
+        if (! $due && count($this->finished) < self::PARTIAL_SPANS) {
+            return;
+        }
+
+        $positions = $this->sendablePositions($heldKey);
+
+        if ($positions === [] || (! $due && count($positions) < self::PARTIAL_SPANS)) {
+            return;
+        }
+
+        try {
+            $batch = $this->batch(array_values(array_intersect_key($this->finished, array_flip($positions))));
+        } finally {
+            $this->forget($positions);
+            $this->lastSend = $this->monotonic();
+        }
+
+        if ($batch !== []) {
+            $this->container->make(Transport::class)->send($batch);
+        }
+    }
+
+    /**
+     * Get the positions in the finished spans of every finished span tree, except the tree of the given span.
+     *
+     * @return list<int>
+     */
+    protected function sendablePositions(string $heldKey): array
+    {
+        $parents = [];
+
+        foreach ([...array_values($this->open), ...$this->finished] as $span) {
+            $parents[$span['span_id']] = $span['parent_span_id'];
+        }
+
+        $roots = [];
+
+        $root = function (string $id) use ($parents, &$roots): string {
+            $chain = [];
+
+            // Bounded by the span count, so a cycle cannot loop forever.
+            while (! isset($roots[$id]) && isset($parents[$id]) && array_key_exists($parents[$id], $parents) && count($chain) <= count($parents)) {
+                $chain[] = $id;
+                $id = $parents[$id];
+            }
+
+            $top = $roots[$id] ?? $id;
+
+            foreach ([$id, ...$chain] as $link) {
+                $roots[$link] = $top;
+            }
+
+            return $top;
+        };
+
+        $held = [];
+
+        foreach ($this->open as $span) {
+            $held[$root($span['span_id'])] = true;
+        }
+
+        $index = $this->ended[$heldKey] ?? null;
+
+        if ($index !== null) {
+            $held[$root($this->finished[$index]['span_id'])] = true;
+        }
+
+        $positions = [];
+
+        foreach ($this->finished as $position => $span) {
+            if (! isset($held[$root($span['span_id'])])) {
+                $positions[] = $position;
+            }
+        }
+
+        return $positions;
+    }
+
+    /**
+     * Remove the finished spans at the given positions, keeping the index of the others.
+     *
+     * @param  list<int>  $positions
+     */
+    protected function forget(array $positions): void
+    {
+        $kept = array_diff_key($this->finished, array_flip($positions));
+        $moved = array_flip(array_keys($kept));
+
+        $this->finished = array_values($kept);
+
+        $ended = [];
+
+        foreach ($this->ended as $key => $position) {
+            if (isset($moved[$position])) {
+                $ended[$key] = $moved[$position];
+            }
+        }
+
+        $this->ended = $ended;
+    }
+
+    /**
      * Close every open span as abandoned, then hand the finished spans to the transport as one batch.
      *
      * The buffer and the state kept between flushes are cleared even when
@@ -287,7 +467,7 @@ class Recorder
                 $this->end($key, 'abandoned');
             }
 
-            $batch = $this->batch();
+            $batch = $this->batch($this->finished);
         } finally {
             $this->open = [];
             $this->finished = [];
@@ -299,18 +479,20 @@ class Recorder
         }
 
         if ($batch !== []) {
+            $this->lastSend = $this->monotonic();
             $this->container->make(Transport::class)->send($batch);
         }
     }
 
     /**
-     * Get the finished spans as neutral spans, with wall clock times.
+     * Get the given finished spans as neutral spans, with wall clock times.
      *
+     * @param  list<FinishedSpan>  $spans
      * @return list<array<string, mixed>>
      */
-    protected function batch(): array
+    protected function batch(array $spans): array
     {
-        if ($this->finished === []) {
+        if ($spans === []) {
             return [];
         }
 
@@ -334,7 +516,7 @@ class Recorder
                 'time' => $event['time'] + $offset,
                 'call' => $event['call'],
             ], $span['events']),
-        ], $this->inheritContext($this->finished));
+        ], $this->inheritContext($spans));
     }
 
     /**

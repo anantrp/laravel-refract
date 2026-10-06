@@ -47,12 +47,13 @@ class Check extends Command
 
             $this->line("trace {$traceId}");
 
-            $actual = $reader->tree($traceId, withTimes: false);
+            $expected = trim((string) file_get_contents($expectedFile));
+
+            // Every line but the environment header is one span.
+            $actual = $reader->tree($traceId, withTimes: false, expected: substr_count($expected, "\n"));
         } catch (Throwable $e) {
             return $this->failWith($e->getMessage());
         }
-
-        $expected = trim((string) file_get_contents($expectedFile));
 
         if ($actual === $expected) {
             $this->info('PASS');

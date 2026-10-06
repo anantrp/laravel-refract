@@ -35,9 +35,12 @@ class TreeReader
     /**
      * Wait up to the timeout for the trace's observations, then render them.
      *
+     * The wait ends when the count stops changing and has reached the
+     * given count. A trace sent in several requests arrives in steps.
+     *
      * @throws MissingKeys
      */
-    public function tree(string $traceId, bool $withTimes = true, int $timeoutSeconds = 30): string
+    public function tree(string $traceId, bool $withTimes = true, int $timeoutSeconds = 30, int $expected = 0): string
     {
         $this->ensureKeys();
 
@@ -49,7 +52,7 @@ class TreeReader
             $observations = $this->fetch($traceId);
             $count = count($observations);
 
-            if ($count > 0 && $count === $previous) {
+            if ($count > 0 && $count === $previous && $count >= $expected) {
                 break;
             }
 
@@ -69,30 +72,37 @@ class TreeReader
      */
     protected function fetch(string $traceId): array
     {
-        $response = Http::withBasicAuth($this->publicKey, $this->secretKey)
-            ->acceptJson()
-            ->timeout(10)
-            ->get($this->url().'/api/public/v2/observations', [
-                'traceId' => $traceId,
-                'fields' => 'core,basic',
-                'limit' => 1000,
-            ]);
-
-        $response->throw();
-
-        $data = $response->json('data');
-
-        if (! is_array($data)) {
-            return [];
-        }
-
         $observations = [];
+        $cursor = null;
 
-        foreach ($data as $row) {
-            if (is_array($row)) {
-                $observations[] = $this->observation($row);
+        // Pages of 1,000, read until the API gives no cursor or an empty page.
+        do {
+            $response = Http::withBasicAuth($this->publicKey, $this->secretKey)
+                ->acceptJson()
+                ->timeout(10)
+                ->get($this->url().'/api/public/v2/observations', [
+                    'traceId' => $traceId,
+                    'fields' => 'core,basic',
+                    'limit' => 1000,
+                    ...($cursor === null ? [] : ['cursor' => $cursor]),
+                ]);
+
+            $response->throw();
+
+            $data = $response->json('data');
+
+            if (! is_array($data) || $data === []) {
+                break;
             }
-        }
+
+            foreach ($data as $row) {
+                if (is_array($row)) {
+                    $observations[] = $this->observation($row);
+                }
+            }
+
+            $cursor = $response->json('meta.cursor');
+        } while (is_string($cursor) && $cursor !== '');
 
         return $observations;
     }

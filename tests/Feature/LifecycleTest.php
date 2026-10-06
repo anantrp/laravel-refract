@@ -17,11 +17,18 @@ use Illuminate\Queue\WorkerOptions;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Context;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Facades\Schema;
+use Laravel\Ai\Contracts\Providers\TextProvider;
+use Laravel\Ai\Events\AgentFailedOver;
+use Laravel\Ai\Exceptions\RateLimitedException;
+use OpenTelemetry\API\Trace\Span;
+use OpenTelemetry\API\Trace\SpanContext;
+use OpenTelemetry\API\Trace\TraceFlags;
 use Symfony\Component\HttpFoundation\Response;
 use Workbench\App\Ai\Agents\TimeAgent;
 use Workbench\App\Jobs\RunAgent;
@@ -585,32 +592,35 @@ it('L16: span times stay correct in a worker that runs for days, through the que
         ->and($secondSpan['endTimeUnixNano'])->toBe((string) ($secondWall - $second));
 });
 
-it('L11: a long command that makes 2,000 spans keeps 1,000, logs one warning, and memory stays flat', function () {
+it('L11: one run that makes 2,000 spans keeps 1,000, logs one warning, and memory stays flat', function () {
     $transport = $this->captureNeutralSpans();
     Diagnostics::reset();
     Log::swap($log = new WarningLog);
 
     $recorder = app(Recorder::class);
-    $call = ['agent' => 'TimeAgent', 'padding' => str_repeat('x', 1_024)];
+    $call = ['tool' => 'CurrentTime', 'padding' => str_repeat('x', 1_024)];
+
+    $recorder->start('run:long', 'invoke_agent', null, ['agent' => 'TimeAgent']);
 
     $record = function (int $from, int $to) use ($recorder, $call) {
         for ($i = $from; $i < $to; $i++) {
-            $recorder->start("run:{$i}", 'invoke_agent', null, [...$call, 'run' => $i]);
-            $recorder->event("run:{$i}", 'failover', $call);
-            $recorder->end("run:{$i}");
+            $recorder->start("tool:{$i}", 'execute_tool', 'run:long', [...$call, 'call' => $i]);
+            $recorder->event("tool:{$i}", 'failover', $call);
+            $recorder->end("tool:{$i}");
         }
     };
 
-    $record(0, 1_000);
+    $record(0, 999);
     $atCap = memory_get_usage();
 
-    $record(1_000, 2_000);
+    $record(999, 1_999);
     $grown = memory_get_usage() - $atCap;
 
+    $recorder->end('run:long');
     $recorder->flush();
 
     expect($transport->spans)->toHaveCount(1_000)
-        ->and(array_column(array_column($transport->spans, 'call'), 'run'))->toBe(range(0, 999))
+        ->and(array_column(array_column(array_slice($transport->spans, 0, 999), 'call'), 'call'))->toBe(range(0, 998))
         ->and($log->warnings)->toHaveCount(1)
         ->and($log->warnings[0])->toContain('1000 spans')
         // 1,000 more spans of over 2 KB each would add over 2 MB.
@@ -621,14 +631,240 @@ it('L11: after a flush the buffer takes spans again', function () {
     $transport = $this->captureNeutralSpans();
     $recorder = app(Recorder::class);
 
-    for ($i = 0; $i < 1_001; $i++) {
-        $recorder->start("run:{$i}", 'invoke_agent', null, []);
-        $recorder->end("run:{$i}");
+    $recorder->start('run:long', 'invoke_agent', null, []);
+
+    for ($i = 0; $i < 1_000; $i++) {
+        $recorder->start("tool:{$i}", 'execute_tool', 'run:long', []);
+        $recorder->end("tool:{$i}");
     }
 
+    $recorder->end('run:long');
     $recorder->flush();
     runTimeAgent();
     $recorder->flush();
 
     expect($transport->spans)->toHaveCount(1_004);
+});
+
+/**
+ * Run the given callback inside an active app OTel span, as an app with its own tracing does.
+ */
+function insideAppTrace(Closure $callback): void
+{
+    $scope = Span::wrap(SpanContext::create(bin2hex(random_bytes(16)), bin2hex(random_bytes(8)), TraceFlags::SAMPLED))->activate();
+
+    try {
+        $callback();
+    } finally {
+        $scope->detach();
+    }
+}
+
+it('L12: a long command sends its finished runs while it runs, with no span lost, inside one app trace', function () {
+    $this->refreshApplicationWithConfig(lifecycleConfig('sync'));
+    Http::fake();
+    Diagnostics::reset();
+    Log::swap($log = new WarningLog);
+    withConsoleEvents();
+
+    $sentBeforeEnd = 0;
+
+    Artisan::command('refract-test:many', function () use (&$sentBeforeEnd) {
+        insideAppTrace(function () {
+            for ($i = 0; $i < 300; $i++) {
+                runTimeAgent();
+            }
+        });
+
+        $sentBeforeEnd = count(Http::recorded());
+    });
+
+    Artisan::call('refract-test:many');
+
+    $spans = Otlp::spans();
+
+    expect($sentBeforeEnd)->toBeGreaterThanOrEqual(2)
+        ->and(count(Http::recorded()))->toBeGreaterThan($sentBeforeEnd)
+        ->and($spans)->toHaveCount(1_200)
+        ->and(array_unique(array_column($spans, 'spanId')))->toHaveCount(1_200)
+        ->and(array_unique(array_column($spans, 'traceId')))->toHaveCount(1)
+        ->and(array_map(fn (array $span) => Otlp::attributes($span)['laravel.ai.abandoned'] ?? false, $spans))->not->toContain(true)
+        ->and($log->warnings)->toBe([]);
+
+    // Each send holds whole runs: every span's parent is in the same request, or is the app's span.
+    foreach (batches() as $batch) {
+        $ids = array_column($batch, 'spanId');
+        $runs = array_filter($batch, fn (array $span) => str_starts_with($span['name'], 'invoke_agent'));
+
+        expect(count($batch))->toBe(4 * count($runs));
+
+        foreach ($batch as $span) {
+            if (! str_starts_with($span['name'], 'invoke_agent')) {
+                expect($ids)->toContain($span['parentSpanId']);
+            }
+        }
+    }
+});
+
+it('L12: a finished run is sent at the end of the next top-level run once 5 s passed since the last send', function () {
+    $this->extenders = [Recorder::class => fn (Recorder $recorder, $app) => new ClockRecorder($app)];
+    $this->refreshApplicationWithConfig(lifecycleConfig('sync'));
+    Http::fake();
+
+    $recorder = app(Recorder::class);
+    $second = 1_000_000_000;
+
+    runTimeAgent();
+    $recorder->monotonicNow += 4 * $second;
+    runTimeAgent();
+
+    Http::assertNothingSent();
+
+    $recorder->monotonicNow += $second;
+    runTimeAgent();
+
+    // The run that just ended stays for the next send, so events the SDK adds right after it are kept.
+    expect(batches())->toHaveCount(1)
+        ->and(batches()[0])->toHaveCount(8);
+
+    $recorder->monotonicNow += 4 * $second;
+    runTimeAgent();
+
+    Http::assertSentCount(1);
+
+    $recorder->flush();
+
+    expect(batches())->toHaveCount(2)
+        ->and(batches()[1])->toHaveCount(8);
+});
+
+it('L12: a web request does not send while it runs, it sends once after the response', function () {
+    bootWeb(lifecycleConfig('sync'));
+    Http::fake();
+
+    Route::get('/many', function () {
+        for ($i = 0; $i < 200; $i++) {
+            runTimeAgent();
+        }
+
+        Http::assertNothingSent();
+
+        return 'ok';
+    });
+
+    $terminate = handleRequest('/many');
+
+    Http::assertNothingSent();
+
+    $terminate();
+
+    Http::assertSentCount(1);
+    expect(batches()[0])->toHaveCount(800);
+});
+
+it('L12: a sub-agent run ending does not send its own tree away from its parent run', function () {
+    $transport = $this->captureNeutralSpans();
+    $recorder = app(Recorder::class);
+
+    $recorder->start('run:parent', 'invoke_agent', null, []);
+    $recorder->start('tool:sub', 'execute_tool', 'run:parent', []);
+
+    for ($i = 0; $i < 600; $i++) {
+        $recorder->start("step:{$i}", 'chat', 'tool:sub', []);
+        $recorder->end("step:{$i}");
+    }
+
+    $recorder->start('run:sub', 'invoke_agent', 'tool:sub', []);
+    $recorder->end('run:sub');
+
+    expect($transport->spans)->toBe([]);
+});
+
+it('L18: a partial send leaves open runs, their open spans and the reset state alone', function () {
+    $transport = $this->captureNeutralSpans();
+    $recorder = app(Recorder::class);
+    $resets = 0;
+    $recorder->flushing(function () use (&$resets) {
+        $resets++;
+    });
+
+    $recorder->start('run:open', 'invoke_agent', null, ['agent' => 'Open']);
+    $recorder->start('step:open', 'chat', 'run:open', ['agent' => 'Open']);
+    $recorder->start('step:done', 'chat', 'run:open', ['agent' => 'Open']);
+    $recorder->end('step:done');
+
+    for ($i = 0; $i < 600; $i++) {
+        $recorder->start("run:{$i}", 'invoke_agent', null, ['agent' => 'Done']);
+        $recorder->end("run:{$i}");
+    }
+
+    expect($transport->spans)->not->toBe([])
+        ->and(array_unique(array_column(array_column($transport->spans, 'call'), 'agent')))->toBe(['Done'])
+        ->and($resets)->toBe(0)
+        ->and($recorder->isOpen('run:open'))->toBeTrue()
+        ->and($recorder->isOpen('step:open'))->toBeTrue();
+
+    $recorder->end('step:open');
+    $recorder->end('run:open');
+    $recorder->flush();
+
+    $open = array_values(array_filter($transport->spans, fn (array $span) => $span['call']['agent'] === 'Open'));
+
+    expect($transport->spans)->toHaveCount(603)
+        ->and(array_column($open, 'status'))->toBe(['ok', 'ok', 'ok'])
+        ->and($resets)->toBe(1);
+});
+
+it('L18: a run that failed over keeps its failover state through a partial send', function () {
+    $transport = $this->captureNeutralSpans();
+    config(['ai.providers.anthropic' => ['driver' => 'anthropic', 'key' => 'test']]);
+
+    // The events of one real run with a failover, replayed with other runs ending in between.
+    $events = [];
+
+    Event::listen('Laravel\Ai\Events\*', function (string $name, array $payload) use (&$events) {
+        $events[] = $payload[0];
+    });
+
+    TimeAgent::fake(fn (string $prompt, $attachments, TextProvider $provider) => $provider->name() === 'openai'
+        ? throw RateLimitedException::forProvider('openai')
+        : 'It is 12:00.');
+    TimeAgent::make()->prompt('What time is it?', provider: ['openai' => 'gpt-a', 'anthropic' => 'claude-b']);
+
+    app('events')->forget('Laravel\Ai\Events\*');
+    app(Recorder::class)->flush();
+    $transport->spans = [];
+
+    $failover = array_search(true, array_map(fn (object $event) => $event instanceof AgentFailedOver, $events), true);
+    $dispatcher = app('events');
+    $recorder = app(Recorder::class);
+
+    foreach (array_slice($events, 0, $failover + 1) as $event) {
+        $copy = clone $event;
+        $copy->invocationId = 'kept';
+        $dispatcher->dispatch($copy);
+    }
+
+    for ($i = 0; $i < 600; $i++) {
+        $recorder->start("run:{$i}", 'invoke_agent', null, ['agent' => 'Done']);
+        $recorder->end("run:{$i}");
+    }
+
+    $sent = count($transport->spans);
+
+    foreach (array_slice($events, $failover + 1) as $event) {
+        $copy = clone $event;
+        $copy->invocationId = 'kept';
+        $dispatcher->dispatch($copy);
+    }
+
+    $recorder->flush();
+
+    $kept = array_values(array_filter($transport->spans, fn (array $span) => ($span['call']['agent'] ?? null) !== 'Done'));
+
+    expect($sent)->toBeGreaterThan(0)
+        ->and(array_column($kept, 'kind'))->toBe(['chat', 'chat', 'invoke_agent'])
+        ->and(array_column($kept, 'status'))->toBe(['error', 'ok', 'ok'])
+        ->and($kept[2]['call']['provider'])->toBe('anthropic')
+        ->and(array_column($kept[2]['events'], 'kind'))->toBe(['failover']);
 });

@@ -19,6 +19,7 @@ First release.
 - Opt-in content capture with a byte cap per value and an optional `mask` class. Files and media are never recorded.
 - Laravel `Context` keys mapped to span attributes through the config.
 - Never breaks the app: guarded listeners, one warning per kind, a 1,000-span buffer cap.
+- In a command, queue worker or tinker, finished runs are sent while the process keeps going: when they hold 500 spans or 5 s after the last send, checked when a top-level run ends. Open runs stay whole and keep their state. Web requests still send once, after the response.
 - One warning when a destination accepts a batch (2xx) but its OTLP `partialSuccess` refuses spans, with the count and the message. Credentials in the message are masked. The refused spans are not retried.
 - A batch over 4 MB of OTLP JSON (before gzip) is sent in parts of 4 MB or less, cut between run trees. A run tree is cut only when it alone is too big. A span over 4 MB is sent alone with one warning. `sync` sends the parts one after another and a failed part does not stop the next ones; `queue` pushes one job per part.
 - Exports are gzipped with `Content-Encoding: gzip` by default, for both destinations. `OTEL_EXPORTER_OTLP_COMPRESSION=none` turns it off. If gzip fails, the export is sent plain.

@@ -357,11 +357,10 @@ Context::add('trigger', 'schedule');
 - **Refract never breaks your app.** Every listener and lifecycle hook is guarded. A failure inside Refract logs one warning and the run goes on. Your app's own exceptions pass through unchanged.
 - **No extra calls.** Refract never calls agent methods that run your code (`instructions()`, `tools()`) and runs no queries. A run is named without calling the agent's `name()`. To name a tool span, Refract reads the tool name the way the SDK does, which calls `name()` once per tool call on a tool or an agent used as a tool, the same call the SDK makes.
 - **Warnings.** Each warning is logged at the `warning` level, prefixed `[refract]`, once per kind per process. After 10 different warnings, Refract stays silent.
-- **Bounded memory.** The buffer holds at most 1,000 spans per request, job or command. Past that, new spans are dropped and one warning is logged.
+- **Bounded memory.** The buffer holds at most 1,000 spans per request, job or command. Past that, new spans are dropped and one warning is logged. In a command, queue worker or tinker, finished runs are sent while the process keeps going (when they hold 500 spans, or 5 s after the last send, checked when a run ends), so only one run with more than 1,000 spans hits the cap. A run is sent only after it ends, and there is no background timer: a finished run waits for the end of the next run, or the end of the process. A web request sends once, after the response.
 
 ## Known Limitations
 
-- **(L12)** A long command exports its spans only when it ends. They cannot be sent earlier.
 - **(L17)** Laravel Octane is not supported.
 - **(X10)** With a morph map, the participant type is the full class name, so it does not match the `participant_type` column of the `agent_conversations` table (which holds the alias).
 - **(P12)** With no `mask` set, a secret inside captured content is sent as is.
