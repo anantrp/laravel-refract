@@ -24,6 +24,9 @@ use Throwable;
  * and warned about here, with the status and the start of the body. Any
  * other error, from the HTTP client or from translating and encoding the
  * spans, is rejected with one warning.
+ *
+ * With gzip on, the body is gzipped and sent with Content-Encoding: gzip.
+ * If gzip fails, the body is sent plain, with no such header.
  */
 class HttpExporter implements Exporter, RetryAfter
 {
@@ -61,6 +64,7 @@ class HttpExporter implements Exporter, RetryAfter
         protected OtlpJson $encoder,
         protected string $environment,
         protected string $serviceName,
+        protected bool $compress = true,
     ) {}
 
     public function export(array $spans): ExportResult
@@ -75,8 +79,16 @@ class HttpExporter implements Exporter, RetryAfter
                 'deployment.environment.name' => $this->environment,
             ]));
 
+            $headers = $this->platform->headers();
+            $compressed = $this->compress ? $this->gzip($body) : false;
+
+            if ($compressed !== false) {
+                $body = $compressed;
+                $headers['Content-Encoding'] = 'gzip';
+            }
+
             // A redirect is never followed: it would send the headers to another host or turn the POST into a GET.
-            $response = Http::withHeaders($this->platform->headers())
+            $response = Http::withHeaders($headers)
                 ->withoutRedirecting()
                 ->timeout(self::TIMEOUT)
                 ->withBody($body, 'application/json')
@@ -119,6 +131,18 @@ class HttpExporter implements Exporter, RetryAfter
         Diagnostics::warn('export.rejected', "Spans were rejected by the destination with HTTP {$status}: {$excerpt}. The batch was dropped.");
 
         return ExportResult::Rejected;
+    }
+
+    /**
+     * Gzip the given body, or get false when it cannot be gzipped.
+     */
+    protected function gzip(string $body): string|false
+    {
+        try {
+            return gzencode($body);
+        } catch (Throwable) {
+            return false;
+        }
     }
 
     public function retryAfter(): ?int

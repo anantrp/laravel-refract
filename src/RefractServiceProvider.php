@@ -54,6 +54,7 @@ class RefractServiceProvider extends ServiceProvider
                 new OtlpJson,
                 Settings::string('environment', $app->environment()),
                 Settings::string('service_name', $this->appName()),
+                Settings::choice('compression', ['gzip', 'none'], 'gzip') === 'gzip',
             );
         });
 

@@ -387,7 +387,7 @@ it('X12: a Context key mapped to a numeric attribute name is sent with the name 
     [$run] = runAttributes();
 
     expect($run)->toHaveKey('123', 'acme')
-        ->and(Http::recorded()->first()[0]->body())->toContain('{"key":"123","value":{"stringValue":"acme"}}')
+        ->and(Otlp::body(Http::recorded()->first()[0]))->toContain('{"key":"123","value":{"stringValue":"acme"}}')
         ->not->toContain('"key":123');
 });
 

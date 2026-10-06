@@ -358,7 +358,7 @@ it('R8: a run that throws has status error with the exception class and the app 
     expect($run['name'])->toBe('invoke_agent TimeAgent')
         ->and($run['status'])->toBe(['code' => 2, 'message' => RuntimeException::class])
         ->and($step['status'])->toBe(['code' => 2, 'message' => RuntimeException::class])
-        ->and(json_encode(Http::recorded()[0][0]->data()))->not->toContain('secret detail');
+        ->and(Otlp::body(Http::recorded()[0][0]))->not->toContain('secret detail');
 });
 
 it('R8: a run that throws closes its open children as abandoned before it ends', function () {
@@ -414,7 +414,7 @@ it('R13: a failed tool has error.type set to the exception class', function () {
     expect($tool['status'])->toBe(['code' => 2, 'message' => LogicException::class])
         ->and(Otlp::attributes($tool))->toHaveKey('error.type', LogicException::class)
         ->and(Otlp::attributes($spans['invoke_agent BrokenToolAgent']))->toHaveKey('error.type', LogicException::class)
-        ->and(json_encode(Http::recorded()[0][0]->data()))->not->toContain('secret detail');
+        ->and(Otlp::body(Http::recorded()[0][0]))->not->toContain('secret detail');
 });
 
 it('R13: a span that did not fail has no error.type', function () {

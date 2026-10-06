@@ -92,7 +92,7 @@ function runTimeAgent(): void
  */
 function batches(): array
 {
-    return Http::recorded()->map(fn (array $pair) => $pair[0]->data()['resourceSpans'][0]['scopeSpans'][0]['spans'])->values()->all();
+    return Http::recorded()->map(fn (array $pair) => Otlp::data($pair[0])['resourceSpans'][0]['scopeSpans'][0]['spans'])->values()->all();
 }
 
 /**

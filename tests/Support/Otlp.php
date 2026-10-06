@@ -21,7 +21,7 @@ class Otlp
 
         foreach (Http::recorded() as [$request]) {
             /** @var Request $request */
-            foreach ($request->data()['resourceSpans'] ?? [] as $resourceSpans) {
+            foreach (self::data($request)['resourceSpans'] ?? [] as $resourceSpans) {
                 foreach ($resourceSpans['scopeSpans'] as $scopeSpans) {
                     array_push($spans, ...$scopeSpans['spans']);
                 }
@@ -45,7 +45,33 @@ class Otlp
     {
         $request = Http::recorded()[0][0];
 
-        return self::values($request->data()['resourceSpans'][0]['resource']['attributes']);
+        return self::values(self::data($request)['resourceSpans'][0]['resource']['attributes']);
+    }
+
+    /**
+     * Get the OTLP JSON body of the given request, gunzipped when it was sent with Content-Encoding: gzip.
+     */
+    public static function body(Request $request): string
+    {
+        if ($request->header('Content-Encoding') !== ['gzip']) {
+            return $request->body();
+        }
+
+        $body = gzdecode($request->body());
+
+        return $body === false ? '' : $body;
+    }
+
+    /**
+     * Get the decoded OTLP JSON body of the given request.
+     *
+     * @return array<string, mixed>
+     */
+    public static function data(Request $request): array
+    {
+        $data = json_decode(self::body($request), true);
+
+        return is_array($data) ? $data : [];
     }
 
     /**

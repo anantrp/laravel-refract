@@ -1,10 +1,17 @@
 <?php
 
+use Anantrp\Refract\Contracts\Exporter;
 use Anantrp\Refract\Contracts\Transport;
+use Anantrp\Refract\Export\GenAiTranslator;
+use Anantrp\Refract\Export\HttpExporter;
+use Anantrp\Refract\Export\OtlpJson;
+use Anantrp\Refract\Export\PlatformFactory;
 use Anantrp\Refract\Support\Diagnostics;
+use Anantrp\Refract\Tests\Support\Otlp;
 use Anantrp\Refract\Tests\Support\WarningLog;
 use Anantrp\Refract\Transport\ExportSpans;
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Http\Client\Request;
 use Illuminate\Http\Client\RequestException;
 use Illuminate\Http\Client\Response;
 use Illuminate\Queue\Events\JobFailed;
@@ -24,14 +31,18 @@ use Illuminate\Support\Facades\Schema;
 
 /**
  * Boot Refract with a working Langfuse destination and the given transport, and record warnings.
+ *
+ * @param  array<string, mixed>  $config
  */
-function bootExport(string $transport): WarningLog
+function bootExport(string $transport, array $config = []): WarningLog
 {
     test()->refreshApplicationWithConfig([
         'refract.transport' => $transport,
         'refract.destination' => 'langfuse',
         'refract.destinations.langfuse.public_key' => 'pk-test',
         'refract.destinations.langfuse.secret_key' => 'sk-test',
+        'refract.destinations.otlp.endpoint' => 'https://otlp.test/v1/traces',
+        ...$config,
     ]);
 
     Diagnostics::reset();
@@ -595,3 +606,68 @@ it('E9: a redirect is not followed and counts as rejected, so the headers never 
         ->and($log->warnings)->toHaveCount(1)
         ->and($log->warnings[0])->toContain("HTTP {$status}");
 })->with(['sync', 'queue'])->with([301, 302, 303, 307, 308]);
+
+/**
+ * Send one span through the given transport and destination with the given compression, and get the request it made.
+ */
+function sendCompressed(string $transport, string $destination, ?string $compression): Request
+{
+    bootExport($transport, ['refract.destination' => $destination, 'refract.compression' => $compression]);
+    fakeDestination(200);
+    useExportQueue();
+
+    sendSpan();
+
+    if ($transport === 'queue') {
+        workExportJob();
+    }
+
+    Http::assertSentCount(1);
+
+    return Http::recorded()[0][0];
+}
+
+it('E11: by default the body is gzipped and sent with Content-Encoding: gzip, to both destinations', function (string $transport, string $destination, ?string $compression) {
+    $request = sendCompressed($transport, $destination, $compression);
+
+    $json = gzdecode($request->body());
+
+    expect($request->header('Content-Encoding'))->toBe(['gzip'])
+        ->and($json)->toBeString()
+        ->and(strlen($request->body()))->toBeLessThan(strlen((string) $json))
+        ->and(Otlp::spans())->toHaveCount(1);
+})->with(['sync', 'queue'])->with(['otlp', 'langfuse'])->with([
+    'not set' => null,
+    'empty' => '',
+    'gzip' => 'gzip',
+    'GZIP' => 'GZIP',
+]);
+
+it('E11: when gzip fails the body is sent plain, with no Content-Encoding', function () {
+    $log = bootExport('sync');
+    fakeDestination(200);
+
+    app()->instance(Exporter::class, new class(PlatformFactory::fromConfig(), new GenAiTranslator([]), new OtlpJson, 'testing', 'Refract') extends HttpExporter
+    {
+        protected function gzip(string $body): string|false
+        {
+            return false;
+        }
+    });
+
+    sendSpan();
+
+    $request = Http::recorded()[0][0];
+
+    expect($request->header('Content-Encoding'))->toBe([])
+        ->and(json_decode($request->body(), true))->toHaveKey('resourceSpans')
+        ->and($log->warnings)->toBe([]);
+});
+
+it('E12: with none the body is not gzipped and has no Content-Encoding, for both destinations', function (string $transport, string $destination, string $compression) {
+    $request = sendCompressed($transport, $destination, $compression);
+
+    expect($request->header('Content-Encoding'))->toBe([])
+        ->and(json_decode($request->body(), true))->toHaveKey('resourceSpans')
+        ->and(Otlp::spans())->toHaveCount(1);
+})->with(['sync', 'queue'])->with(['otlp', 'langfuse'])->with(['none', 'NONE']);

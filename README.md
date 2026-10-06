@@ -67,6 +67,7 @@ All settings come from environment variables.
 | `REFRACT_OTLP_HEADERS` | none | `otlp`: headers for any OTLP endpoint. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | none | `otlp`: a base URL. `/v1/traces` is appended. Used only when `REFRACT_OTLP_ENDPOINT` is not set. |
 | `OTEL_EXPORTER_OTLP_HEADERS` | none | `otlp`: headers sent only to `OTEL_EXPORTER_OTLP_ENDPOINT`. |
+| `OTEL_EXPORTER_OTLP_COMPRESSION` | `gzip` | `gzip` or `none`. Both destinations: the only `OTEL_EXPORTER_OTLP_*` variable that also applies to `langfuse`. See [Compression](#compression). |
 | `LANGFUSE_BASE_URL` | Langfuse Cloud | `langfuse`: your Langfuse host. |
 | `LANGFUSE_PUBLIC_KEY` | none | `langfuse`: required. |
 | `LANGFUSE_SECRET_KEY` | none | `langfuse`: required. |
@@ -182,6 +183,10 @@ LANGFUSE_SECRET_KEY=sk-lf-...
 - Langfuse stores times in milliseconds. Spans that start in the same millisecond are moved to distinct milliseconds, so they keep their order. Parents still cover their children and events stay inside their span.
 - `user.id` is set only from a user participant: the participant type must implement `Illuminate\Contracts\Auth\Authenticatable`. A `Team` participant gets no `user.id`. A `Context` mapping never sets `user.id`.
 - A `Context` mapping never sets a `langfuse.*` attribute. Refract sets those itself, for example on abandoned spans.
+
+### Compression
+
+Every export is gzipped and sent with `Content-Encoding: gzip`, to `otlp` and to `langfuse`. Set `OTEL_EXPORTER_OTLP_COMPRESSION=none` to send it plain, for example through a proxy that does not accept gzip. It is the only `OTEL_EXPORTER_OTLP_*` variable that also applies to `langfuse`. If gzip fails, the export is sent plain.
 
 ## Transports
 

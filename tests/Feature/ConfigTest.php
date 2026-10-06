@@ -41,6 +41,7 @@ const BASE_ENV = [
     'REFRACT_OTLP_HEADERS' => null,
     'OTEL_EXPORTER_OTLP_ENDPOINT' => null,
     'OTEL_EXPORTER_OTLP_HEADERS' => null,
+    'OTEL_EXPORTER_OTLP_COMPRESSION' => null,
     'LANGFUSE_BASE_URL' => null,
     'LANGFUSE_PUBLIC_KEY' => null,
     'LANGFUSE_SECRET_KEY' => null,
@@ -77,6 +78,7 @@ const CHANGED_ENV = [
     'REFRACT_OTLP_HEADERS' => 'x-changed=1',
     'OTEL_EXPORTER_OTLP_ENDPOINT' => 'https://changed.test',
     'OTEL_EXPORTER_OTLP_HEADERS' => 'x-changed=1',
+    'OTEL_EXPORTER_OTLP_COMPRESSION' => 'none',
     'LANGFUSE_BASE_URL' => 'https://changed.test',
     'LANGFUSE_PUBLIC_KEY' => 'pk-changed',
     'LANGFUSE_SECRET_KEY' => 'sk-changed',
@@ -122,7 +124,7 @@ function loadRefract(bool $cached = false): WarningLog
 /**
  * Send one run span through the configured transport and get the request it made, or null.
  *
- * @return array{url: string, headers: array<string, string>, resource: array<string, mixed>}|null
+ * @return array{url: string, headers: array<string, string>, encoding: string|null, resource: array<string, mixed>}|null
  */
 function exported(): ?array
 {
@@ -144,14 +146,16 @@ function exported(): ?array
     $headers = [];
 
     foreach ($request->headers() as $name => $values) {
-        if (! in_array(strtolower($name), ['content-type', 'content-length', 'user-agent', 'host'], true)) {
+        if (! in_array(strtolower($name), ['content-type', 'content-length', 'content-encoding', 'user-agent', 'host'], true)) {
             $headers[strtolower($name)] = implode(',', $values);
         }
     }
 
     ksort($headers);
 
-    return ['url' => $request->url(), 'headers' => $headers, 'resource' => Otlp::resource()];
+    $encoding = $request->header('Content-Encoding');
+
+    return ['url' => $request->url(), 'headers' => $headers, 'encoding' => $encoding === [] ? null : implode(',', $encoding), 'resource' => Otlp::resource()];
 }
 
 /**
@@ -223,6 +227,9 @@ function envCases(): array
         ],
         'OTEL_EXPORTER_OTLP_HEADERS' => [
             'env' => $collector, 'invalid' => 'x-team', 'read' => $headers, 'default' => [], 'warnings' => 0,
+        ],
+        'OTEL_EXPORTER_OTLP_COMPRESSION' => [
+            'env' => [], 'invalid' => 'brotli', 'read' => fn () => exported()['encoding'] ?? null, 'default' => 'gzip', 'warnings' => 0,
         ],
         'LANGFUSE_BASE_URL' => [
             'env' => LANGFUSE_ENV, 'invalid' => 'not a url', 'read' => $url, 'default' => LANGFUSE_CLOUD, 'warnings' => 0,

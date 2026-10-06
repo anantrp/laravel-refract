@@ -102,7 +102,7 @@ function ofKind(array $spans, string $kind): array
  */
 function sentBodies(): string
 {
-    return implode("\n", Http::recorded()->map(fn (array $pair) => $pair[0]->body())->all());
+    return implode("\n", Http::recorded()->map(fn (array $pair) => Otlp::body($pair[0]))->all());
 }
 
 /**

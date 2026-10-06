@@ -72,6 +72,21 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Compression
+    |--------------------------------------------------------------------------
+    |
+    | How each export is compressed, for both destinations: "gzip" sends the
+    | body gzipped with "Content-Encoding: gzip", "none" sends it plain. It is
+    | the only OTEL_EXPORTER_OTLP_* variable that also applies to "langfuse".
+    |
+    | Supported: "gzip", "none"
+    |
+    */
+
+    'compression' => env('OTEL_EXPORTER_OTLP_COMPRESSION'),
+
+    /*
+    |--------------------------------------------------------------------------
     | Context
     |--------------------------------------------------------------------------
     |
