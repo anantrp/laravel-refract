@@ -192,7 +192,7 @@ Every export is gzipped and sent with `Content-Encoding: gzip`, to `otlp` and to
 
 A batch is sent in parts of at most 4 MB of OTLP JSON, counted before gzip, so a destination with a body size limit does not refuse it. A big batch usually comes from content capture. Parts are cut between run trees (a run and every span under it). A run tree is cut only when it alone is over 4 MB. A single span over 4 MB is sent alone and one warning is logged: the destination may refuse it.
 
-With `sync`, the parts are sent one after another. A failed part gives its own warning and does not stop the next parts. With `queue`, each part is its own job, so a retry never sends a part again that already got through.
+With `sync`, the parts are sent one after another. A failed part gives its own warning and does not stop the next parts. With `queue`, each part is its own job, so a retry never sends a part again that already got through. A job must also fit in one queue message (256 KB after gzip, which is often only 0.5 to 1 MB of JSON). A bigger part is exported with `sync` instead, after the response, with one warning and no retry. With content capture on, this is common.
 
 ## Transports
 
@@ -357,7 +357,7 @@ Context::add('trigger', 'schedule');
 - **Refract never breaks your app.** Every listener and lifecycle hook is guarded. A failure inside Refract logs one warning and the run goes on. Your app's own exceptions pass through unchanged.
 - **No extra calls.** Refract never calls agent methods that run your code (`instructions()`, `tools()`) and runs no queries. A run is named without calling the agent's `name()`. To name a tool span, Refract reads the tool name the way the SDK does, which calls `name()` once per tool call on a tool or an agent used as a tool, the same call the SDK makes.
 - **Warnings.** Each warning is logged at the `warning` level, prefixed `[refract]`, once per kind per process. After 10 different warnings, Refract stays silent.
-- **Bounded memory.** The buffer holds at most 1,000 spans per request, job or command. Past that, new spans are dropped and one warning is logged. In a command, queue worker or tinker, finished runs are sent while the process keeps going (when they hold 500 spans, or 5 s after the last send, checked when a run ends), so only one run with more than 1,000 spans hits the cap. A run is sent only after it ends, and there is no background timer: a finished run waits for the end of the next run, a full buffer, or the end of the process. A web request sends once, after the response.
+- **Bounded memory.** The buffer holds at most 1,000 spans per request, job or command. Past that, new spans are dropped and one warning is logged. In a command, queue worker or tinker, finished runs are sent while the process keeps going: when they hold 500 spans or 5 s after the last send (checked when a run ends), and every time the buffer is full. So in a console process, runs that end lose no spans unless one run alone has more than 1,000. A run is sent only after it ends, and there is no background timer: a finished run waits for the end of the next run, a full buffer, or the end of the process. A stream the app stopped reading stays open until the end of the process, so many stopped streams can still fill the buffer. A web request sends once, after the response.
 
 ## Known Limitations
 
