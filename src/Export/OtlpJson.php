@@ -39,6 +39,19 @@ class OtlpJson
     }
 
     /**
+     * Get the bytes the given span takes in an encoded body.
+     *
+     * A body of n spans takes the bytes of the body with no spans, plus the
+     * bytes of each span, plus n - 1 commas.
+     *
+     * @param  TranslatedSpan  $span
+     */
+    public function size(array $span): int
+    {
+        return strlen((string) json_encode($this->span($span), self::JSON_FLAGS));
+    }
+
+    /**
      * @param  TranslatedSpan  $span
      * @return array<string, mixed>
      */

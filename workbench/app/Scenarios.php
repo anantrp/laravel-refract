@@ -23,6 +23,7 @@ class Scenarios
     {
         return match ($row) {
             'X9' => ['APP_ENV' => 'Staging EU 1'],
+            'E10' => ['OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT' => 'true', 'REFRACT_CAPTURE_MAX_BYTES' => '2000000'],
             default => [],
         };
     }
@@ -53,6 +54,7 @@ class Scenarios
             'X1' => $this->x1(...),
             'X9' => $this->r1(...),
             'L6' => $this->l6(...),
+            'E10' => $this->e10(...),
             default => throw new InvalidArgumentException("No scenario for row [{$row}] yet."),
         };
 
@@ -79,6 +81,20 @@ class Scenarios
         TimeAgent::fakeTwoSteps();
 
         TimeAgent::make()->prompt('What time is it?');
+    }
+
+    /**
+     * 5 runs of 2 spans, each answer 1 MB of random text. With content
+     * capture on, the answer is on the run and the step span: about 10 MB
+     * of OTLP JSON in all, 10 spans.
+     */
+    protected function e10(): void
+    {
+        foreach (range(1, 5) as $run) {
+            TimeAgent::fake([bin2hex(random_bytes(500_000))]);
+
+            TimeAgent::make()->prompt("Run {$run}: answer at length.");
+        }
     }
 
     /**

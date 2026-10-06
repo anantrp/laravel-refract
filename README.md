@@ -188,6 +188,12 @@ LANGFUSE_SECRET_KEY=sk-lf-...
 
 Every export is gzipped and sent with `Content-Encoding: gzip`, to `otlp` and to `langfuse`. Set `OTEL_EXPORTER_OTLP_COMPRESSION=none` to send it plain, for example through a proxy that does not accept gzip. It is the only `OTEL_EXPORTER_OTLP_*` variable that also applies to `langfuse`. If gzip fails, the export is sent plain.
 
+### Request Size
+
+A batch is sent in parts of at most 4 MB of OTLP JSON, counted before gzip, so a destination with a body size limit does not refuse it. A big batch usually comes from content capture. Parts are cut between run trees (a run and every span under it). A run tree is cut only when it alone is over 4 MB. A single span over 4 MB is sent alone and one warning is logged: the destination may refuse it.
+
+With `sync`, the parts are sent one after another. A failed part gives its own warning and does not stop the next parts. With `queue`, each part is its own job, so a retry never sends a part again that already got through.
+
 ## Transports
 
 The transport decides when and in which process traces are exported. No transport makes a network call before the response is sent.
@@ -195,7 +201,7 @@ The transport decides when and in which process traces are exported. No transpor
 | Transport | What it does |
 | --- | --- |
 | `sync` | Exports in the same process: after the response is sent, at the end of a queued job, or at the end of a console command. No retry. |
-| `queue` | Pushes one job per batch. A queue worker exports it. |
+| `queue` | Pushes one job per batch, or per part of a big batch (see [Request Size](#request-size)). A queue worker exports it. |
 | `null` | Discards the spans. |
 
 A sync-driver job or an `Artisan::call()` inside a web request does not export on its own. Its spans leave with the request.
@@ -205,7 +211,7 @@ A sync-driver job or an `Artisan::call()` inside a web request does not export o
 The job goes to your default queue connection and its default queue.
 
 - A job is pushed only when the connection's driver is `redis`, `database`, `sqs` or `beanstalkd`. Every other driver (`sync`, `deferred`, `background`, `failover`, custom) exports with `sync` instead.
-- The batch is gzipped. When it is still too big for a queue message (256 KB minus room for the job envelope), it is exported with `sync` instead and one warning is logged.
+- The batch is gzipped. When it, or one part of it, is still too big for a queue message (256 KB minus room for the job envelope), that batch or part is exported with `sync` instead and one warning is logged.
 - When the push fails, the batch is exported with `sync` and one warning is logged.
 - The job tries 3 times when the destination cannot be reached or answers 408, 429 or 5xx. It waits 10 seconds before the second try and 60 seconds before the third.
 - On a 429 or 503 with `Retry-After` in whole seconds, the job waits that long instead, at most 300 seconds. An HTTP date, a negative number or text is ignored. `sync` never waits or retries.

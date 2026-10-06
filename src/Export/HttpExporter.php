@@ -4,6 +4,7 @@ namespace Anantrp\Refract\Export;
 
 use Anantrp\Refract\Contracts\Exporter;
 use Anantrp\Refract\Contracts\ExportResult;
+use Anantrp\Refract\Contracts\Parts;
 use Anantrp\Refract\Contracts\RetryAfter;
 use Anantrp\Refract\Support\Diagnostics;
 use Anantrp\Refract\Support\Guard;
@@ -27,9 +28,19 @@ use Throwable;
  *
  * With gzip on, the body is gzipped and sent with Content-Encoding: gzip.
  * If gzip fails, the body is sent plain, with no such header.
+ *
+ * A batch is split into parts of at most 4 MB of OTLP JSON (counted
+ * before gzip), cut between run trees. A run tree is the spans under one
+ * span whose parent is not in the batch. A tree is cut only when it alone
+ * is too big, and a span too big for a part is sent alone with one warning.
  */
-class HttpExporter implements Exporter, RetryAfter
+class HttpExporter implements Exporter, Parts, RetryAfter
 {
+    /**
+     * The most bytes of OTLP JSON in one request, before gzip.
+     */
+    public const PART_LIMIT = 4_000_000;
+
     /**
      * The seconds to wait for the destination.
      */
@@ -74,10 +85,7 @@ class HttpExporter implements Exporter, RetryAfter
         try {
             $translated = $this->platform->prepare(array_map($this->translator->translate(...), $spans));
 
-            $body = $this->encoder->encode($translated, $this->platform->resource([
-                'service.name' => $this->serviceName,
-                'deployment.environment.name' => $this->environment,
-            ]));
+            $body = $this->encoder->encode($translated, $this->resource());
 
             $headers = $this->platform->headers();
             $compressed = $this->compress ? $this->gzip($body) : false;
@@ -104,6 +112,132 @@ class HttpExporter implements Exporter, RetryAfter
         }
 
         return $this->result($response);
+    }
+
+    public function parts(array $spans): array
+    {
+        try {
+            $translated = $this->platform->prepare(array_map($this->translator->translate(...), $spans));
+            $budget = self::PART_LIMIT - strlen($this->encoder->encode([], $this->resource()));
+            $sizes = array_map($this->encoder->size(...), $translated);
+        } catch (Throwable) {
+            // export() warns about a batch it cannot translate or encode.
+            return [$spans];
+        }
+
+        $parts = [];
+        $part = [];
+        $used = 0;
+
+        foreach ($this->units($spans, $sizes, $budget) as $unit) {
+            $size = $this->bytes($unit, $sizes);
+
+            if ($part !== [] && $used + 1 + $size > $budget) {
+                $parts[] = $part;
+                $part = [];
+            }
+
+            if ($size > $budget) {
+                $request = $size + self::PART_LIMIT - $budget;
+
+                Diagnostics::warn('export.too_big', "A span makes a request of {$request} bytes of OTLP JSON, over the ".self::PART_LIMIT.' byte limit. It was sent alone; the destination may refuse it.');
+            }
+
+            $used = $part === [] ? $size : $used + 1 + $size;
+            $part = [...$part, ...$unit];
+        }
+
+        if ($part !== []) {
+            $parts[] = $part;
+        }
+
+        return array_map(function (array $part) use ($spans) {
+            sort($part);
+
+            return array_map(fn (int $index) => $spans[$index], $part);
+        }, $parts);
+    }
+
+    /**
+     * Get the units a batch is packed into parts by, as span indexes: each
+     * run tree that fits a part, and each span of a tree that does not.
+     *
+     * @param  list<array<string, mixed>>  $spans
+     * @param  list<int>  $sizes
+     * @return list<list<int>>
+     */
+    protected function units(array $spans, array $sizes, int $budget): array
+    {
+        $units = [];
+
+        foreach ($this->trees($spans) as $tree) {
+            $size = $this->bytes($tree, $sizes);
+
+            if ($size <= $budget) {
+                $units[] = $tree;
+            } else {
+                array_push($units, ...array_map(fn (int $index) => [$index], $tree));
+            }
+        }
+
+        return $units;
+    }
+
+    /**
+     * Get the bytes the given spans take in an encoded body, with the commas between them.
+     *
+     * @param  list<int>  $indexes
+     * @param  list<int>  $sizes
+     */
+    protected function bytes(array $indexes, array $sizes): int
+    {
+        return array_sum(array_map(fn (int $index) => $sizes[$index], $indexes)) + count($indexes) - 1;
+    }
+
+    /**
+     * Get the run trees of a batch as span indexes, in the order each tree first appears.
+     *
+     * @param  list<array<string, mixed>>  $spans
+     * @return list<list<int>>
+     */
+    protected function trees(array $spans): array
+    {
+        $indexes = [];
+
+        foreach ($spans as $index => $span) {
+            if (is_string($span['span_id'] ?? null)) {
+                $indexes[$span['span_id']] ??= $index;
+            }
+        }
+
+        $trees = [];
+
+        foreach ($spans as $index => $span) {
+            $root = $index;
+            $seen = [];
+
+            while (is_string($parent = $spans[$root]['parent_span_id'] ?? null) && isset($indexes[$parent]) && ! isset($seen[$root])) {
+                $seen[$root] = true;
+                $root = $indexes[$parent];
+            }
+
+            $trees[$root][] = $index;
+        }
+
+        return array_values($trees);
+    }
+
+    /**
+     * Get the resource attributes sent with every request.
+     *
+     * @return array<string, mixed>
+     */
+    protected function resource(): array
+    {
+        return $this->platform->resource([
+            'service.name' => $this->serviceName,
+            'deployment.environment.name' => $this->environment,
+        ]);
     }
 
     /**

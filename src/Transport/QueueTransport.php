@@ -16,6 +16,10 @@ use Throwable;
  * other driver (sync, deferred, background, failover, custom), a batch too
  * big for the queue, or a failed dispatch exports in this process instead,
  * like the sync transport: no retry.
+ *
+ * A batch the exporter splits into parts is queued as one job per part,
+ * so a retry never sends a part again that already got through. Each part
+ * that cannot go through the queue is exported in this process on its own.
  */
 class QueueTransport implements Transport
 {
@@ -49,17 +53,19 @@ class QueueTransport implements Transport
 
     public function send(array $spans): void
     {
-        try {
-            $this->queue($spans);
-        } catch (Throwable $e) {
-            Diagnostics::warn('queue.error', 'A batch of spans could not be queued ('.$e::class.'). It was exported in this process.');
+        foreach ($this->inProcess->parts($spans) as $part) {
+            try {
+                $this->queue($part);
+            } catch (Throwable $e) {
+                Diagnostics::warn('queue.error', 'A batch of spans could not be queued ('.$e::class.'). It was exported in this process.');
 
-            $this->inProcess->send($spans);
+                $this->inProcess->export($part);
+            }
         }
     }
 
     /**
-     * Queue the batch, or export it in this process when it cannot go through the queue.
+     * Queue one part, or export it in this process when it cannot go through the queue.
      *
      * @param  list<array<string, mixed>>  $spans
      */
@@ -69,7 +75,7 @@ class QueueTransport implements Transport
         $driver = is_string($connection) ? config("queue.connections.{$connection}.driver") : null;
 
         if (! is_string($connection) || ! in_array($driver, self::ASYNC_DRIVERS, true)) {
-            $this->inProcess->send($spans);
+            $this->inProcess->export($spans);
 
             return;
         }
@@ -79,7 +85,7 @@ class QueueTransport implements Transport
         if ($job === null || strlen((string) json_encode(serialize($job))) > self::MAX_PAYLOAD - self::ENVELOPE) {
             Diagnostics::warn('queue.too_big', 'A batch of spans is too big for the queue. It was exported in this process.');
 
-            $this->inProcess->send($spans);
+            $this->inProcess->export($spans);
 
             return;
         }
@@ -89,7 +95,7 @@ class QueueTransport implements Transport
         } catch (Throwable $e) {
             Diagnostics::warn('queue.dispatch', 'A batch of spans could not be queued ('.$e::class.'). It was exported in this process.');
 
-            $this->inProcess->send($spans);
+            $this->inProcess->export($spans);
         }
     }
 }

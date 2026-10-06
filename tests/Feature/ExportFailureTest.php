@@ -671,3 +671,240 @@ it('E12: with none the body is not gzipped and has no Content-Encoding, for both
         ->and(json_decode($request->body(), true))->toHaveKey('resourceSpans')
         ->and(Otlp::spans())->toHaveCount(1);
 })->with(['sync', 'queue'])->with(['otlp', 'langfuse'])->with(['none', 'NONE']);
+
+/*
+ * E10: a batch over 4 MB of OTLP JSON (before gzip) is sent in parts of
+ * 4 MB or less, cut between run trees. A run tree is cut only when it alone
+ * is too big.
+ */
+
+/**
+ * Get the neutral spans of one run tree: a run span and the given tool spans under it, each tool result the given text.
+ *
+ * @param  list<string>  $results
+ * @return list<array<string, mixed>>
+ */
+function runTree(array $results): array
+{
+    $traceId = bin2hex(random_bytes(16));
+    $runId = bin2hex(random_bytes(8));
+    $span = fn (string $id, ?string $parent, string $kind, array $content) => [
+        'v' => 1, 'trace_id' => $traceId, 'span_id' => $id, 'parent_span_id' => $parent,
+        'kind' => $kind, 'start' => 1_700_000_000_000_000_000, 'end' => 1_700_000_001_000_000_000, 'status' => 'ok', 'status_message' => null,
+        'call' => ['agent' => 'TimeAgent', 'tool' => 'Clock'], 'content' => $content, 'context' => [], 'events' => [],
+    ];
+
+    $spans = [$span($runId, null, 'invoke_agent', [])];
+
+    foreach ($results as $result) {
+        $spans[] = $span(bin2hex(random_bytes(8)), $runId, 'execute_tool', ['result' => $result]);
+    }
+
+    return $spans;
+}
+
+/**
+ * Get random text of the given length, which neither compresses nor grows when JSON encoded.
+ */
+function randomText(int $length): string
+{
+    return substr(bin2hex(random_bytes(intdiv($length, 2) + 1)), 0, $length);
+}
+
+/**
+ * Get the OTLP JSON body (before gzip) of each request sent so far.
+ *
+ * @return list<string>
+ */
+function partBodies(): array
+{
+    return Http::recorded()->map(fn (array $pair) => Otlp::body($pair[0]))->values()->all();
+}
+
+/**
+ * Get the trace ids of each request sent so far, one sorted list per request.
+ *
+ * @return list<list<string>>
+ */
+function partTraces(): array
+{
+    return array_map(function (string $body) {
+        $traces = array_values(array_unique(array_column(json_decode($body, true)['resourceSpans'][0]['scopeSpans'][0]['spans'], 'traceId')));
+        sort($traces);
+
+        return $traces;
+    }, partBodies());
+}
+
+it('E10: a batch over 4 MB on sync is sent in parts of 4 MB or less, each run tree whole in one part', function () {
+    $log = bootExport('sync');
+    fakeDestination(200);
+
+    // Five trees of about 1.5 MB: two fit in one part, so three parts.
+    $trees = array_map(fn () => runTree([randomText(500_000), randomText(500_000), randomText(500_000)]), range(1, 5));
+
+    app(Transport::class)->send(array_merge(...$trees));
+
+    $bodies = partBodies();
+
+    expect($bodies)->toHaveCount(3)
+        ->and(array_map(strlen(...), $bodies))->each->toBeLessThanOrEqual(4_000_000)
+        ->and(Otlp::spans())->toHaveCount(20)
+        ->and(array_merge(...partTraces()))->toHaveCount(5)
+        ->and($log->warnings)->toBe([]);
+});
+
+it('E10: a batch of 4 MB or less is sent in one request', function (string $transport) {
+    bootExport($transport);
+    fakeDestination(200);
+    useExportQueue();
+
+    // Text that compresses well, so the batch fits one queue job.
+    app(Transport::class)->send([...runTree([str_repeat('a', 1_900_000)]), ...runTree([str_repeat('b', 1_900_000)])]);
+
+    if ($transport === 'queue') {
+        expect(DB::table('jobs')->count())->toBe(1);
+
+        workExportJob();
+    }
+
+    Http::assertSentCount(1);
+    expect(Otlp::spans())->toHaveCount(4);
+})->with(['sync', 'queue']);
+
+it('E10: the size is the encoded OTLP JSON, so text that grows when escaped is split by its escaped size', function () {
+    bootExport('sync');
+    fakeDestination(200);
+
+    // 1.2 MB of quotes and new lines each: 2.4 MB as text, about 4.8 MB as JSON.
+    $text = str_repeat("\"\n", 600_000);
+
+    app(Transport::class)->send([...runTree([$text]), ...runTree([$text])]);
+
+    expect(partBodies())->toHaveCount(2)
+        ->and(array_map(strlen(...), partBodies()))->each->toBeLessThanOrEqual(4_000_000)
+        ->and(Otlp::spans())->toHaveCount(4);
+});
+
+it('E10: a run tree bigger than 4 MB is split, and the other trees stay whole', function () {
+    $log = bootExport('sync');
+    fakeDestination(200);
+
+    $big = runTree(array_map(fn () => randomText(600_000), range(1, 10)));
+    $small = runTree([randomText(1_000)]);
+
+    app(Transport::class)->send([...$small, ...$big]);
+
+    $traces = partTraces();
+    $smallTrace = $small[0]['trace_id'];
+
+    expect(count($traces))->toBeGreaterThanOrEqual(2)
+        ->and(array_map(strlen(...), partBodies()))->each->toBeLessThanOrEqual(4_000_000)
+        ->and(Otlp::spans())->toHaveCount(13)
+        ->and(array_values(array_filter($traces, fn (array $request) => in_array($smallTrace, $request, true))))->toHaveCount(1)
+        ->and($log->warnings)->toBe([]);
+});
+
+it('E10: a single span bigger than 4 MB is sent alone, with one warning', function () {
+    $log = bootExport('sync');
+    fakeDestination(200);
+
+    $huge = runTree([randomText(4_500_000)]);
+    $other = runTree([randomText(1_000)]);
+
+    app(Transport::class)->send([...$huge, ...$other, ...runTree([randomText(4_200_000)])]);
+
+    $alone = array_values(array_filter(
+        Http::recorded()->map(fn (array $pair) => Otlp::data($pair[0])['resourceSpans'][0]['scopeSpans'][0]['spans'])->all(),
+        fn (array $spans) => count($spans) === 1 && strlen(json_encode($spans)) > 4_000_000,
+    ));
+
+    expect($alone)->toHaveCount(2)
+        ->and(Otlp::spans())->toHaveCount(6)
+        ->and($log->warnings)->toHaveCount(1)
+        ->and($log->warnings[0])->toContain('over the 4000000 byte limit');
+});
+
+it('E10: on sync each failed part gives its own warning and the later parts are still sent', function () {
+    $log = bootExport('sync');
+    Http::fake(['*' => Http::sequence()->push('bad', 400)->push('', 503)->push('', 200)]);
+
+    $trees = array_map(fn () => runTree([randomText(1_500_000), randomText(1_500_000)]), range(1, 3));
+
+    app(Transport::class)->send(array_merge(...$trees));
+
+    Http::assertSentCount(3);
+    expect($log->warnings)->toHaveCount(2)
+        ->and($log->warnings[0])->toContain('HTTP 400')
+        ->and($log->warnings[1])->toContain('could not be exported');
+});
+
+it('E10: on queue each part is its own job, so a retry sends only the part that failed', function () {
+    $log = bootExport('queue');
+    useExportQueue();
+
+    // Text that compresses well, so each part fits one queue job.
+    $trees = array_map(fn () => runTree([str_repeat('a', 1_500_000), str_repeat('b', 1_500_000)]), range(1, 3));
+
+    app(Transport::class)->send(array_merge(...$trees));
+
+    expect(DB::table('jobs')->count())->toBe(3);
+
+    Http::fake(['*' => Http::sequence()->push('', 200)->push('', 503)->push('', 200)->push('', 200)]);
+
+    workExportJob();
+    workExportJob();
+    workExportJob();
+
+    expect(DB::table('jobs')->count())->toBe(1);
+
+    DB::table('jobs')->update(['available_at' => now()->getTimestamp()]);
+    workExportJob();
+
+    $spansPerRequest = Http::recorded()->map(fn (array $pair) => count(Otlp::data($pair[0])['resourceSpans'][0]['scopeSpans'][0]['spans']))->all();
+
+    expect($spansPerRequest)->toBe([3, 3, 3, 3])
+        ->and(DB::table('jobs')->count())->toBe(0)
+        ->and(partTraces()[1])->toBe(partTraces()[3])
+        ->and($log->warnings)->toBe([]);
+});
+
+it('E10: on queue a part too big for one job is exported in this process, and the other parts are still queued', function () {
+    $log = bootExport('queue');
+    fakeDestination(200);
+    useExportQueue();
+
+    app(Transport::class)->send([
+        ...runTree([str_repeat('a', 2_000_000), str_repeat('b', 1_500_000)]),
+        // Random text does not compress much: well over 256 KB gzipped.
+        ...runTree([randomText(1_000_000)]),
+    ]);
+
+    Http::assertSentCount(1);
+    expect(DB::table('jobs')->count())->toBe(1)
+        ->and($log->warnings)->toHaveCount(1)
+        ->and($log->warnings[0])->toContain('too big for the queue');
+
+    workExportJob();
+
+    Http::assertSentCount(2);
+    expect(Otlp::spans())->toHaveCount(5);
+});
+
+it('E10: the limit is exact: a run tree of exactly 4 MB is one request, one byte more is split', function () {
+    bootExport('sync');
+    fakeDestination(200);
+
+    app(Transport::class)->send(runTree(['x']));
+    $length = 4_000_000 - strlen(partBodies()[0]) + 1;
+
+    fakeDestination(200);
+    app(Transport::class)->send(runTree([str_repeat('x', $length)]));
+
+    expect(array_map(strlen(...), partBodies()))->toBe([4_000_000]);
+
+    fakeDestination(200);
+    app(Transport::class)->send(runTree([str_repeat('x', $length + 1)]));
+
+    expect(partBodies())->toHaveCount(2);
+});

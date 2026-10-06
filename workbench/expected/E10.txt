@@ -1,0 +1,11 @@
+environment: local
+invoke_agent TimeAgent  ok
+  chat fake  ok
+invoke_agent TimeAgent  ok
+  chat fake  ok
+invoke_agent TimeAgent  ok
+  chat fake  ok
+invoke_agent TimeAgent  ok
+  chat fake  ok
+invoke_agent TimeAgent  ok
+  chat fake  ok
