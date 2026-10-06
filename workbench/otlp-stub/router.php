@@ -9,7 +9,8 @@
  * STUB_OTLP_LOG). The answer to request N is entry N-1 of the JSON array in
  * script.json (or STUB_OTLP_SCRIPT): {"status": 429, "headers": {"Retry-After": "2"}, "body": {}}.
  * The body is a string, or JSON that is encoded as is.
- * A missing script or entry answers 200 {}. Delete the log to start again at request 1.
+ * A missing script or entry answers 200 {}; a script that does not parse answers 500.
+ * Delete the log to start again at request 1, before writing a new script.
  */
 
 $log = getenv('STUB_OTLP_LOG') ?: __DIR__.'/requests.jsonl';
@@ -32,7 +33,7 @@ if (is_array($payload)) {
     }
 }
 
-$number = is_file($log) ? count(file($log, FILE_SKIP_EMPTY_LINES)) + 1 : 1;
+$number = is_file($log) ? count(file($log, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES)) + 1 : 1;
 
 file_put_contents($log, json_encode([
     'n' => $number,
@@ -48,6 +49,12 @@ file_put_contents($log, json_encode([
 // Decoded as objects, so a scripted {} body is sent back as {}, not [].
 $answers = is_file($script) ? json_decode((string) file_get_contents($script)) : null;
 $answer = is_array($answers) ? ($answers[$number - 1] ?? null) : null;
+
+// A script that exists but does not parse fails loudly, so a typo is not read as a 200 run.
+if (is_file($script) && ! is_array($answers)) {
+    $answer = (object) ['status' => 500, 'body' => 'stub: script.json is not a JSON array'];
+}
+
 $answer = $answer instanceof stdClass ? $answer : new stdClass;
 
 http_response_code((int) ($answer->status ?? 200));
