@@ -25,8 +25,8 @@ use Illuminate\Support\Facades\Schema;
 
 /*
  * Rule 8: retry on a network error, 408, 429 and 5xx; drop every other
- * status with one warning. The queue job tries 3 times, 10 s then 60 s
- * apart, or after the Retry-After seconds of a 429 or 503 (at most 300).
+ * status with one warning. The queue job tries 4 times, 10 s, 60 s then
+ * 300 s apart, or after the Retry-After seconds of a 429 or 503 (at most 300).
  */
 
 /**
@@ -267,7 +267,7 @@ it('E2: a request exception that carries a response is judged by its status', fu
         ->and($log->warnings[0])->toContain('no key');
 });
 
-it('E3: a 408, 429, 5xx or network error on queue is retried, 3 tries, 10 s then 60 s apart', function (int|string $status) {
+it('E3: a 408, 429, 5xx or network error on queue is retried, 4 tries, 10 s, 60 s then 300 s apart', function (int|string $status) {
     $log = bootExport('queue');
     // The backoff is checked to the second: a clock tick during the test must not change it.
     $this->freezeTime();
@@ -304,13 +304,25 @@ it('E3: a 408, 429, 5xx or network error on queue is retried, 3 tries, 10 s then
     workExportJob();
 
     Http::assertSentCount(3);
+    expect(secondsUntilRetry())->toBe(300)
+        ->and($log->warnings)->toBe([]);
+
+    $this->travel(299)->seconds();
+    workExportJob();
+
+    Http::assertSentCount(3);
+
+    $this->travel(1)->seconds();
+    workExportJob();
+
+    Http::assertSentCount(4);
     expect(DB::table('jobs')->count())->toBe(0)
         ->and($log->warnings)->toHaveCount(1);
 
     $this->travel(300)->seconds();
     workExportJob();
 
-    Http::assertSentCount(3);
+    Http::assertSentCount(4);
 })->with('retryable');
 
 it('E3: a queued batch that succeeds on a later try logs nothing', function () {
@@ -461,17 +473,17 @@ it('E5: a queue job that gives up logs one warning from failed() and is not sent
 
     sendSpan();
 
-    foreach ([10, 60, 300] as $wait) {
+    foreach ([10, 60, 300, 300] as $wait) {
         workExportJob();
         $this->travel($wait)->seconds();
     }
 
-    Http::assertSentCount(3);
+    Http::assertSentCount(4);
     Exceptions::assertNothingReported();
     expect($failed)->toBe(0)
         ->and(DB::table('jobs')->count())->toBe(0)
         ->and($log->warnings)->toHaveCount(1)
-        ->and($log->warnings[0])->toContain('3 tries');
+        ->and($log->warnings[0])->toContain('4 tries');
 });
 
 it('E5: failed() called by the queue logs one warning and does not throw', function () {
@@ -482,9 +494,9 @@ it('E5: failed() called by the queue logs one warning and does not throw', funct
     $job->failed(null);
 
     expect($log->warnings)->toHaveCount(1)
-        ->and($log->warnings[0])->toContain('3 tries')
+        ->and($log->warnings[0])->toContain('4 tries')
         ->and($log->warnings[0])->toContain('dropped')
-        ->and($job->tries)->toBe(3)
+        ->and($job->tries)->toBe(4)
         ->and($job->backoff)->toBe([10, 60, 300]);
 });
 
@@ -497,12 +509,12 @@ it('E6: a 401 and then an outage in one process give two different warnings', fu
     sendSpan();
 
     if ($transport === 'queue') {
-        foreach ([0, 10, 60, 300] as $wait) {
+        foreach ([0, 10, 60, 300, 300] as $wait) {
             workExportJob();
             $this->travel($wait)->seconds();
         }
 
-        Http::assertSentCount(4);
+        Http::assertSentCount(5);
     }
 
     expect($log->warnings)->toHaveCount(2)
@@ -908,3 +920,22 @@ it('E10: the limit is exact: a run tree of exactly 4 MB is one request, one byte
 
     expect(partBodies())->toHaveCount(2);
 });
+
+it('E13: every export request waits at most 15 s for the destination', function (string $transport) {
+    bootExport($transport);
+    useExportQueue();
+    $timeouts = [];
+    Http::fake(function ($request, array $options) use (&$timeouts) {
+        $timeouts[] = $options['timeout'] ?? null;
+
+        return Http::response('', 200);
+    });
+
+    sendSpan();
+
+    if ($transport === 'queue') {
+        workExportJob();
+    }
+
+    expect($timeouts)->toBe([15]);
+})->with(['sync', 'queue']);

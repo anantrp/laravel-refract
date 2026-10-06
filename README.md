@@ -213,7 +213,7 @@ The job goes to your default queue connection and its default queue.
 - A job is pushed only when the connection's driver is `redis`, `database`, `sqs` or `beanstalkd`. Every other driver (`sync`, `deferred`, `background`, `failover`, custom) exports with `sync` instead.
 - The batch is gzipped. When it, or one part of it, is still too big for a queue message (256 KB minus room for the job envelope), that batch or part is exported with `sync` instead and one warning is logged.
 - When the push fails, the batch is exported with `sync` and one warning is logged.
-- The job tries 3 times when the destination cannot be reached or answers 408, 429 or 5xx. It waits 10 seconds before the second try and 60 seconds before the third.
+- The job tries 4 times when the destination cannot be reached or answers 408, 429 or 5xx. It waits 10 seconds before the second try, 60 seconds before the third and 300 seconds before the fourth. So a batch survives an outage of about 6 minutes.
 - On a 429 or 503 with `Retry-After` in whole seconds, the job waits that long instead, at most 300 seconds. An HTTP date, a negative number or text is ignored. `sync` never waits or retries.
 - When the job gives up, it logs one warning. It does not throw, so nothing goes to your error tracker or the `failed_jobs` table.
 
@@ -223,14 +223,14 @@ The job goes to your default queue connection and its default queue.
 | --- | --- | --- |
 | 2xx | Done | Done |
 | 2xx whose `partialSuccess` refuses spans or has a message | Done, one warning | Done, one warning |
-| Network error, 408, 429, 5xx | Dropped, one warning | Retried (3 tries, 10 s then 60 s apart, or the `Retry-After` seconds of a 429 or 503, at most 300 s), then one warning |
+| Network error, 408, 429, 5xx | Dropped, one warning | Retried (4 tries, 10 s, 60 s then 300 s apart, or the `Retry-After` seconds of a 429 or 503, at most 300 s), then one warning |
 | Any other status (3xx, 400, 401, 403, 404, ...) | Dropped, one warning | Dropped, one warning |
 
 A rejected batch's warning names the status and the first 200 characters of the response body. Credentials the destination echoes in the body are masked as `[removed]`: values under key names that contain `key`, `token`, `secret`, `auth`, `password`, `passwd`, `credential` or `cookie` (in JSON, in header lines and in `key=value` pairs), and `Bearer` and `Basic` tokens. Other text, such as a plain error line, is kept.
 
 A 2xx can carry an OTLP `partialSuccess` (JSON answers only). When it refuses spans or has a message, one warning names the refused count and the message, masked the same way. The answer does not say which spans were refused. They are not retried, as the OTLP spec asks. An empty body, `{}` or a body that is not JSON logs nothing.
 
-Redirects are never followed, so your keys and headers never go to another host. A 3xx is dropped like any other rejected status. The HTTP timeout is 5 seconds.
+Redirects are never followed, so your keys and headers never go to another host. A 3xx is dropped like any other rejected status. The HTTP timeout is 15 seconds.
 
 ### No Endpoint
 

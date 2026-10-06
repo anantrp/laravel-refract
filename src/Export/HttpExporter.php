@@ -44,7 +44,7 @@ class HttpExporter implements Exporter, Parts, RetryAfter
     /**
      * The seconds to wait for the destination.
      */
-    protected const TIMEOUT = 5;
+    protected const TIMEOUT = 15;
 
     /**
      * The characters of a rejected response's body, or of a partial success message, put in the warning.

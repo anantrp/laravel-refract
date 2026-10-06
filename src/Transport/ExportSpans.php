@@ -17,9 +17,9 @@ use Throwable;
  * The batch travels as gzipped JSON, base64 encoded: the queue payload is
  * JSON, so invalid UTF-8 becomes U+FFFD and floats keep their fraction.
  *
- * A retryable result (network error, 408, 429, 5xx) is tried again, 3
+ * A retryable result (network error, 408, 429, 5xx) is tried again, 4
  * tries in all: after the Retry-After seconds the exporter read from a 429
- * or 503, else after the backoff of the attempt (10 s, then 60 s). The job
+ * or 503, else after the backoff of the attempt (10 s, 60 s, then 300 s). The job
  * never throws for it: after the last try it deletes itself and warns once
  * from failed(), so it is not reported to the exception handler, not
  * stored as a failed job and fires no JobFailed event. Error trackers never see it. Nothing else in the job
@@ -33,7 +33,7 @@ class ExportSpans implements ShouldQueue
     /**
      * The number of times the batch is tried.
      */
-    public int $tries = 3;
+    public int $tries = 4;
 
     /**
      * The seconds to wait before each next try, by attempt.
