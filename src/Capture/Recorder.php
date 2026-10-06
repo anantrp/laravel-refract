@@ -84,6 +84,15 @@ class Recorder
     protected array $fulls = [];
 
     /**
+     * Whether a span tree may have finished since the full callbacks last ran.
+     *
+     * Set when a span ends whose parent is not open, and at each flush. A
+     * tree can finish only then, so a full buffer does not run the callbacks
+     * again on every dropped span.
+     */
+    protected bool $treeEnded = true;
+
+    /**
      * The monotonic time of the last send, or of the recorder's start before the first one.
      */
     protected int $lastSend;
@@ -114,7 +123,9 @@ class Recorder
             $this->abandon($key);
         }
 
-        if ($this->full()) {
+        if ($this->treeEnded && $this->full()) {
+            $this->treeEnded = false;
+
             foreach ($this->fulls as $callback) {
                 $callback();
             }
@@ -228,11 +239,31 @@ class Recorder
 
         $this->ended[$key] = array_key_last($this->finished);
 
+        if (! $this->treeEnded && ! $this->parentOpen($span)) {
+            $this->treeEnded = true;
+        }
+
         if ($span['kind'] === 'invoke_agent' && $status !== 'abandoned' && ! $this->hasParent($span)) {
             foreach ($this->runEnds as $callback) {
                 $callback($key);
             }
         }
+    }
+
+    /**
+     * Check whether the given span's parent is an open span.
+     *
+     * @param  OpenSpan  $span
+     */
+    protected function parentOpen(array $span): bool
+    {
+        foreach ($this->open as $open) {
+            if ($open['span_id'] === $span['parent_span_id']) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -528,6 +559,7 @@ class Recorder
             $this->open = [];
             $this->finished = [];
             $this->ended = [];
+            $this->treeEnded = true;
 
             foreach ($this->resets as $reset) {
                 Guard::run('capture.reset', 'to reset its state at a flush', $reset);

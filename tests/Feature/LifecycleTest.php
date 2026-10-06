@@ -627,6 +627,38 @@ it('L11: one run that makes 2,000 spans keeps 1,000, logs one warning, and memor
         ->and($grown)->toBeLessThan(100_000);
 });
 
+it('L11: while one open run holds the full buffer, dropped spans do not rescan the buffer', function () {
+    $transport = $this->captureNeutralSpans();
+    $recorder = app(Recorder::class);
+    $fulls = 0;
+    $recorder->whenFull(function () use (&$fulls) {
+        $fulls++;
+    });
+
+    $recorder->start('run:long', 'invoke_agent', null, []);
+
+    for ($i = 0; $i < 2_999; $i++) {
+        $recorder->start("tool:{$i}", 'execute_tool', 'run:long', []);
+        $recorder->end("tool:{$i}");
+    }
+
+    // 2,000 dropped starts, and no tree could finish while the run stays open.
+    expect($fulls)->toBe(1)
+        ->and($transport->spans)->toBe([]);
+
+    // A run ending can free the buffer, so the next full start tries again.
+    $recorder->end('run:long');
+    $recorder->start('run:next', 'invoke_agent', null, []);
+    $recorder->end('run:next');
+
+    expect($fulls)->toBe(2)
+        ->and($transport->spans)->toHaveCount(1_000);
+
+    $recorder->flush();
+
+    expect($transport->spans)->toHaveCount(1_001);
+});
+
 it('L11: after a flush the buffer takes spans again', function () {
     $transport = $this->captureNeutralSpans();
     $recorder = app(Recorder::class);
