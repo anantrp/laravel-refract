@@ -341,19 +341,19 @@ it('E3: a queued batch that succeeds on a later try logs nothing', function () {
         ->and($log->warnings)->toBe([]);
 });
 
-it('E7: a 429 or 503 with Retry-After in seconds on queue waits that long before the next try', function (int $status) {
+it('E7: a 429 or 503 with Retry-After in seconds on queue waits that long when it is longer than the backoff', function (int $status) {
     $log = bootExport('queue');
     $this->freezeTime();
-    fakeRetryAfter($status, '3');
+    fakeRetryAfter($status, '30');
     useExportQueue();
 
     sendSpan();
 
     workExportJob();
 
-    expect(secondsUntilRetry())->toBe(3);
+    expect(secondsUntilRetry())->toBe(30);
 
-    $this->travel(2)->seconds();
+    $this->travel(29)->seconds();
     workExportJob();
 
     Http::assertSentCount(1);
@@ -361,10 +361,42 @@ it('E7: a 429 or 503 with Retry-After in seconds on queue waits that long before
     $this->travel(1)->seconds();
     workExportJob();
 
+    // On the second try the backoff of 60 s is longer than the 30 s asked: the longer wait wins.
     Http::assertSentCount(2);
-    expect(secondsUntilRetry())->toBe(3)
+    expect(secondsUntilRetry())->toBe(60)
         ->and($log->warnings)->toBe([]);
 })->with(['429' => 429, '503' => 503]);
+
+it('E7: a Retry-After shorter than the backoff waits the backoff of the attempt', function (string $retryAfter) {
+    bootExport('queue');
+    $this->freezeTime();
+    fakeRetryAfter(503, $retryAfter);
+    useExportQueue();
+
+    sendSpan();
+
+    workExportJob();
+
+    expect(secondsUntilRetry())->toBe(10);
+})->with(['0' => '0', '1' => '1', '3' => '3', '9' => '9']);
+
+it('E7: a Retry-After of 30 s on the third try waits the 300 s backoff', function () {
+    bootExport('queue');
+    $this->freezeTime();
+    fakeRetryAfter(429, '30');
+    useExportQueue();
+
+    sendSpan();
+
+    workExportJob();
+    $this->travel(30)->seconds();
+    workExportJob();
+    $this->travel(60)->seconds();
+    workExportJob();
+
+    Http::assertSentCount(3);
+    expect(secondsUntilRetry())->toBe(300);
+});
 
 it('E7: a Retry-After over 300 s waits 300 s', function (string $retryAfter) {
     bootExport('queue');
@@ -400,18 +432,26 @@ it('E7: a Retry-After that is not whole seconds, or on another status, is ignore
     'on 408' => [408, '3'],
 ]);
 
-it('E7: a Retry-After of 0 s on queue tries again at once', function () {
-    bootExport('queue');
+it('E7: a Retry-After of 0 s on every try still waits the backoff, so a batch survives an outage of a few minutes', function () {
+    $log = bootExport('queue');
     $this->freezeTime();
     fakeRetryAfter(503, '0');
     useExportQueue();
 
     sendSpan();
 
-    workExportJob();
-    workExportJob();
+    foreach ([10, 60, 300] as $wait) {
+        workExportJob();
 
-    Http::assertSentCount(2);
+        expect(secondsUntilRetry())->toBe($wait);
+
+        workExportJob();
+        $this->travel($wait)->seconds();
+    }
+
+    Http::assertSentCount(3);
+    expect(DB::table('jobs')->count())->toBe(1)
+        ->and($log->warnings)->toBe([]);
 });
 
 it('E7: a Retry-After on sync is not waited for: no retry and one warning, like E4', function (int $status) {

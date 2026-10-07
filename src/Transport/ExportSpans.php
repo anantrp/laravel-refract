@@ -18,8 +18,9 @@ use Throwable;
  * JSON, so invalid UTF-8 becomes U+FFFD and floats keep their fraction.
  *
  * A retryable result (network error, 408, 429, 5xx) is tried again, 4
- * tries in all: after the Retry-After seconds the exporter read from a 429
- * or 503, else after the backoff of the attempt (10 s, 60 s, then 300 s). The job
+ * tries in all: after the backoff of the attempt (10 s, 60 s, then 300 s),
+ * or after the Retry-After seconds the exporter read from a 429 or 503 when
+ * they are longer (the exporter caps them at 300 s). The job
  * never throws for it: after the last try it deletes itself and warns once
  * from failed(), so it is not reported to the exception handler, not
  * stored as a failed job and fires no JobFailed event. Error trackers never see it. Nothing else in the job
@@ -157,7 +158,8 @@ class ExportSpans implements ShouldQueue
         if ($this->attempts() < $this->tries) {
             $asked = $exporter instanceof RetryAfter ? $exporter->retryAfter() : null;
 
-            $this->release($asked ?? $this->backoff[min($this->attempts(), count($this->backoff)) - 1]);
+            // Retry-After means "not before": a shorter one never cuts the backoff, so a batch survives an outage of a few minutes.
+            $this->release(max($asked ?? 0, $this->backoff[min($this->attempts(), count($this->backoff)) - 1]));
 
             return;
         }
