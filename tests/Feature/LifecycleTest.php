@@ -812,6 +812,27 @@ it('L12: a sub-agent run ending does not send its own tree away from its parent 
     expect($transport->spans)->toBe([]);
 });
 
+it('L12: only a top-level run ending fires the run-end send check, a sub-agent run ending does not', function () {
+    $this->captureNeutralSpans();
+    $recorder = app(Recorder::class);
+    $ended = [];
+    $recorder->whenRunEnds(function (string $key) use (&$ended) {
+        $ended[] = $key;
+    });
+
+    $recorder->start('run:parent', 'invoke_agent', null, []);
+    $recorder->start('tool:sub', 'execute_tool', 'run:parent', []);
+    $recorder->start('run:sub', 'invoke_agent', 'tool:sub', []);
+    $recorder->end('run:sub');
+
+    expect($ended)->toBe([]);
+
+    $recorder->end('tool:sub');
+    $recorder->end('run:parent');
+
+    expect($ended)->toBe(['run:parent']);
+});
+
 it('L12: runs under 1,000 spans each never hit the cap in a console process, the held run is sent when the buffer is full', function (int $runs, int $size) {
     $transport = $this->captureNeutralSpans();
     Diagnostics::reset();
