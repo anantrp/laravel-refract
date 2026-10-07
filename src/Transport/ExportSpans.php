@@ -31,6 +31,13 @@ class ExportSpans implements ShouldQueue
     use InteractsWithQueue;
 
     /**
+     * Never wait for the app's database transactions: a queue connection
+     * with after_commit would hold the job until they commit, and drop it
+     * on a rollback. Laravel reads this before the connection's setting.
+     */
+    public bool $afterCommit = false;
+
+    /**
      * The number of times the batch is tried.
      */
     public int $tries = 4;

@@ -3,7 +3,7 @@
 namespace Anantrp\Refract\Contracts;
 
 /**
- * An exporter that can say how long the destination asked it to wait.
+ * An exporter, or a transport that sends now, that can say how long the destination asked it to wait.
  *
  * It is read next to the ExportResult, which is an enum and cannot carry the time.
  */

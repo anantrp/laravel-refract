@@ -57,6 +57,16 @@ abstract class TestCase extends Orchestra
     }
 
     /**
+     * Replace the given service before the providers boot, from the next app refresh on.
+     *
+     * @param  Closure(mixed, Application): mixed  $extender
+     */
+    protected function extendBeforeBoot(string $abstract, Closure $extender): void
+    {
+        $this->extenders[$abstract] = $extender;
+    }
+
+    /**
      * Get the SQLite file the tests use. It outlives an app refresh inside a test, unlike :memory:.
      *
      * Each process has its own file, so parallel and concurrent runs never

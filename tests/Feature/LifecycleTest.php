@@ -103,21 +103,21 @@ function batches(): array
 }
 
 /**
- * Use the database queue on the test database, with an empty jobs table.
+ * Use the database queue on the given database connection (the test database by default), with an empty jobs table.
  */
-function useDatabaseQueue(): void
+function useDatabaseQueue(string $connection = 'testing', bool $afterCommit = false): void
 {
     config([
         'queue.default' => 'database',
         'queue.connections.database' => [
-            'driver' => 'database', 'connection' => 'testing', 'table' => 'jobs',
-            'queue' => 'default', 'retry_after' => 90, 'after_commit' => false,
+            'driver' => 'database', 'connection' => $connection, 'table' => 'jobs',
+            'queue' => 'default', 'retry_after' => 90, 'after_commit' => $afterCommit,
         ],
         'queue.failed.driver' => 'null',
     ]);
 
-    Schema::dropIfExists('jobs');
-    Schema::create('jobs', function (Blueprint $table) {
+    Schema::connection($connection)->dropIfExists('jobs');
+    Schema::connection($connection)->create('jobs', function (Blueprint $table) {
         $table->id();
         $table->string('queue')->index();
         $table->longText('payload');
@@ -957,4 +957,336 @@ it('L18: a run that failed over keeps its failover state through a partial send'
         ->and(array_column($kept, 'status'))->toBe(['error', 'ok', 'ok'])
         ->and($kept[2]['call']['provider'])->toBe('anthropic')
         ->and(array_column($kept[2]['events'], 'kind'))->toBe(['failover']);
+});
+
+/**
+ * Get every span of the requests the destination took (a 2xx answer), in send order.
+ *
+ * @return list<array<string, mixed>>
+ */
+function deliveredSpans(): array
+{
+    $spans = [];
+
+    foreach (Http::recorded() as [$request, $response]) {
+        if ($response !== null && $response->successful()) {
+            array_push($spans, ...Otlp::data($request)['resourceSpans'][0]['scopeSpans'][0]['spans']);
+        }
+    }
+
+    return $spans;
+}
+
+/**
+ * Work the database queue until it is empty, the way a worker does, at most the given number of jobs.
+ */
+function workAllJobs(int $most = 20): void
+{
+    for ($i = 0; $i < $most && DB::table('jobs')->count() > 0; $i++) {
+        workNextJob();
+    }
+}
+
+it('L19: an app rollback does not lose the spans a command sends while it runs, transport queue on the app database queue', function (bool $rollBack) {
+    $this->refreshApplicationWithConfig(lifecycleConfig('queue'));
+    Http::fake();
+    useDatabaseQueue();
+    Diagnostics::reset();
+    Log::swap($log = new WarningLog);
+    withConsoleEvents();
+
+    Artisan::command('refract-test:many', function () use ($rollBack) {
+        try {
+            DB::transaction(function () use ($rollBack) {
+                for ($i = 0; $i < 300; $i++) {
+                    runTimeAgent();
+                }
+
+                if ($rollBack) {
+                    throw new RuntimeException('The app rolls back.');
+                }
+            });
+        } catch (RuntimeException) {
+            //
+        }
+    });
+
+    Artisan::call('refract-test:many');
+
+    workAllJobs();
+
+    $spans = Otlp::spans();
+
+    expect($spans)->toHaveCount(1_200)
+        ->and(array_unique(array_column($spans, 'spanId')))->toHaveCount(1_200)
+        ->and(DB::table('jobs')->count())->toBe(0)
+        ->and($log->warnings)->toBe([]);
+})->with(['rolled back' => true, 'committed' => false]);
+
+it('L19: a command still sends through a redis queue while it runs', function () {
+    $this->refreshApplicationWithConfig(lifecycleConfig('queue'));
+    Http::fake();
+    Queue::fake();
+    useQueueDriver('redis');
+    withConsoleEvents();
+
+    $pushedBeforeEnd = 0;
+
+    Artisan::command('refract-test:many', function () use (&$pushedBeforeEnd) {
+        for ($i = 0; $i < 300; $i++) {
+            runTimeAgent();
+        }
+
+        $pushedBeforeEnd = Queue::pushed(ExportSpans::class)->count();
+    });
+
+    Artisan::call('refract-test:many');
+
+    expect($pushedBeforeEnd)->toBeGreaterThanOrEqual(2);
+    Http::assertNothingSent();
+});
+
+it('L20: a queue connection with after_commit pushes the export job at once, and an app rollback does not drop it', function () {
+    $this->refreshApplicationWithConfig(lifecycleConfig('queue', [
+        'database.connections.refract-queue' => ['driver' => 'sqlite', 'database' => ':memory:', 'prefix' => ''],
+    ]));
+    Http::fake();
+    useDatabaseQueue('refract-queue', afterCommit: true);
+    $jobs = fn () => DB::connection('refract-queue')->table('jobs')->count();
+
+    runTimeAgent();
+
+    $inTransaction = null;
+
+    try {
+        DB::transaction(function () use ($jobs, &$inTransaction) {
+            app(Recorder::class)->flush();
+
+            $inTransaction = $jobs();
+
+            throw new RuntimeException('The app rolls back.');
+        });
+    } catch (RuntimeException) {
+        //
+    }
+
+    expect($inTransaction)->toBe(1)
+        ->and($jobs())->toBe(1)
+        ->and((new ExportSpans(''))->afterCommit)->toBeFalse();
+
+    app('queue.worker')->runNextJob('database', 'default', new WorkerOptions(sleep: 0));
+
+    Http::assertSentCount(1);
+    expect(batches()[0])->toHaveCount(4)
+        ->and($jobs())->toBe(0);
+});
+
+/**
+ * Recreate the application with a recorder whose clocks the test sets, and record warnings.
+ *
+ * @param  array<string, mixed>  $config
+ */
+function bootClocked(string $transport, array $config = []): WarningLog
+{
+    test()->extendBeforeBoot(Recorder::class, fn (Recorder $recorder, $app) => new ClockRecorder($app));
+    test()->refreshApplicationWithConfig(lifecycleConfig($transport, $config));
+    app(Recorder::class)->wallNow = 1_790_000_000_000_000_000;
+    Diagnostics::reset();
+    Log::swap($log = new WarningLog);
+    withConsoleEvents();
+
+    return $log;
+}
+
+it('L21: a send while a command runs that the destination cannot take now keeps the spans, waits 5 s, then sends each span once', function () {
+    $log = bootClocked('sync');
+    Http::fakeSequence()->push('', 503)->whenEmpty(Http::response('', 200));
+    $recorder = app(Recorder::class);
+    $second = 1_000_000_000;
+    $sent = [];
+
+    Artisan::command('refract-test:many', function () use ($recorder, $second, &$sent) {
+        // One run a second: the run at 5 s sends the 4 runs before it, and the destination answers 503.
+        for ($i = 0; $i < 5; $i++) {
+            $recorder->monotonicNow += $second;
+            runTimeAgent();
+        }
+
+        $sent[] = count(Http::recorded());
+
+        // Over 500 finished spans at once, but nothing is sent while the 5 s backoff lasts.
+        for ($i = 0; $i < 130; $i++) {
+            runTimeAgent();
+        }
+
+        $recorder->monotonicNow += 5 * $second - 1;
+        runTimeAgent();
+
+        $sent[] = count(Http::recorded());
+
+        $recorder->monotonicNow += 1;
+        runTimeAgent();
+
+        $sent[] = count(Http::recorded());
+    });
+
+    Artisan::call('refract-test:many');
+
+    $spans = deliveredSpans();
+
+    expect($sent)->toBe([1, 1, 2])
+        ->and(Http::recorded())->toHaveCount(3)
+        ->and($spans)->toHaveCount(4 * 137)
+        ->and(array_unique(array_column($spans, 'spanId')))->toHaveCount(4 * 137)
+        ->and(array_map(fn (array $span) => Otlp::attributes($span)['laravel.ai.abandoned'] ?? false, $spans))->not->toContain(true)
+        ->and($log->warnings)->toHaveCount(1)
+        ->and($log->warnings[0])->toContain('tried again')
+        ->and($log->warnings[0])->not->toContain('dropped');
+});
+
+it('L21: kept spans keep the wall clock times of their first send', function () {
+    // The OTLP destination sends times as they are (Langfuse moves tied start times apart).
+    bootClocked('sync', ['refract.destination' => 'otlp', 'refract.destinations.otlp.endpoint' => 'https://otlp.test/v1/traces']);
+    Http::fakeSequence()->push('', 503)->whenEmpty(Http::response('', 200));
+    $recorder = app(Recorder::class);
+    $second = 1_000_000_000;
+
+    // Run 1 from 1 s to 1 s; the wall clock reads 1,790,000,000 s at 5 s.
+    $recorder->monotonicNow = $second;
+    runTimeAgent();
+    $recorder->monotonicNow = 5 * $second;
+    runTimeAgent();
+
+    // 10 s later the wall clock was set 7 s ahead (NTP): the kept spans keep their first times.
+    $recorder->monotonicNow = 15 * $second;
+    $recorder->wallNow += 17 * $second;
+    runTimeAgent();
+    $recorder->flush();
+
+    $first = array_values(array_filter(deliveredSpans(), fn (array $span) => str_starts_with($span['name'], 'invoke_agent')))[0];
+
+    expect($first['startTimeUnixNano'])->toBe((string) (1_790_000_000_000_000_000 - 4 * $second));
+});
+
+it('L21: a 429 with Retry-After 30 while a command runs delays the next send 30 s', function () {
+    $log = bootClocked('sync');
+    Http::fakeSequence()->push('', 429, ['Retry-After' => '30'])->whenEmpty(Http::response('', 200));
+    $recorder = app(Recorder::class);
+    $counts = [];
+
+    Artisan::command('refract-test:many', function () use ($recorder, &$counts) {
+        for ($t = 1; $t <= 40; $t++) {
+            $recorder->monotonicNow += 1_000_000_000;
+            runTimeAgent();
+            $counts[$t] = count(Http::recorded());
+        }
+    });
+
+    Artisan::call('refract-test:many');
+
+    $spans = deliveredSpans();
+
+    expect($counts[5])->toBe(1)
+        ->and($counts[34])->toBe(1)
+        ->and($counts[35])->toBe(2)
+        ->and($spans)->toHaveCount(160)
+        ->and(array_unique(array_column($spans, 'spanId')))->toHaveCount(160)
+        ->and($log->warnings)->toHaveCount(1)
+        ->and($log->warnings[0])->toContain('tried again');
+});
+
+it('L21: a send while a command runs that the destination rejects is dropped with its warning, not kept', function () {
+    $log = bootClocked('sync');
+    Http::fakeSequence()->push('bad', 400)->whenEmpty(Http::response('', 200));
+    $recorder = app(Recorder::class);
+
+    Artisan::command('refract-test:many', function () use ($recorder) {
+        for ($t = 1; $t <= 10; $t++) {
+            $recorder->monotonicNow += 1_000_000_000;
+            runTimeAgent();
+        }
+    });
+
+    Artisan::call('refract-test:many');
+
+    $spans = deliveredSpans();
+
+    expect($spans)->toHaveCount(40 - 16)
+        ->and(array_unique(array_column($spans, 'spanId')))->toHaveCount(40 - 16)
+        ->and($log->warnings)->toHaveCount(1)
+        ->and($log->warnings[0])->toContain('HTTP 400');
+});
+
+it('L21: when one part of a send gets through and the next cannot, only the second part is kept and sent again, once', function () {
+    $log = bootClocked('sync');
+    Http::fakeSequence()->push('', 200)->push('', 503)->whenEmpty(Http::response('', 200));
+    $recorder = app(Recorder::class);
+    $second = 1_000_000_000;
+
+    // Each run is about 2.5 MB of OTLP JSON: two runs do not fit one 4 MB part.
+    $run = function (string $name) use ($recorder) {
+        $recorder->start("run:{$name}", 'invoke_agent', null, ['agent' => $name]);
+        $recorder->start("tool:{$name}", 'execute_tool', "run:{$name}", ['agent' => $name], content: ['result' => bin2hex(random_bytes(1_250_000))]);
+        $recorder->end("tool:{$name}");
+        $recorder->end("run:{$name}");
+    };
+
+    $run('A');
+    $run('B');
+    $recorder->monotonicNow += 5 * $second;
+    $run('C');
+
+    expect(Http::recorded())->toHaveCount(2);
+
+    $recorder->monotonicNow += 5 * $second;
+    $run('D');
+    $recorder->flush();
+
+    $spans = deliveredSpans();
+    $runs = array_values(array_filter($spans, fn (array $span) => str_starts_with($span['name'], 'invoke_agent')));
+
+    // A in part 1 (200), B in part 2 (503), then B and C (200, 200), then D at the flush.
+    expect(Http::recorded())->toHaveCount(5)
+        ->and($spans)->toHaveCount(8)
+        ->and(array_unique(array_column($spans, 'spanId')))->toHaveCount(8)
+        ->and(count($runs))->toBe(4)
+        ->and($log->warnings)->toHaveCount(1)
+        ->and($log->warnings[0])->toContain('tried again');
+});
+
+it('L21: kept spans go out with the final batch at the flush point, in one queue job that is retried', function () {
+    $log = bootClocked('queue');
+    useDatabaseQueue();
+    $this->freezeTime();
+    Http::fakeSequence()->push('', 503)->push('', 503)->whenEmpty(Http::response('', 200));
+    $recorder = app(Recorder::class);
+
+    runTimeAgent();
+    $recorder->monotonicNow += 5_000_000_000;
+    runTimeAgent();
+
+    // The database queue is never written while the process runs: the send was exported here, and kept.
+    expect(Http::recorded())->toHaveCount(1)
+        ->and(DB::table('jobs')->count())->toBe(0);
+
+    $recorder->flush();
+
+    expect(DB::table('jobs')->count())->toBe(1);
+
+    workNextJob();
+
+    expect(DB::table('jobs')->count())->toBe(1);
+
+    $this->travel(10)->seconds();
+    workNextJob();
+
+    $spans = deliveredSpans();
+
+    expect(Http::recorded())->toHaveCount(3)
+        ->and(batches()[2])->toHaveCount(8)
+        ->and($spans)->toHaveCount(8)
+        ->and(array_unique(array_column($spans, 'spanId')))->toHaveCount(8)
+        ->and(DB::table('jobs')->count())->toBe(0)
+        ->and($log->warnings)->toHaveCount(1)
+        ->and($log->warnings[0])->toContain('tried again');
 });

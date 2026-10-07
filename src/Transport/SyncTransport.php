@@ -5,6 +5,8 @@ namespace Anantrp\Refract\Transport;
 use Anantrp\Refract\Contracts\Exporter;
 use Anantrp\Refract\Contracts\ExportResult;
 use Anantrp\Refract\Contracts\Parts;
+use Anantrp\Refract\Contracts\RetryAfter;
+use Anantrp\Refract\Contracts\SendNow;
 use Anantrp\Refract\Contracts\Transport;
 use Anantrp\Refract\Support\Diagnostics;
 use Throwable;
@@ -17,11 +19,19 @@ use Throwable;
  * has already been warned about by the exporter. An exporter that throws
  * drops the batch with one warning.
  *
+ * A send while the process keeps going (sendNow) does not drop a part the
+ * destination could not take now: it gives it back to be tried again later.
+ *
  * A batch the exporter splits into parts is sent one part after another.
  * Each failed part gives its own warning, and the later parts are still sent.
  */
-class SyncTransport implements Transport
+class SyncTransport implements SendNow, Transport
 {
+    /**
+     * The seconds the destination asked to wait after the last part given back, or null.
+     */
+    protected ?int $retryAfter = null;
+
     /**
      * Create a new sync transport instance.
      */
@@ -32,6 +42,24 @@ class SyncTransport implements Transport
         foreach ($this->parts($spans) as $part) {
             $this->export($part);
         }
+    }
+
+    public function sendNow(array $spans): array
+    {
+        $this->retryAfter = null;
+
+        $kept = [];
+
+        foreach ($this->parts($spans) as $part) {
+            array_push($kept, ...$this->exportNow($part));
+        }
+
+        return $kept;
+    }
+
+    public function retryAfter(): ?int
+    {
+        return $this->retryAfter;
     }
 
     /**
@@ -56,16 +84,43 @@ class SyncTransport implements Transport
      */
     public function export(array $spans): void
     {
+        if ($this->result($spans) === ExportResult::Retryable) {
+            Diagnostics::warn('export.unavailable', 'Spans could not be exported: the destination could not be reached or answered 408, 429 or 5xx. The batch was dropped (spans exported in-process are not retried).');
+        }
+    }
+
+    /**
+     * Export one part in this process while it keeps going, and give the part back when the destination could not take it now.
+     *
+     * @param  list<array<string, mixed>>  $spans
+     * @return list<array<string, mixed>>
+     */
+    public function exportNow(array $spans): array
+    {
+        if ($this->result($spans) !== ExportResult::Retryable) {
+            return [];
+        }
+
+        $this->retryAfter = $this->exporter instanceof RetryAfter ? $this->exporter->retryAfter() : null;
+
+        Diagnostics::warn('export.kept', 'Spans could not be exported while the process runs: the destination could not be reached or answered 408, 429 or 5xx. They are kept and tried again later.');
+
+        return $spans;
+    }
+
+    /**
+     * Export one part, or get null when the exporter throws, which drops the part with one warning.
+     *
+     * @param  list<array<string, mixed>>  $spans
+     */
+    protected function result(array $spans): ?ExportResult
+    {
         try {
-            $result = $this->exporter->export($spans);
+            return $this->exporter->export($spans);
         } catch (Throwable $e) {
             Diagnostics::warn('export.error', 'Spans could not be exported ('.$e::class.'). The batch was dropped.');
 
-            return;
-        }
-
-        if ($result === ExportResult::Retryable) {
-            Diagnostics::warn('export.unavailable', 'Spans could not be exported: the destination could not be reached or answered 408, 429 or 5xx. The batch was dropped (spans exported in-process are not retried).');
+            return null;
         }
     }
 }
