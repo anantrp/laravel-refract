@@ -90,3 +90,20 @@ arch('A5: no package file but config/refract.php calls env()', function () {
 
     expect($calling)->toBe(['config/refract.php']);
 });
+
+arch('A6: src never uses open-telemetry/sem-conv, a dev-only package (rule 11)')
+    ->expect('Anantrp\Refract')
+    ->not->toUse('OpenTelemetry\SemConv');
+
+arch('A6: no package file names OpenTelemetry\SemConv, and composer.json requires sem-conv for dev only', function () {
+    $naming = array_values(array_filter(
+        packageFiles(['src', 'config']),
+        fn (string $file) => str_contains((string) file_get_contents(dirname(__DIR__, 2).'/'.$file), 'SemConv'),
+    ));
+
+    $composer = json_decode((string) file_get_contents(dirname(__DIR__, 2).'/composer.json'), true);
+
+    expect($naming)->toBe([])
+        ->and($composer['require'])->not->toHaveKey('open-telemetry/sem-conv')
+        ->and($composer['require-dev'])->toHaveKey('open-telemetry/sem-conv');
+});

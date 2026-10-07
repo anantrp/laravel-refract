@@ -26,6 +26,7 @@
     "require-dev": {
         "larastan/larastan": "^3.0",
         "laravel/pint": "^1.26",
+        "open-telemetry/sem-conv": "^1.44",
         "orchestra/testbench": "^10.6|^11.0",
         "pestphp/pest": "^3.0|^4.0",
         "pestphp/pest-plugin-laravel": "^3.0|^4.0"
