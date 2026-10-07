@@ -192,7 +192,7 @@ Every export is gzipped and sent with `Content-Encoding: gzip`, to `otlp` and to
 
 A batch is sent in parts of at most 4 MB of OTLP JSON, counted before gzip, so a destination with a body size limit does not refuse it. A big batch usually comes from content capture. Parts are cut between run trees (a run and every span under it). A run tree is cut only when it alone is over 4 MB. A single span over 4 MB is sent alone and one warning is logged: the destination may refuse it.
 
-With `sync`, the parts are sent one after another. A failed part gives its own warning and does not stop the next parts. With `queue`, each part is its own job, so a retry never sends a part again that already got through. A job must also fit in one queue message (256 KB after gzip, which is often only 0.5 to 1 MB of JSON). A bigger part is exported with `sync` instead, after the response, with one warning and no retry. With content capture on, this is common.
+With `sync`, the parts are sent one after another. A failed part does not stop the next parts. Failures warn once per kind, so 3 parts that fail the same way give one warning. With `queue`, each part is its own job, so a retry never sends a part again that already got through. A job must also fit in one queue message (256 KB after gzip and base64, which is often only 0.5 to 1 MB of JSON). A bigger part is exported with `sync` instead, after the response, with one warning and no retry. With content capture on, this is common.
 
 ## Transports
 
@@ -200,7 +200,7 @@ The transport decides when and in which process traces are exported. No transpor
 
 | Transport | What it does |
 | --- | --- |
-| `sync` | Exports in the same process: after the response is sent, at the end of a queued job, or at the end of a console command. No retry. |
+| `sync` | Exports in the same process: after the response is sent, at the end of a queued job, or at the end of a console command. No retry at that point. A send while a console process runs that cannot reach the destination keeps its spans and tries again later (see [`queue`](#queue)). |
 | `queue` | Pushes one job per batch, or per part of a big batch (see [Request Size](#request-size)). A queue worker exports it. |
 | `null` | Discards the spans. |
 
@@ -211,10 +211,13 @@ A sync-driver job or an `Artisan::call()` inside a web request does not export o
 The job goes to your default queue connection and its default queue.
 
 - A job is pushed only when the connection's driver is `redis`, `database`, `sqs` or `beanstalkd`. Every other driver (`sync`, `deferred`, `background`, `failover`, custom) exports with `sync` instead.
-- The batch is gzipped. When it, or one part of it, is still too big for a queue message (256 KB minus room for the job envelope), that batch or part is exported with `sync` instead and one warning is logged.
+- The batch is gzipped. When it, or one part of it, is still too big for a queue message (256 KB after gzip and base64, minus room for the job envelope), that batch or part is exported with `sync` instead and one warning is logged.
 - When the push fails, the batch is exported with `sync` and one warning is logged.
 - The job tries 4 times when the destination cannot be reached or answers 408, 429 or 5xx. It waits 10 seconds before the second try, 60 seconds before the third and 300 seconds before the fourth. So a batch survives an outage of about 6 minutes.
-- On a 429 or 503 with `Retry-After` in whole seconds, the job waits that long instead, at most 300 seconds. An HTTP date, a negative number or text is ignored. `sync` never waits or retries.
+- On a 429 or 503 with `Retry-After` in whole seconds, the job waits that long when it is longer than its normal wait, at most 300 seconds. A short `Retry-After` never makes the job try sooner. An HTTP date, a negative number or text is ignored.
+- The job is never tied to your database transactions. It is pushed at once even on a connection with `after_commit`, and a rollback in your app does not remove it. The spans record what already happened: the model answered and the tools ran.
+- While a command, queue worker or tinker runs, Refract never writes a job to a `database` queue. It exports those sends in the process instead. Your app's transactions can then never hold or roll back Refract's work. The send at the end of the request, job or command uses the queue as usual.
+- A send while a console process runs (with `sync`, or with `queue` on `database`) that cannot reach the destination, or gets 408, 429 or 5xx, keeps its spans. Refract tries them again at a later send, at least 5 seconds later (or after `Retry-After`, at most 300 seconds). A full buffer always tries at once. What is still not sent at the end of the process goes out with the final batch.
 - When the job gives up, it logs one warning. It does not throw, so nothing goes to your error tracker or the `failed_jobs` table.
 
 ### Export Failures
@@ -223,7 +226,7 @@ The job goes to your default queue connection and its default queue.
 | --- | --- | --- |
 | 2xx | Done | Done |
 | 2xx whose `partialSuccess` refuses spans or has a message | Done, one warning | Done, one warning |
-| Network error, 408, 429, 5xx | Dropped, one warning | Retried (4 tries, 10 s, 60 s then 300 s apart, or the `Retry-After` seconds of a 429 or 503, at most 300 s), then one warning |
+| Network error, 408, 429, 5xx | During a console process: kept and tried again later, one warning. At the end: dropped, one warning | Retried (4 tries, 10 s, 60 s then 300 s apart, or longer when a 429 or 503 asks with `Retry-After`, at most 300 s), then one warning |
 | Any other status (3xx, 400, 401, 403, 404, ...) | Dropped, one warning | Dropped, one warning |
 
 A rejected batch's warning names the status and the first 200 characters of the response body. Credentials the destination echoes in the body are masked as `[removed]`: values under key names that contain `key`, `token`, `secret`, `auth`, `password`, `passwd`, `credential` or `cookie` (in JSON, in header lines and in `key=value` pairs), and `Bearer` and `Basic` tokens. Other text, such as a plain error line, is kept.
@@ -357,7 +360,7 @@ Context::add('trigger', 'schedule');
 - **Refract never breaks your app.** Every listener and lifecycle hook is guarded. A failure inside Refract logs one warning and the run goes on. Your app's own exceptions pass through unchanged.
 - **No extra calls.** Refract never calls agent methods that run your code (`instructions()`, `tools()`) and runs no queries. A run is named without calling the agent's `name()`. To name a tool span, Refract reads the tool name the way the SDK does, which calls `name()` once per tool call on a tool or an agent used as a tool, the same call the SDK makes.
 - **Warnings.** Each warning is logged at the `warning` level, prefixed `[refract]`, once per kind per process. After 10 different warnings, Refract stays silent.
-- **Bounded memory.** The buffer holds at most 1,000 spans per request, job or command. Past that, new spans are dropped and one warning is logged. In a command, queue worker or tinker, finished runs are sent while the process keeps going: when they hold 500 spans or 5 s after the last send (checked when a run ends), and every time the buffer is full. So in a console process, runs that end lose no spans unless one run alone has more than 1,000. A run is sent only after it ends, and there is no background timer: a finished run waits for the end of the next run, a full buffer, or the end of the process. A stream the app stopped reading stays open until the end of the process, so many stopped streams can still fill the buffer. A web request sends once, after the response.
+- **Bounded memory.** The buffer holds at most 1,000 spans per request, job or command. Past that, new spans are dropped and one warning is logged. In a command, queue worker or tinker, finished runs are sent while the process keeps going: when they hold 500 spans or 5 s after the last send (checked when a run ends), and every time the buffer is full. So in a console process, runs that end lose no spans unless one run alone has more than 1,000. A run is sent only after it ends, and there is no background timer: a finished run waits for the end of the next run, a full buffer, or the end of the process. Spans kept after a failed send also count. If the destination fails again while the buffer is full of kept spans, new spans are dropped. A stream the app stopped reading stays open until the end of the process, so many stopped streams can still fill the buffer. A web request sends once, after the response.
 
 ## Known Limitations
 

@@ -23,7 +23,7 @@ use Throwable;
  * destination could not take now: it gives it back to be tried again later.
  *
  * A batch the exporter splits into parts is sent one part after another.
- * Each failed part gives its own warning, and the later parts are still sent.
+ * A failed part does not stop the later parts. Failures warn once per kind (rule 7).
  */
 class SyncTransport implements SendNow, Transport
 {
