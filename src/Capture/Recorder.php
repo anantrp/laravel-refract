@@ -85,7 +85,7 @@ class Recorder
     protected array $kept = [];
 
     /**
-     * The monotonic time before which no send is made while the process runs, after a send gave spans back.
+     * The monotonic time before which the run-end send waits, after a send gave spans back.
      */
     protected ?int $waitUntil = null;
 
@@ -432,15 +432,13 @@ class Recorder
      * Hand every finished span tree to the transport now, the held run's too, leaving every open span and the state kept between flushes alone.
      *
      * Used when the buffer is full: by then the SDK has added its events to
-     * the run that ended last, since a new span is starting. Nothing is
-     * sent while waiting after a send that gave spans back.
+     * the run that ended last, since a new span is starting. It sends even
+     * while waiting after a send that gave spans back: else new spans are
+     * dropped. A failed try leaves the buffer full of kept spans, so only a
+     * run open at that moment can end and try once more.
      */
     public function flushAllFinished(): void
     {
-        if ($this->waiting()) {
-            return;
-        }
-
         $this->send($this->sendablePositions(null));
     }
 
@@ -453,7 +451,7 @@ class Recorder
      * PARTIAL_INTERVAL passed since the last send. The tree of the given
      * span is held for the next send, as the SDK adds events to a run right
      * after it ends. Nothing is sent while waiting after a send that gave
-     * spans back.
+     * spans back (a full buffer still sends, see flushAllFinished()).
      */
     public function flushFinished(string $heldKey): void
     {
@@ -477,7 +475,7 @@ class Recorder
     }
 
     /**
-     * Determine if no send is made yet while the process runs, after a send gave spans back.
+     * Determine if the run-end send waits, after a send gave spans back.
      */
     protected function waiting(): bool
     {
@@ -488,8 +486,9 @@ class Recorder
      * Hand the kept spans and the finished spans at the given positions to the transport and forget them.
      *
      * A transport that sends now may give spans back: they are kept for
-     * the next send, which waits KEPT_WAIT seconds, or the seconds the
-     * destination asked for, at most KEPT_MAX_WAIT.
+     * the next send. The run-end send then waits KEPT_WAIT seconds, or the
+     * seconds the destination asked for, at most KEPT_MAX_WAIT. A send that
+     * gives nothing back ends the wait.
      *
      * @param  list<int>  $positions
      */
@@ -522,10 +521,14 @@ class Recorder
 
         $this->kept = $transport->sendNow($batch);
 
-        if ($this->kept !== []) {
-            $wait = min(self::KEPT_MAX_WAIT, max(self::KEPT_WAIT, $transport->retryAfter() ?? 0));
-            $this->waitUntil = $this->monotonic() + $wait * 1_000_000_000;
+        if ($this->kept === []) {
+            $this->waitUntil = null;
+
+            return;
         }
+
+        $wait = min(self::KEPT_MAX_WAIT, max(self::KEPT_WAIT, $transport->retryAfter() ?? 0));
+        $this->waitUntil = $this->monotonic() + $wait * 1_000_000_000;
     }
 
     /**

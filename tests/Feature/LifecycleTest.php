@@ -1290,3 +1290,47 @@ it('L21: kept spans go out with the final batch at the flush point, in one queue
         ->and($log->warnings)->toHaveCount(1)
         ->and($log->warnings[0])->toContain('tried again');
 });
+
+it('L21: fast runs that fill the buffer while a failed send waits still send every span once, the full buffer does not wait', function () {
+    $log = bootClocked('sync');
+    Http::fakeSequence()->push('', 503)->whenEmpty(Http::response('', 200));
+
+    // The clock does not move: the run-end send waits for the whole command.
+    Artisan::command('refract-test:many', function () {
+        for ($i = 0; $i < 400; $i++) {
+            runTimeAgent();
+        }
+    });
+
+    Artisan::call('refract-test:many');
+
+    $spans = deliveredSpans();
+
+    expect($spans)->toHaveCount(1_600)
+        ->and(array_unique(array_column($spans, 'spanId')))->toHaveCount(1_600)
+        ->and($log->warnings)->toHaveCount(1)
+        ->and($log->warnings[0])->toContain('tried again');
+});
+
+it('L21: while the destination stays down, a full buffer tries at most twice before the flush point', function () {
+    $log = bootClocked('sync');
+    Http::fake(fn () => Http::response('', 503));
+    $beforeEnd = 0;
+
+    // One run-end send (at 500 spans), then the full buffer tries. A failed
+    // try leaves the buffer full of kept spans, so no new span gets in and
+    // only a run open at that moment can end and try once more.
+    Artisan::command('refract-test:many', function () use (&$beforeEnd) {
+        for ($i = 0; $i < 400; $i++) {
+            runTimeAgent();
+        }
+
+        $beforeEnd = count(Http::recorded());
+    });
+
+    Artisan::call('refract-test:many');
+
+    expect($beforeEnd)->toBeLessThanOrEqual(3)
+        ->and(Http::recorded())->toHaveCount($beforeEnd + 1)
+        ->and(deliveredSpans())->toBe([]);
+});
