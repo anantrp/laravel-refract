@@ -419,6 +419,53 @@ it('R8: a run that throws closes its open children as abandoned before it ends',
     }
 });
 
+it('R8: a failed run closes its open children deepest first, a re-started key too, so no abandoned child ends after its parent', function () {
+    // A monotonic clock that moves on every read, so each end gets its own time.
+    $this->extendBeforeBoot(Recorder::class, fn (Recorder $recorder, $app) => new class($app) extends ClockRecorder
+    {
+        protected function monotonic(): int
+        {
+            return $this->monotonicNow += 1_000;
+        }
+    });
+    $transport = $this->captureNeutralSpans();
+    $recorder = app(Recorder::class);
+
+    $recorder->start('other', 'invoke_agent', null, []);
+    $recorder->start('run', 'invoke_agent', null, []);
+    $recorder->start('tool', 'execute_tool', 'run', []);
+    $recorder->start('sub', 'invoke_agent', 'tool', []);
+    // The same key again: the first tool and its sub-agent close, the new tool goes after them.
+    $recorder->start('tool', 'execute_tool', 'run', []);
+    $recorder->start('sub', 'invoke_agent', 'tool', []);
+    $recorder->start('sub:step', 'chat', 'sub', []);
+    $recorder->start('sub:tool', 'execute_tool', 'sub', []);
+    $recorder->start('step', 'chat', 'run', []);
+
+    $recorder->abandonChildren('run');
+    $recorder->end('run', 'error', RuntimeException::class);
+
+    expect($recorder->isOpen('other'))->toBeTrue();
+
+    $recorder->flush();
+
+    $spans = array_column($transport->spans, null, 'span_id');
+    $run = array_values(array_filter($spans, fn (array $span) => $span['status'] === 'error'))[0];
+
+    expect($spans)->toHaveCount(9)
+        ->and(array_count_values(array_column($spans, 'status')))->toBe(['abandoned' => 8, 'error' => 1]);
+
+    foreach ($spans as $span) {
+        if ($span['parent_span_id'] !== null) {
+            expect($span['end'])->toBeLessThanOrEqual($spans[$span['parent_span_id']]['end']);
+        }
+
+        if ($span['span_id'] !== $run['span_id'] && $span['trace_id'] === $run['trace_id']) {
+            expect($span['end'])->toBeLessThan($run['end']);
+        }
+    }
+});
+
 it('R13: a failed run and its failed step have error.type set to the exception class', function () {
     TimeAgent::fake(fn () => throw new RuntimeException('secret detail from the provider'));
 

@@ -388,22 +388,22 @@ class Recorder
         }
 
         $ids = [$span['span_id'] => true];
-        $keys = [];
 
-        do {
-            $found = false;
-
-            foreach ($this->open as $openKey => $open) {
-                if ($openKey !== $key && ! in_array($openKey, $keys, true) && isset($ids[$open['parent_span_id'] ?? ''])) {
-                    $ids[$open['span_id']] = true;
-                    $keys[] = $openKey;
-                    $found = true;
-                }
+        // A span starts after its parent (a re-started key goes in again at
+        // the end), so one pass in start order finds every span under it.
+        foreach ($this->open as $open) {
+            if (isset($ids[$open['parent_span_id'] ?? ''])) {
+                $ids[$open['span_id']] = true;
             }
-        } while ($found);
+        }
 
-        foreach (array_reverse($keys) as $openKey) {
-            $this->end($openKey, 'abandoned');
+        unset($ids[$span['span_id']]);
+
+        // Latest start first, as in flush(): children close first.
+        foreach (array_reverse(array_keys($this->open)) as $openKey) {
+            if (isset($ids[$this->open[$openKey]['span_id']])) {
+                $this->end($openKey, 'abandoned');
+            }
         }
     }
 
