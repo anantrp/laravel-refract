@@ -12,6 +12,7 @@ use Anantrp\Refract\Tests\Support\Ai\RecordingMask;
 use Anantrp\Refract\Tests\Support\Ai\ThrowingMask;
 use Anantrp\Refract\Tests\Support\Ai\TrapImage;
 use Anantrp\Refract\Tests\Support\Ai\TrapUpload;
+use Anantrp\Refract\Tests\Support\ClockRecorder;
 use Anantrp\Refract\Tests\Support\Otlp;
 use Anantrp\Refract\Tests\Support\WarningLog;
 use Illuminate\Contracts\Support\Arrayable;
@@ -43,6 +44,7 @@ use Laravel\Ai\Messages\AssistantMessage;
 use Laravel\Ai\Messages\Message;
 use Laravel\Ai\Messages\ToolResultMessage;
 use Laravel\Ai\Messages\UserMessage;
+use Laravel\Ai\Prompts\AgentPrompt;
 use Laravel\Ai\Providers\Provider;
 use Laravel\Ai\Responses\AddedDocumentResponse;
 use Laravel\Ai\Responses\AgentResponse;
@@ -943,4 +945,215 @@ it('P13: a tool call response in messages exported as JSON text still gets its f
         ['role' => 'assistant', 'parts' => [['type' => 'tool_call', 'id' => 'call_1', 'name' => 'NotesTool', 'arguments' => $arguments]]],
         ['role' => 'tool', 'parts' => [['type' => 'tool_call_response', 'id' => 'call_1', 'name' => 'NotesTool', 'response' => GenAiTranslator::TOOL_RESULT_REFERENCE]]],
     ]);
+});
+
+/**
+ * Fill the buffer with the given number of spans: one run and its tools.
+ */
+function fillBuffer(string $run, int $spans, bool $endRun): void
+{
+    $recorder = app(Recorder::class);
+    $recorder->start("run:{$run}", 'invoke_agent', null, ['agent' => 'Filler']);
+
+    for ($i = 1; $i < $spans; $i++) {
+        $recorder->start("tool:{$run}:{$i}", 'execute_tool', "run:{$run}", ['tool' => 'Filler']);
+        $recorder->end("tool:{$run}:{$i}");
+    }
+
+    if ($endRun) {
+        $recorder->end("run:{$run}");
+    }
+}
+
+it('P14: with capture on the content of a span dropped at the cap, or under a dropped parent, is never built, so the mask is not called for it', function (int $filler, array $seen) {
+    $this->environmentConfig = contentConfig([
+        'refract.capture.content' => true,
+        'refract.capture.mask' => RecordingMask::class,
+    ]);
+    $memory = $this->captureNeutralSpans();
+
+    Diagnostics::reset();
+    Log::swap($log = new WarningLog);
+
+    // An open run holds the buffer, so a full-buffer send frees no room.
+    fillBuffer('long', $filler, endRun: false);
+
+    NotesAgent::fakeTwoSteps();
+    $response = NotesAgent::make()->prompt('What is new?');
+
+    app(Recorder::class)->flush();
+
+    $recorded = array_values(array_filter($memory->spans, fn (array $span) => ($span['call']['agent'] ?? null) === 'NotesAgent'));
+
+    expect($response->text)->toBe('The release is on Friday.')
+        ->and(RecordingMask::$seen)->toBe($seen)
+        ->and($log->warnings)->toHaveCount(1)
+        ->and($memory->spans)->toHaveCount(1_000)
+        ->and(array_column($recorded, 'content'))->toBe($seen === [] ? [] : [[
+            'input' => [['role' => 'user', 'parts' => [['type' => 'text', 'content' => 'What is new?']]]],
+            'output' => [['role' => 'assistant', 'parts' => [['type' => 'text', 'content' => 'The release is on Friday.']]]],
+        ]]);
+})->with([
+    'the run dropped at the cap, its steps and tool under it' => [1_000, []],
+    'the run kept, its steps and tool dropped at the cap' => [999, ['What is new?', 'The release is on Friday.']],
+]);
+
+it('P14: in a console process a run that starts on a buffer full of finished runs is kept once the full-buffer send frees room, with all its content', function () {
+    $this->environmentConfig = contentConfig([
+        'refract.capture.content' => true,
+        'refract.capture.mask' => RecordingMask::class,
+    ]);
+    $memory = $this->captureNeutralSpans();
+
+    expect(app()->runningInConsole())->toBeTrue();
+
+    fillBuffer('done', 1_000, endRun: true);
+
+    NotesAgent::fakeTwoSteps();
+    NotesAgent::make()->prompt('What is new?');
+
+    expect($memory->spans)->toHaveCount(1_000);
+
+    app(Recorder::class)->flush();
+
+    [$run] = ofKind(array_slice($memory->spans, 1_000), 'invoke_agent');
+    [$first, $second] = ofKind($memory->spans, 'chat');
+    [$tool] = ofKind(array_slice($memory->spans, 1_000), 'execute_tool');
+
+    expect($memory->spans)->toHaveCount(1_004)
+        ->and($run['call']['agent'])->toBe('NotesAgent')
+        ->and($run['content']['input'][0]['parts'][0]['content'])->toBe('What is new?')
+        ->and($run['content']['output'][0]['parts'][0]['content'])->toBe('The release is on Friday.')
+        ->and($first['content']['input'][0]['parts'][0]['content'])->toBe('What is new?')
+        ->and($first['content']['output'][0]['parts'][0]['name'])->toBe('NotesTool')
+        ->and($second['content']['input'])->toHaveCount(3)
+        ->and($second['content']['output'][0]['parts'][0]['content'])->toBe('The release is on Friday.')
+        ->and($tool['content'])->toBe([
+            'arguments' => '{"topic":"release"}',
+            'result' => '{"topic":"release","note":"Ship on Friday."}',
+        ]);
+});
+
+it('P14: a mask that throws for a span kept once the full-buffer send frees room fully masks its values, as before', function () {
+    $this->environmentConfig = contentConfig([
+        'refract.capture.content' => true,
+        'refract.capture.mask' => ThrowingMask::class,
+    ]);
+    $memory = $this->captureNeutralSpans();
+
+    Diagnostics::reset();
+    Log::swap($log = new WarningLog);
+
+    fillBuffer('done', 1_000, endRun: true);
+
+    NotesAgent::fakeTwoSteps('secret topic', 'The secret answer.');
+    $response = NotesAgent::make()->prompt('Tell me the secret.');
+
+    app(Recorder::class)->flush();
+
+    $masked = Content::MASK_FAILED;
+
+    [$run] = ofKind(array_slice($memory->spans, 1_000), 'invoke_agent');
+    [$tool] = ofKind(array_slice($memory->spans, 1_000), 'execute_tool');
+
+    expect($response->text)->toBe('The secret answer.')
+        ->and($memory->spans)->toHaveCount(1_004)
+        ->and($run['content'])->toBe([
+            'input' => [['role' => 'user', 'parts' => [['type' => 'text', 'content' => $masked]]]],
+            'output' => [['role' => 'assistant', 'parts' => [['type' => 'text', 'content' => $masked]]]],
+        ])
+        ->and($tool['content'])->toBe(['arguments' => $masked, 'result' => $masked])
+        ->and(json_encode($memory->spans))->not->toContain('secret')
+        ->and($log->warnings)->toHaveCount(1)
+        ->and($log->warnings[0])->toContain(ThrowingMask::class);
+});
+
+it('P14: content that fails to build for a span still records the span, without that content, and the app is not affected', function () {
+    $this->extendBeforeBoot(Content::class, fn (Content $content, $app) => new class($app, true) extends Content
+    {
+        public function runInput(AgentPrompt $prompt): array
+        {
+            throw new RuntimeException('cannot build secret');
+        }
+
+        public function stepInput(array $messages): array
+        {
+            throw new RuntimeException('cannot build secret');
+        }
+
+        public function toolArguments(array $arguments): array
+        {
+            throw new RuntimeException('cannot build secret');
+        }
+    });
+    $this->environmentConfig = contentConfig(['refract.capture.content' => true]);
+    $memory = $this->captureNeutralSpans();
+
+    Diagnostics::reset();
+    Log::swap($log = new WarningLog);
+
+    NotesAgent::fakeTwoSteps();
+    $response = NotesAgent::make()->prompt('What is new?');
+
+    app(Recorder::class)->flush();
+
+    [$run] = ofKind($memory->spans, 'invoke_agent');
+    [$first, $second] = ofKind($memory->spans, 'chat');
+    [$tool] = ofKind($memory->spans, 'execute_tool');
+
+    expect($response->text)->toBe('The release is on Friday.')
+        ->and($memory->spans)->toHaveCount(4)
+        ->and(array_keys($run['content']))->toBe(['output'])
+        ->and(array_keys($first['content']))->toBe(['output'])
+        ->and(array_keys($second['content']))->toBe(['output'])
+        ->and(array_keys($tool['content']))->toBe(['result'])
+        ->and($log->warnings)->toHaveCount(1)
+        ->and($log->warnings[0])->toContain(RuntimeException::class)
+        ->and($log->warnings[0])->not->toContain('secret');
+});
+
+it('P14: a content closure that throws or gives no array records the span with no content, one warning, on start and end', function (Closure $content) {
+    $memory = $this->captureNeutralSpans();
+
+    Diagnostics::reset();
+    Log::swap($log = new WarningLog);
+
+    $recorder = app(Recorder::class);
+    $recorder->start('run:a', 'invoke_agent', null, ['agent' => 'A'], content: $content);
+    $recorder->end('run:a', content: ['output' => 'kept']);
+    $recorder->start('run:b', 'invoke_agent', null, ['agent' => 'B'], content: ['input' => 'kept']);
+    $recorder->end('run:b', content: $content);
+    $recorder->flush();
+
+    expect(array_column($memory->spans, 'content'))->toBe([['output' => 'kept'], ['input' => 'kept']])
+        ->and($log->warnings)->toHaveCount(1)
+        ->and($log->warnings[0])->not->toContain('secret');
+})->with([
+    'throws' => [fn () => fn () => throw new RuntimeException('secret')],
+    'gives a string' => [fn () => fn () => 'secret'],
+]);
+
+it('P14: the time to build a span\'s content counts before its start and before its end, as when it was built in the listener', function () {
+    $this->extendBeforeBoot(Recorder::class, fn (Recorder $recorder, $app) => new ClockRecorder($app));
+    $memory = $this->captureNeutralSpans();
+
+    $recorder = app(Recorder::class);
+    $second = 1_000_000_000;
+
+    $recorder->start('run:a', 'invoke_agent', null, [], content: function () use ($recorder, $second) {
+        $recorder->monotonicNow += $second;
+
+        return ['input' => 'built'];
+    });
+    $recorder->end('run:a', content: function () use ($recorder, $second) {
+        $recorder->monotonicNow += $second;
+
+        return ['output' => 'built'];
+    });
+    $recorder->flush();
+
+    [$run] = $memory->spans;
+
+    expect($run['end'] - $run['start'])->toBe($second)
+        ->and($run['content'])->toBe(['input' => 'built', 'output' => 'built']);
 });

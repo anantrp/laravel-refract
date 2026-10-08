@@ -3,6 +3,7 @@
 namespace Anantrp\Refract\Tests\Support;
 
 use Anantrp\Refract\Capture\Recorder;
+use Closure;
 use LogicException;
 
 /**
@@ -10,12 +11,12 @@ use LogicException;
  */
 class ThrowingRecorder extends Recorder
 {
-    public function start(string $key, string $kind, ?string $parentKey, array $call, array $context = [], ?string $contextFrom = null, array $content = []): void
+    public function start(string $key, string $kind, ?string $parentKey, array $call, array $context = [], ?string $contextFrom = null, array|Closure $content = []): void
     {
         throw new LogicException('Refract bug in start, SECRET');
     }
 
-    public function end(string $key, string $status = 'ok', ?string $message = null, array $call = [], array $context = [], array $content = []): void
+    public function end(string $key, string $status = 'ok', ?string $message = null, array $call = [], array $context = [], array|Closure $content = []): void
     {
         throw new LogicException('Refract bug in end, SECRET');
     }
