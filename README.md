@@ -1,5 +1,7 @@
 # Laravel Refract
 
+OpenTelemetry exports for the Laravel AI SDK with pluggable observability adapters.
+
 Refract records every [Laravel AI SDK](https://github.com/laravel/ai) agent run as OpenTelemetry spans. It sends them as OTLP JSON over HTTP to [Langfuse](https://langfuse.com) or to any OTLP backend.
 
 Install it, set a few environment variables, and you are done. There is no API to learn and no code to change.
