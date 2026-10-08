@@ -219,7 +219,7 @@ The job goes to your default queue connection and its default queue.
 - On a 429 or 503 with `Retry-After` in whole seconds, the job waits that long when it is longer than its normal wait, at most 300 seconds. A short `Retry-After` never makes the job try sooner. An HTTP date, a negative number or text is ignored.
 - The job is never tied to your database transactions. It is pushed at once even on a connection with `after_commit`, and a rollback in your app does not remove it. The spans record what already happened: the model answered and the tools ran.
 - While a command, queue worker or tinker runs, Refract never writes a job to a `database` queue. It exports those sends in the process instead, so a rollback in your app never removes Refract's work. A send that runs inside an open `DB::transaction()` still waits for the destination (up to 15 seconds), and your transaction stays open while it waits. The send at the end of the request, job or command uses the queue as usual.
-- Any send that Refract exports in the process while a console process runs, and that cannot reach the destination or gets 408, 429 or 5xx, keeps its spans. With `sync`, that is every send. With `queue`, it is a send on `database` or on a driver that exports with `sync`, a part too big for one queue message, and a part whose push to `redis`, `sqs` or `beanstalkd` fails. Refract tries them again at a later send, at least 5 seconds later (or after `Retry-After`, at most 300 seconds). Once one part of a send cannot connect to the destination (the host is not found, refuses the connection, or the connection times out), the later parts of that send are kept without a try, so a destination that is down blocks the process for one timeout per send, not one per part. A part that connected but got no answer in time does not stop the later parts. The final batch at the end of the request, job or command still tries every part, so there a destination that is down costs one timeout (15 seconds) per part. A full buffer tries at once, without that wait. If that try also fails, new spans are dropped until a later try works: the next try comes at the first new span after an open top-level run ends or after the wait is over (see Bounded memory). What is still not sent at the end of the process goes out with the final batch.
+- Any send that Refract exports in the process while a console process runs, and that cannot reach the destination or gets 408, 429 or 5xx, keeps its spans. With `sync`, that is every send. With `queue`, it is a send on `database` or on a driver that exports with `sync`, a part too big for one queue message, and a part whose push to `redis`, `sqs` or `beanstalkd` fails. Refract tries them again at a later send, at least 5 seconds later (or after `Retry-After`, at most 300 seconds). Once one part of a send cannot connect to the destination (the host is not found, refuses the connection, or the connection times out), the later parts of that send are kept without a try, so a destination that is down blocks the process for one timeout per send, not one per part. A part that connected but got no answer in time does not stop the later parts. The final batch at the end of the request, job or command still tries every part, so there a destination that is down costs up to 15 seconds per part (10 seconds when the host never answers the connection). A full buffer tries at once, without that wait. If that try also fails, new spans are dropped until a later try works: the next try comes at the first new span after an open top-level run ends or after the wait is over (see [Bounded memory](#safety)). What is still not sent at the end of the process goes out with the final batch.
 - When the job gives up, it logs one warning. It does not throw, so nothing goes to your error tracker or the `failed_jobs` table.
 
 ### Export Failures
@@ -291,7 +291,7 @@ class MaskSecrets
 
 The mask fails closed. When it throws or does not return a string, the value becomes `<fully masked due to failed mask function>` and one warning is logged. When the class cannot be made or is not invokable, every value is masked that way. The run always continues.
 
-The mask is not called for the output or tool result of a span dropped at the cap (see Bounded memory). Its prompt, input and tool arguments still go through the mask.
+The mask is not called for the output or tool result of a span dropped at the cap (see [Bounded memory](#safety)). Its prompt, input and tool arguments still go through the mask.
 
 ## Participant
 
@@ -387,7 +387,7 @@ Run the tests, the code style check and static analysis:
 ```bash
 composer test
 vendor/bin/pint --test
-vendor/bin/phpstan analyse
+composer analyse
 ```
 
 The workbench runs real scenarios and reads the traces back from Langfuse. Copy `workbench/.env.example` to `workbench/.env`, add the keys of a Langfuse project you use for testing, then:
