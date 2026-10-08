@@ -350,6 +350,25 @@ it('C3: a destination whose platform is not a Platform class exports nothing, wi
     'empty' => [null],
 ]);
 
+it('C2: with no otlp destination in the config and REFRACT_DESTINATION missing or empty, one warning names the missing default destination and nothing is exported', function (?string $destination) {
+    Env::set([...BASE_ENV, 'REFRACT_DESTINATION' => $destination]);
+
+    $log = loadRefract();
+    config(['refract.destinations' => ['langfuse' => config('refract.destinations.langfuse')]]);
+
+    expect(exported())->toBeNull()
+        ->and(exported())->toBeNull()
+        ->and($log->warnings)->toHaveCount(1)
+        ->and($log->warnings[0])->toContain('refract.destinations.otlp')
+        ->and($log->warnings[0])->toContain('REFRACT_DESTINATION is not set')
+        ->and($log->warnings[0])->toContain('Nothing is exported')
+        ->and($log->warnings[0])->not->toContain('[refract.destination]');
+    Http::assertNothingSent();
+})->with([
+    'missing' => [null],
+    'empty' => [''],
+]);
+
 it('C1: each destination names its platform class in the config', function () {
     Env::set(BASE_ENV);
 

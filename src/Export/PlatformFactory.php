@@ -24,8 +24,17 @@ class PlatformFactory
      */
     public static function fromConfig(): ?Platform
     {
-        $destination = Settings::choice('destination', Settings::keys('destinations'), self::DEFAULT_DESTINATION);
+        $destinations = Settings::keys('destinations');
+        $destination = Settings::choice('destination', $destinations, self::DEFAULT_DESTINATION);
         $key = "destinations.{$destination}";
+
+        // Only the default can be missing: Settings::choice() gives any other value only when it is a key.
+        if (! in_array($destination, $destinations, true)) {
+            Diagnostics::warn("config.{$key}", "Refract config [refract.{$key}] is missing: [{$destination}] is the default destination when REFRACT_DESTINATION is not set or invalid. Nothing is exported.");
+
+            return null;
+        }
+
         $class = Settings::string("{$key}.platform");
 
         if (! is_a($class, Platform::class, true)) {

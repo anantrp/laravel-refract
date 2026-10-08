@@ -81,11 +81,18 @@ class Settings
     /**
      * Get the given configuration value as one of the allowed strings.
      *
+     * A missing or empty value gives the default with no warning, even when
+     * the default is not allowed: the caller decides what that means.
+     *
      * @param  list<string>  $allowed
      */
     public static function choice(string $key, array $allowed, string $default): string
     {
-        $value = strtolower(self::string($key, $default));
+        $value = strtolower(self::string($key));
+
+        if ($value === '') {
+            return $default;
+        }
 
         if (! in_array($value, $allowed, true)) {
             Diagnostics::warn("config.{$key}", "Refract config [refract.{$key}] must be one of: ".implode(', ', $allowed).'. Using the default.');
