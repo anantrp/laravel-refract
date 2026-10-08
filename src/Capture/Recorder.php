@@ -169,8 +169,10 @@ class Recorder
             }
         }
 
-        if ($this->full() || ($parentKey !== null && isset($this->dropped[$parentKey]))) {
-            if ($this->full()) {
+        $full = $this->full();
+
+        if ($full || ($parentKey !== null && isset($this->dropped[$parentKey]))) {
+            if ($full) {
                 Diagnostics::warn('buffer.full', 'The buffer holds '.self::MAX_SPANS.' spans, the most it can between two flushes. New spans are dropped until a send frees room.');
             }
 
