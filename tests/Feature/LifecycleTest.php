@@ -1368,6 +1368,48 @@ it('L21: when the parts of one send fail with and without Retry-After, the next 
     '503, then 429 Retry-After 60' => [[503], [429, ['Retry-After' => '60']]],
 ]);
 
+it('L21: when a part of a send cannot reach the destination, the later parts of that send are kept without a try, then each is sent once', function (string $transport) {
+    $log = bootClocked($transport);
+    useQueueDriver('sync');
+    $tries = 0;
+    Http::fake(function () use (&$tries) {
+        return ++$tries === 1 ? Http::failedConnection()(...func_get_args()) : Http::response('', 200);
+    });
+    $recorder = app(Recorder::class);
+    $sec = 1_000_000_000;
+
+    // Each run is about 2.5 MB of OTLP JSON: two runs do not fit one 4 MB part.
+    $run = function (string $name) use ($recorder) {
+        $recorder->start("run:{$name}", 'invoke_agent', null, ['agent' => $name]);
+        $recorder->start("tool:{$name}", 'execute_tool', "run:{$name}", ['agent' => $name], content: ['result' => bin2hex(random_bytes(1_250_000))]);
+        $recorder->end("tool:{$name}");
+        $recorder->end("run:{$name}");
+    };
+
+    // At 5 s, A and B are due in two parts. The first part cannot connect, so B is not tried.
+    $run('A');
+    $run('B');
+    $recorder->monotonicNow = 5 * $sec;
+    $run('C');
+
+    expect($tries)->toBe(1);
+
+    // After the wait, A, B and C go out, one part each.
+    $recorder->monotonicNow = 10 * $sec;
+    $run('D');
+
+    expect($tries)->toBe(4);
+
+    $recorder->flush();
+
+    $spans = deliveredSpans();
+
+    expect($spans)->toHaveCount(8)
+        ->and(array_unique(array_column($spans, 'spanId')))->toHaveCount(8)
+        ->and($log->warnings)->toHaveCount(1)
+        ->and($log->warnings[0])->toContain('tried again');
+})->with(['sync', 'queue on the sync driver' => 'queue']);
+
 it('L21: a full flush that delivers the kept spans ends the wait, the next job sends at the 5 s rule again', function () {
     $log = bootClocked('sync');
     Http::fakeSequence()->push('', 429, ['Retry-After' => '300'])->whenEmpty(Http::response('', 200));

@@ -70,7 +70,7 @@ class QueueTransport implements SendNow, Transport
 
     public function sendNow(array $spans): array
     {
-        $this->inProcess->forgetRetryAfter();
+        $this->inProcess->startSend();
 
         return $this->sendParts($spans, true, fn (array $part) => $this->inProcess->exportNow($part));
     }

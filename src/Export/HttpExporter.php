@@ -5,6 +5,7 @@ namespace Anantrp\Refract\Export;
 use Anantrp\Refract\Contracts\Exporter;
 use Anantrp\Refract\Contracts\ExportResult;
 use Anantrp\Refract\Contracts\Parts;
+use Anantrp\Refract\Contracts\Reachability;
 use Anantrp\Refract\Contracts\RetryAfter;
 use Anantrp\Refract\Support\Diagnostics;
 use Anantrp\Refract\Support\Guard;
@@ -34,7 +35,7 @@ use Throwable;
  * span whose parent is not in the batch. A tree is cut only when it alone
  * is too big, and a span too big for a part is sent alone with one warning.
  */
-class HttpExporter implements Exporter, Parts, RetryAfter
+class HttpExporter implements Exporter, Parts, Reachability, RetryAfter
 {
     /**
      * The most bytes of OTLP JSON in one request, before gzip.
@@ -67,6 +68,11 @@ class HttpExporter implements Exporter, Parts, RetryAfter
     protected ?int $retryAfter = null;
 
     /**
+     * Whether the last export got no answer: the destination could not be reached.
+     */
+    protected bool $unreachable = false;
+
+    /**
      * Create a new exporter instance.
      */
     public function __construct(
@@ -81,6 +87,7 @@ class HttpExporter implements Exporter, Parts, RetryAfter
     public function export(array $spans): ExportResult
     {
         $this->retryAfter = null;
+        $this->unreachable = false;
 
         try {
             $translated = $this->platform->prepare(array_map($this->translator->translate(...), $spans));
@@ -102,6 +109,8 @@ class HttpExporter implements Exporter, Parts, RetryAfter
                 ->withBody($body, 'application/json')
                 ->post($this->platform->endpoint());
         } catch (ConnectionException) {
+            $this->unreachable = true;
+
             return ExportResult::Retryable;
         } catch (RequestException $e) {
             $response = $e->response;
@@ -282,6 +291,11 @@ class HttpExporter implements Exporter, Parts, RetryAfter
     public function retryAfter(): ?int
     {
         return $this->retryAfter;
+    }
+
+    public function unreachable(): bool
+    {
+        return $this->unreachable;
     }
 
     /**
