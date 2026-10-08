@@ -226,7 +226,7 @@ The job goes to your default queue connection and its default queue. A queue wor
 
 In a command, queue worker or tinker, Refract sends finished runs while the process keeps going (see [Bounded Memory](#bounded-memory)). These rules apply to those sends.
 
-Refract never writes these sends to a `database` queue, so a rollback in your app never removes them. With `queue`, on `redis`, `sqs` and `beanstalkd`, each send is a queue job with the job's own retries.
+Refract never writes these sends to a `database` queue, so a rollback in your app never removes them. With `queue`, on `redis`, `sqs` and `beanstalkd`, each part of a send is a queue job with the job's own retries.
 
 Refract exports these sends in the process:
 
@@ -239,7 +239,7 @@ For a send in the process:
 
 - The send waits for the destination, up to 15 seconds. A send inside an open `DB::transaction()` keeps your transaction open while it waits.
 - When the send cannot reach the destination, or gets 408, 429 or 5xx, Refract keeps its spans and logs one warning. It tries them again at a later send, at least 5 seconds later. After a `Retry-After`, it waits that long, at most 300 seconds.
-- When one part cannot connect, Refract keeps the later parts of that send without a try. "Cannot connect" means the host or proxy is not found, or the host refuses the connection. It also means the connection times out or the TLS handshake fails. So a destination that is down costs one timeout per send, not one per part.
+- When one part cannot connect, Refract keeps the later parts of that send without a try. "Cannot connect" means the host or proxy is not found, or the host refuses the connection. It also means the connection times out, the TLS handshake or certificate check fails, or the proxy handshake fails. So a destination that is down costs one timeout per send, not one per part.
 - A part that connected but got no answer in time does not stop the later parts.
 - A full buffer tries at once, without the 5-second wait. If that try also fails, Refract drops new spans until a later try works. The next try comes at the first new span after an open top-level run ends, or after the wait is over.
 - At the end of the process, the spans that Refract still keeps go out with the final batch.
@@ -297,7 +297,7 @@ How values are recorded:
 | A number or boolean (top level only) | Cast to a string. `false` becomes an empty string. |
 | A `Stringable` (top level only) | Its `__toString()`, as the SDK does |
 | A backed enum inside an array or Collection | Its value |
-| A file, at any level | `[file]` |
+| A file, at any level of arrays and Collections | `[file]` |
 | Any other object | Its class name. Refract runs none of its methods. |
 | A value that cannot be encoded as JSON, for example one with a pure enum | `[not encodable as JSON]`, with one warning |
 
