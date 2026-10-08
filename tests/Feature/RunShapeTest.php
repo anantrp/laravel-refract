@@ -2,6 +2,7 @@
 
 use Anantrp\Refract\Capture\Recorder;
 use Anantrp\Refract\Tests\Support\Ai\BrokenToolAgent;
+use Anantrp\Refract\Tests\Support\ClockRecorder;
 use Anantrp\Refract\Tests\Support\Otlp;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
@@ -211,6 +212,38 @@ it('R5: a stream stopped early has its open spans closed as abandoned at flush',
     }
 
     expect($spans[1]['parentSpanId'])->toBe($spans[0]['spanId']);
+});
+
+it('R5: a flush closes open children before their parent, so no abandoned child ends after its parent', function () {
+    // A monotonic clock that moves on every read, so each end gets its own time.
+    $this->extendBeforeBoot(Recorder::class, fn (Recorder $recorder, $app) => new class($app) extends ClockRecorder
+    {
+        protected function monotonic(): int
+        {
+            return $this->monotonicNow += 1_000;
+        }
+    });
+    $transport = $this->captureNeutralSpans();
+    $recorder = app(Recorder::class);
+
+    $recorder->start('run', 'invoke_agent', null, []);
+    $recorder->start('step', 'chat', 'run', []);
+    $recorder->start('tool', 'execute_tool', 'run', []);
+    $recorder->start('sub', 'invoke_agent', 'tool', []);
+    $recorder->start('sub:step', 'chat', 'sub', []);
+
+    $recorder->flush();
+
+    $spans = array_column($transport->spans, null, 'span_id');
+
+    expect($spans)->toHaveCount(5)
+        ->and(array_unique(array_column($spans, 'status')))->toBe(['abandoned']);
+
+    foreach ($spans as $span) {
+        if ($span['parent_span_id'] !== null) {
+            expect($span['end'])->toBeLessThanOrEqual($spans[$span['parent_span_id']]['end']);
+        }
+    }
 });
 
 it('R6: a stream read again after it stopped is a separate run, not a failover', function () {

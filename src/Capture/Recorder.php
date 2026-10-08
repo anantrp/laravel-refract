@@ -623,7 +623,7 @@ class Recorder
     }
 
     /**
-     * Close every open span as abandoned, then hand the kept spans and the finished spans to the transport as one batch.
+     * Close every open span as abandoned, children before their parent, then hand the kept spans and the finished spans to the transport as one batch.
      *
      * The buffer and the state kept between flushes are cleared even when
      * building the batch fails or a reset throws. The kept spans leave
@@ -633,7 +633,8 @@ class Recorder
     public function flush(): void
     {
         try {
-            foreach (array_keys($this->open) as $key) {
+            // Latest start first: a span starts after its parent, so children close first.
+            foreach (array_reverse(array_keys($this->open)) as $key) {
                 $this->end($key, 'abandoned');
             }
 
