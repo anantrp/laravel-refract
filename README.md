@@ -50,6 +50,8 @@ To export from a queue worker instead of after the response, add:
 REFRACT_TRANSPORT=queue
 ```
 
+Use `queue` in production when a queue worker runs: the send leaves your web requests and jobs, and it is retried for about 6 minutes when the destination is down. `sync` is the default because it works with no worker.
+
 Run any agent. Each run is recorded as a tree of spans. A run starts a new trace, or joins your app's active OpenTelemetry trace when there is one. A sub-agent run nests inside the run that called it.
 
 ## Configuration
