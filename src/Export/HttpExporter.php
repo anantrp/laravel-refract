@@ -22,6 +22,8 @@ use Throwable;
  * A network error, 408, 429 or 5xx is retryable, and the transport decides
  * when to try again. Every other status is rejected and warned about here.
  * Redirects are never followed, so the headers never reach another host.
+ *
+ * @phpstan-import-type TranslatedSpan from GenAiTranslator
  */
 class HttpExporter implements Exporter, Parts, Reachability, RetryAfter
 {
@@ -132,6 +134,9 @@ class HttpExporter implements Exporter, Parts, Reachability, RetryAfter
             return [$spans];
         }
 
+        // Each part is prepared again on its own, so it keeps the times the platform set for the whole batch.
+        $spans = array_map($this->withPreparedTimes(...), $spans, $translated);
+
         $parts = [];
         $part = [];
         $used = 0;
@@ -163,6 +168,33 @@ class HttpExporter implements Exporter, Parts, Reachability, RetryAfter
 
             return array_map(fn (int $index) => $spans[$index], $part);
         }, $parts);
+    }
+
+    /**
+     * Copy the start, end and event times the platform prepared onto the neutral span.
+     *
+     * @param  array<string, mixed>  $span
+     * @param  TranslatedSpan  $prepared
+     * @return array<string, mixed>
+     */
+    protected function withPreparedTimes(array $span, array $prepared): array
+    {
+        $span['start'] = $prepared['start'];
+        $span['end'] = $prepared['end'];
+
+        $events = is_array($span['events'] ?? null) ? array_values($span['events']) : [];
+
+        if (count($events) === count($prepared['events'])) {
+            foreach ($prepared['events'] as $index => $event) {
+                if (is_array($events[$index])) {
+                    $events[$index]['time'] = $event['time'];
+                }
+            }
+
+            $span['events'] = $events;
+        }
+
+        return $span;
     }
 
     /**

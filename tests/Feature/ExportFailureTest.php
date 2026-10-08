@@ -857,6 +857,28 @@ it('a run tree bigger than 4 MB is split, and the other trees stay whole', funct
         ->and($log->warnings)->toBe([]);
 });
 
+it('a run tree split into parts keeps tied siblings in distinct milliseconds on Langfuse, inside their parent', function () {
+    bootExport('sync');
+    fakeDestination(200);
+
+    // Ten tool spans that start in the same nanosecond, too big for one part.
+    app(Transport::class)->send(runTree(array_map(fn () => randomText(600_000), range(1, 10))));
+
+    $spans = Otlp::spans();
+    $run = collect($spans)->firstWhere('parentSpanId', '');
+    $tools = array_values(array_filter($spans, fn (array $span) => $span !== $run));
+    $milliseconds = array_map(fn (array $span) => intdiv((int) $span['startTimeUnixNano'], 1_000_000), $tools);
+
+    expect(count(partBodies()))->toBeGreaterThanOrEqual(2)
+        ->and($tools)->toHaveCount(10)
+        ->and(array_unique($milliseconds))->toHaveCount(10);
+
+    foreach ($tools as $tool) {
+        expect((int) $tool['startTimeUnixNano'])->toBeGreaterThanOrEqual((int) $run['startTimeUnixNano'])
+            ->and((int) $tool['endTimeUnixNano'])->toBeLessThanOrEqual((int) $run['endTimeUnixNano']);
+    }
+});
+
 it('a single span bigger than 4 MB is sent alone, with one warning', function () {
     $log = bootExport('sync');
     fakeDestination(200);
