@@ -24,7 +24,7 @@ class WorkbenchServiceProvider extends ServiceProvider
     }
 
     /**
-     * Apply the config of the row a web request runs, before Refract builds its transport at boot.
+     * Apply the config of the scenario a web request runs, before Refract builds its transport at boot.
      *
      * Read from the server variables: the request is not bound yet when the providers register.
      */

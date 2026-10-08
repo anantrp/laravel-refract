@@ -15,13 +15,13 @@ use Workbench\App\Models\User;
 class Scenarios
 {
     /**
-     * Get the environment variables the row's scenario process runs with.
+     * Get the environment variables the scenario process runs with.
      *
      * @return array<string, string>
      */
-    public function environment(string $row): array
+    public function environment(string $name): array
     {
-        return match ($row) {
+        return match ($name) {
             'X9' => ['APP_ENV' => 'Staging EU 1'],
             'E10' => ['OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT' => 'true', 'REFRACT_CAPTURE_MAX_BYTES' => '2000000'],
             default => [],
@@ -29,13 +29,13 @@ class Scenarios
     }
 
     /**
-     * Get the Refract config the row's scenario runs with in a web request, set before Refract boots.
+     * Get the Refract config the scenario runs with in a web request, set before Refract boots.
      *
      * @return array<string, mixed>
      */
-    public function config(string $row): array
+    public function config(string $name): array
     {
-        return match ($row) {
+        return match ($name) {
             'L2' => ['refract.transport' => 'queue'],
             default => [],
         };
@@ -44,9 +44,9 @@ class Scenarios
     /**
      * Run a scenario inside a fresh active OTel span and return its trace id.
      */
-    public function run(string $row): string
+    public function run(string $name): string
     {
-        $runner = match ($row) {
+        $runner = match ($name) {
             'R1', 'R11', 'L1', 'L2', 'L10' => $this->r1(...),
             'R2' => $this->r2(...),
             'R4' => $this->r4(...),
@@ -56,7 +56,7 @@ class Scenarios
             'L6' => $this->l6(...),
             'E10' => $this->e10(...),
             'L12' => $this->l12(...),
-            default => throw new InvalidArgumentException("No scenario for row [{$row}] yet."),
+            default => throw new InvalidArgumentException("No scenario [{$name}] yet."),
         };
 
         $traceId = bin2hex(random_bytes(16));
