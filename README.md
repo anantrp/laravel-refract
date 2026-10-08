@@ -50,7 +50,7 @@ To export from a queue worker instead of after the response, add:
 REFRACT_TRANSPORT=queue
 ```
 
-Use `queue` in production when a queue worker runs: the send leaves your web requests and jobs, and it is retried for about 6 minutes when the destination is down. `sync` is the default because it works with no worker.
+Use `queue` in production when a queue worker runs. The send then leaves your web requests and jobs. When the destination is down, the job tries again for about 6 minutes. `sync` is the default because it works with no worker.
 
 Run any agent. Each run is recorded as a tree of spans. A run starts a new trace, or joins your app's active OpenTelemetry trace when there is one. A sub-agent run nests inside the run that called it.
 
@@ -81,7 +81,7 @@ All settings come from environment variables.
 Rules for every variable:
 
 - Missing or empty (`FOO=`) means the default, with no warning.
-- Invalid means the default plus one warning. For example: text where a number goes, `0` or a negative number, a `REFRACT_CAPTURE_MAX_BYTES` under 64, an unknown transport, or a boolean where a name goes.
+- Invalid means the default plus one warning. For example: text where a number goes, `0` or a negative number, or a `REFRACT_CAPTURE_MAX_BYTES` under 64. An unknown transport, or a boolean where a name goes, is also invalid.
 - Invalid headers mean no headers from that variable, plus one warning.
 - An invalid `REFRACT_OTLP_ENDPOINT` or `LANGFUSE_BASE_URL` exports nothing, plus one warning. Refract never falls back to another host, so your keys and headers never go to a host you did not name.
 - An invalid `OTEL_EXPORTER_OTLP_ENDPOINT` counts as not set, plus one warning.
@@ -192,9 +192,11 @@ Every export is gzipped and sent with `Content-Encoding: gzip`, to `otlp` and to
 
 ### Request Size
 
-A batch is sent in parts of at most 4 MB of OTLP JSON, counted before gzip, so a destination with a body size limit does not refuse it. A big batch usually comes from content capture. Parts are cut between run trees (a run and every span under it). A run tree is cut only when it alone is over 4 MB. A single span over 4 MB is sent alone and one warning is logged: the destination may refuse it.
+Refract sends a batch in parts of at most 4 MB of OTLP JSON, counted before gzip. So a destination with a body size limit does not refuse it. A big batch usually comes from content capture. Parts are cut between run trees (a run and every span under it). A run tree is cut only when it alone is over 4 MB. A single span over 4 MB is sent alone and one warning is logged: the destination may refuse it.
 
-With `sync`, the parts are sent one after another. A failed part does not stop the next parts. Failures warn once per kind, so 3 parts that fail the same way give one warning. With `queue`, each part is its own job, so a retry never sends a part again that already got through. A job must also fit in one queue message (256 KB after gzip and base64, which is often only 0.5 to 1 MB of JSON). A bigger part is exported with `sync` instead, with one warning. At the end of a request, job or command it gets no retry. While a command, queue worker or tinker runs, a failed one is kept and tried again later (see [`queue`](#queue)). With content capture on, this is common.
+With `sync`, Refract sends the parts one after another. A failed part does not stop the next parts. Failures warn once per kind, so 3 parts that fail the same way give one warning.
+
+With `queue`, each part is its own job, so a retry never sends a part again that already got through. A job must fit in one queue message: 256 KB after gzip and base64, often only 0.5 to 1 MB of JSON. With content capture on, a bigger part is common. Refract exports a bigger part with `sync` and logs one warning. At the end of a request, job or command, that part gets no retry. While a console process runs, Refract keeps a failed part and tries it again later (see [Sends While a Console Process Runs](#sends-while-a-console-process-runs)).
 
 ## Transports
 
@@ -202,7 +204,7 @@ The transport decides when and in which process traces are exported. No transpor
 
 | Transport | What it does |
 | --- | --- |
-| `sync` | Exports in the same process: after the response is sent, at the end of a queued job, or at the end of a console command. No retry at that point. A send while a console process runs that cannot reach the destination, or gets 408, 429 or 5xx, keeps its spans and tries again later (see [`queue`](#queue)). |
+| `sync` | Exports in the same process: after the response is sent, at the end of a queued job, or at the end of a console command. The final batch gets no retry. A send while a console process runs keeps its spans when it fails (see [Sends While a Console Process Runs](#sends-while-a-console-process-runs)). |
 | `queue` | Pushes one job per batch, or per part of a big batch (see [Request Size](#request-size)). A queue worker exports it. |
 | `null` | Discards the spans. |
 
@@ -210,17 +212,39 @@ A sync-driver job or an `Artisan::call()` inside a web request does not export o
 
 ### `queue`
 
-The job goes to your default queue connection and its default queue.
+The job goes to your default queue connection and its default queue. A queue worker must run on that queue.
 
-- A job is pushed only when the connection's driver is `redis`, `database`, `sqs` or `beanstalkd`. Every other driver (`sync`, `deferred`, `background`, `failover`, custom) exports with `sync` instead.
-- The batch is gzipped. When it, or one part of it, is still too big for a queue message (256 KB after gzip and base64, minus room for the job envelope), that batch or part is exported with `sync` instead and one warning is logged.
-- When the push fails, the batch is exported with `sync` and one warning is logged.
-- The job tries 4 times when the destination cannot be reached or answers 408, 429 or 5xx. It waits 10 seconds before the second try, 60 seconds before the third and 300 seconds before the fourth. So a batch survives an outage of about 6 minutes.
-- On a 429 or 503 with `Retry-After` in whole seconds, the job waits that long when it is longer than its normal wait, at most 300 seconds. A short `Retry-After` never makes the job try sooner. An HTTP date, a negative number or text is ignored.
-- The job is never tied to your database transactions. It is pushed at once even on a connection with `after_commit`, and a rollback in your app does not remove it. The spans record what already happened: the model answered and the tools ran.
-- While a command, queue worker or tinker runs, Refract never writes a job to a `database` queue. It exports those sends in the process instead, so a rollback in your app never removes Refract's work. A send that runs inside an open `DB::transaction()` still waits for the destination (up to 15 seconds), and your transaction stays open while it waits. The send at the end of the request, job or command uses the queue as usual.
-- Any send that Refract exports in the process while a console process runs, and that cannot reach the destination or gets 408, 429 or 5xx, keeps its spans. With `sync`, that is every send. With `queue`, it is a send on `database` or on a driver that exports with `sync`, a part too big for one queue message, and a part whose push to `redis`, `sqs` or `beanstalkd` fails. Refract tries them again at a later send, at least 5 seconds later (or after `Retry-After`, at most 300 seconds). Once one part of a send cannot connect to the destination (the host is not found, refuses the connection, or the connection times out), the later parts of that send are kept without a try, so a destination that is down blocks the process for one timeout per send, not one per part. A part that connected but got no answer in time does not stop the later parts. The final batch at the end of the request, job or command still tries every part, so there a destination that is down costs up to 15 seconds per part (10 seconds when the host never answers the connection). A full buffer tries at once, without that wait. If that try also fails, new spans are dropped until a later try works: the next try comes at the first new span after an open top-level run ends or after the wait is over (see [Bounded memory](#safety)). What is still not sent at the end of the process goes out with the final batch.
+- Refract pushes a job only when the connection's driver is `redis`, `database`, `sqs` or `beanstalkd`. With every other driver (`sync`, `deferred`, `background`, `failover`, custom), Refract exports with `sync` instead.
+- Refract gzips the batch. A queue message holds at most 256 KB after gzip and base64, minus room for the job envelope. When a batch or a part is bigger, Refract exports it with `sync` and logs one warning.
+- When the push fails, Refract exports the batch with `sync` and logs one warning.
+- The job tries 4 times when it cannot reach the destination, or when the destination answers 408, 429 or 5xx. It waits 10 seconds before the second try, 60 seconds before the third and 300 seconds before the fourth. So a batch survives an outage of about 6 minutes.
+- A 429 or 503 can give `Retry-After` in whole seconds. When that wait is longer than the normal wait, the job waits for `Retry-After`, at most 300 seconds. A shorter `Retry-After` never makes the job try sooner. The job ignores an HTTP date, a negative number or text.
+- The job is never tied to your database transactions. Refract pushes it at once, even on a connection with `after_commit`. A rollback in your app does not remove it. The spans record what already happened: the model answered and the tools ran.
 - When the job gives up, it logs one warning. It does not throw, so nothing goes to your error tracker or the `failed_jobs` table.
+
+### Sends While a Console Process Runs
+
+In a command, queue worker or tinker, Refract sends finished runs while the process keeps going (see [Bounded Memory](#bounded-memory)). These rules apply to those sends.
+
+Refract never writes these sends to a `database` queue, so a rollback in your app never removes them. On `redis`, `sqs` and `beanstalkd`, each send is a queue job with the job's own retries.
+
+Refract exports these sends in the process:
+
+- every send with `sync`,
+- with `queue`, every send on `database` or on a driver that exports with `sync`,
+- with `queue`, a part too big for one queue message,
+- with `queue`, a part whose push to `redis`, `sqs` or `beanstalkd` fails.
+
+For a send in the process:
+
+- The send waits for the destination, up to 15 seconds. A send inside an open `DB::transaction()` keeps your transaction open while it waits.
+- When the send cannot reach the destination, or gets 408, 429 or 5xx, Refract keeps its spans and logs one warning. It tries them again at a later send, at least 5 seconds later. After a `Retry-After`, it waits that long, at most 300 seconds.
+- When one part cannot connect, Refract keeps the later parts of that send without a try. "Cannot connect" means the host is not found, refuses the connection, or does not answer the connection in time. So a destination that is down costs one timeout per send, not one per part.
+- A part that connected but got no answer in time does not stop the later parts.
+- A full buffer tries at once, without the 5-second wait. If that try also fails, Refract drops new spans until a later try works. The next try comes at the first new span after an open top-level run ends, or after the wait is over.
+- At the end of the process, the spans that Refract still keeps go out with the final batch.
+
+The final batch at the end of a request, job or command uses the queue as usual. When Refract exports the final batch in the process, it tries every part. Then a destination that is down costs up to 15 seconds per part (10 seconds when the host does not answer the connection).
 
 ### Export Failures
 
@@ -228,10 +252,10 @@ The job goes to your default queue connection and its default queue.
 | --- | --- | --- |
 | 2xx | Done | Done |
 | 2xx whose `partialSuccess` refuses spans or has a message | Done, one warning | Done, one warning |
-| Network error, 408, 429, 5xx | During a console process: kept and tried again later, one warning. At the end: dropped, one warning | Retried (4 tries, 10 s, 60 s then 300 s apart, or longer when a 429 or 503 asks with `Retry-After`, at most 300 s), then one warning. A send exported in the process during a console process (see [`queue`](#queue)): kept and tried again later, one warning. A part exported in the process at the end of a request, job or command (another driver, too big for the queue, or a failed push): dropped, one warning |
+| Network error, 408, 429, 5xx | During a console process: kept and tried again later, one warning. At the end: dropped, one warning | The job tries 4 times (see [`queue`](#queue)), then one warning. A send or part exported in the process: the same as `sync` |
 | Any other status (3xx, 400, 401, 403, 404, ...) | Dropped, one warning | Dropped, one warning |
 
-A rejected batch's warning names the status and the first 200 characters of the response body. Credentials the destination echoes in the body are masked as `[removed]`: values under key names that contain `key`, `token`, `secret`, `auth`, `password`, `passwd`, `credential` or `cookie` (in JSON, in header lines and in `key=value` pairs), and `Bearer` and `Basic` tokens. Other text, such as a plain error line, is kept.
+A rejected batch's warning names the status and the first 200 characters of the response body. Refract masks credentials that the destination echoes in the body as `[removed]`. It masks `Bearer` and `Basic` tokens. It also masks values under key names that contain `key`, `token`, `secret`, `auth`, `password`, `passwd`, `credential` or `cookie`, in JSON, in header lines and in `key=value` pairs. Other text, such as a plain error line, is kept.
 
 A 2xx can carry an OTLP `partialSuccess` (JSON answers only). When it refuses spans or has a message, one warning names the refused count and the message, masked the same way. The answer does not say which spans were refused. They are not retried, as the OTLP spec asks. An empty body, `{}` or a body that is not JSON logs nothing.
 
@@ -262,8 +286,19 @@ How values are recorded:
 - **Byte cap.** Each value is cut at `REFRACT_CAPTURE_MAX_BYTES` (default 128 KB, at least 64), at a character border, and marked with its original size: `…[cut, original size N bytes]`.
 - **No files or media.** Attachments and files are never recorded, with capture on or off: no bytes, no name, no URL, no size. A file inside a value, for example a tool that returns an image, becomes `[file]`.
 - **Tool results in step history.** In a `chat` span's input messages, a tool result is only a reference (tool name and call id). The result itself is on the `execute_tool` span.
-- **Tool results.** A string is recorded as is. Arrays and Collections are recorded in full as JSON. A top-level `Stringable` result is cast with `__toString()`, as the SDK does. Inside an array or Collection, nested arrays and Collections are walked, backed enums keep their value (a pure enum makes the value `[not encodable as JSON]`), files become `[file]`, and any other object is recorded as its class name, with none of its methods run. Any other top-level object is recorded as its class name too. A value that cannot be encoded as JSON is recorded as `[not encodable as JSON]`, with one warning.
 - **No built-in redaction.** Refract does not look for secrets. Use a `mask`.
+
+### Tool Results
+
+| Tool result | Recorded as |
+| --- | --- |
+| A string | The string |
+| An array or Collection | JSON, in full. Refract walks the arrays and Collections inside it. |
+| A `Stringable` (top level only) | Its `__toString()`, as the SDK does |
+| A backed enum inside an array or Collection | Its value |
+| A file inside an array or Collection | `[file]` |
+| Any other object | Its class name. Refract runs none of its methods. |
+| A value that cannot be encoded as JSON, for example one with a pure enum | `[not encodable as JSON]`, with one warning |
 
 ### Mask
 
@@ -291,7 +326,7 @@ class MaskSecrets
 
 The mask fails closed. When it throws or does not return a string, the value becomes `<fully masked due to failed mask function>` and one warning is logged. When the class cannot be made or is not invokable, every value is masked that way. The run always continues.
 
-The mask is not called for the output or tool result of a span dropped at the cap (see [Bounded memory](#safety)). Its prompt, input and tool arguments still go through the mask.
+The mask is not called for the output or tool result of a span dropped at the cap (see [Bounded Memory](#bounded-memory)). Its prompt, input and tool arguments still go through the mask.
 
 ## Participant
 
@@ -362,23 +397,33 @@ Context::add('trigger', 'schedule');
 ## Safety
 
 - **Refract never breaks your app.** Every listener and lifecycle hook is guarded. A failure inside Refract logs one warning and the run goes on. Your app's own exceptions pass through unchanged.
-- **No extra calls.** Refract never calls agent methods that run your code (`instructions()`, `tools()`) and runs no queries. A run is named without calling the agent's `name()`. To name a tool span, Refract reads the tool name the way the SDK does, which calls `name()` once per tool call on a tool or an agent used as a tool, the same call the SDK makes.
+- **No extra calls.** Refract never calls agent methods that run your code (`instructions()`, `tools()`) and runs no queries. A run is named without calling the agent's `name()`. To name a tool span, Refract reads the tool name the way the SDK does. This calls `name()` once per tool call, on a tool or on an agent used as a tool. The SDK makes the same call.
 - **Warnings.** Each warning is logged at the `warning` level, prefixed `[refract]`, once per kind per process. After 10 different warnings, Refract stays silent.
-- **Bounded memory.** The buffer holds at most 1,000 spans per request, job or command. Past that, new spans are dropped and one warning is logged. In a command, queue worker or tinker, finished runs are sent while the process keeps going: when they hold 500 spans or 5 s after the last send (checked when a top-level run ends), and every time the buffer is full. So in a console process, runs that end lose no spans unless one run alone has more than 1,000. A run is sent only after it ends, and there is no background timer: a finished run waits for the end of the next run, a full buffer, or the end of the process. Spans kept after a failed send also count. If the destination fails again while the buffer is full of kept spans, new spans are dropped until a later try works: the next try comes at the first new span after an open top-level run ends or after the wait is over. A run dropped at the cap stays dropped: its steps, tools and sub-agent runs are dropped too, even once room frees, so they never show up as traces of their own. A stream the app stopped reading stays open until the end of the process, so many stopped streams can still fill the buffer. A web request sends once, after the response.
+
+### Bounded Memory
+
+- The buffer holds at most 1,000 spans per request, job or command. Past that, Refract drops new spans and logs one warning.
+- A web request sends once, after the response.
+- A command, queue worker or tinker sends finished runs while the process keeps going. It sends when the finished runs hold 500 spans, or 5 seconds after the last send. Refract checks this when a top-level run ends. It also sends every time the buffer is full.
+- So in a console process, a run that ends loses no spans, unless that run alone has more than 1,000 spans.
+- Refract sends a run only after the run ends. There is no background timer. A finished run waits for the end of the next run, a full buffer, or the end of the process.
+- Spans kept after a failed send count toward the cap. When the buffer is full of kept spans and the destination fails again, Refract drops new spans. It drops them until a later try works (see [Sends While a Console Process Runs](#sends-while-a-console-process-runs)).
+- A run dropped at the cap stays dropped. Its steps, tools and sub-agent runs are dropped too, even when room frees. So they never show up as traces of their own.
+- A stream that the app stopped reading stays open until the end of the process. Many stopped streams can fill the buffer.
 
 ## Known Limitations
 
 - Laravel Octane is not supported.
-- With a morph map, the participant type is the full class name, so it does not match the `participant_type` column of the `agent_conversations` table (which holds the alias).
+- With a morph map, the participant type is the full class name. So it does not match the `participant_type` column of the `agent_conversations` table, which holds the alias.
 - With no `mask` set, a secret inside captured content is sent as is.
 - Only agent runs are traced. Embeddings, images, audio and other SDK operations are not.
 - A web request sends once, after the response. A request whose runs make more than 1,000 spans loses the spans past the cap.
 - With `sync`, the send after the response still runs in the same PHP-FPM worker. A destination that is down keeps that worker busy for up to 15 seconds per part.
-- Sends inside a queue job run under that job's `timeout`. A slow or down destination adds up to 15 seconds per send, and with `sync` the send at the end of the job adds up to 15 seconds per part. Give jobs that run agents room in their `timeout`.
-- Spans not yet sent are lost when the worker kills a job at its `timeout`, or when a command ends by a signal, `exit()` or `dd()`.
-- On `beanstalkd`, a job over the server's size limit (64 KB by default) cannot be pushed, so it is exported with `sync` instead, with no retry.
+- Sends inside a queue job run under that job's `timeout`. A slow or down destination adds up to 15 seconds per send. With `sync`, the send at the end of the job adds up to 15 seconds per part. Give jobs that run agents room in their `timeout`.
+- Spans not yet sent are lost when the worker kills a job at its `timeout`. They are also lost when a command ends by a signal, `exit()` or `dd()`.
+- On `beanstalkd`, Refract cannot push a job over the server's size limit (64 KB by default). It exports that job with `sync` instead, with no retry.
 - When a queue push throws after the job reached the queue, the batch is also exported with `sync`, so it can arrive twice.
-- An app listener on `AgentPrompted` that runs another agent while the buffer is full can make Refract send a run before the SDK adds its tool approval events. Those events are then lost.
+- An app listener on `AgentPrompted` can run another agent while the buffer is full. Then Refract can send a run before the SDK adds its tool approval events. Those events are then lost.
 
 ## Contributing
 
