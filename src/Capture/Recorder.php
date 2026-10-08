@@ -85,6 +85,13 @@ class Recorder
     protected array $kept = [];
 
     /**
+     * The keys of the spans dropped at the cap and not ended yet, so their children are dropped too.
+     *
+     * @var array<string, true>
+     */
+    protected array $dropped = [];
+
+    /**
      * The monotonic time before which the run-end send waits, after a send gave spans back.
      */
     protected ?int $waitUntil = null;
@@ -138,7 +145,10 @@ class Recorder
      *
      * A span still open under the same key is closed as abandoned first.
      * A span started with a context source takes that span's context at
-     * flush, in place of its own. A full buffer drops the span.
+     * flush, in place of its own. A full buffer drops the span. A span
+     * whose parent was dropped at the cap is dropped too, even once room
+     * frees, so it never becomes a new trace without its run. A parent that
+     * is not open for any other reason still falls back to the active trace.
      *
      * @param  array<string, mixed>  $call
      * @param  array<string, mixed>  $context
@@ -159,11 +169,17 @@ class Recorder
             }
         }
 
-        if ($this->full()) {
-            Diagnostics::warn('buffer.full', 'The buffer holds '.self::MAX_SPANS.' spans, the most it can between two flushes. New spans are dropped until a send frees room.');
+        if ($this->full() || ($parentKey !== null && isset($this->dropped[$parentKey]))) {
+            if ($this->full()) {
+                Diagnostics::warn('buffer.full', 'The buffer holds '.self::MAX_SPANS.' spans, the most it can between two flushes. New spans are dropped until a send frees room.');
+            }
+
+            $this->dropped[$key] = true;
 
             return;
         }
+
+        unset($this->dropped[$key]);
 
         $parent = $parentKey === null ? null : ($this->open[$parentKey] ?? null);
 
@@ -250,6 +266,8 @@ class Recorder
         $span = $this->open[$key] ?? null;
 
         if ($span === null) {
+            unset($this->dropped[$key]);
+
             return;
         }
 
@@ -645,6 +663,7 @@ class Recorder
             $this->open = [];
             $this->finished = [];
             $this->ended = [];
+            $this->dropped = [];
             $this->treeEnded = true;
 
             foreach ($this->resets as $reset) {

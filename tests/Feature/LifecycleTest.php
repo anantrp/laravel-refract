@@ -1523,3 +1523,51 @@ it('L21: while the destination stays down, a full buffer with no run open tries 
         // Kept, buffer full, and the final batch dropped: one warning each.
         ->and($log->warnings)->toHaveCount(3);
 });
+
+it('L11: once a send frees room, the steps, tools and sub-agents of a run dropped at the cap are dropped too, not recorded as new traces', function () {
+    bootClocked('sync');
+    Http::fakeSequence()->push('', 503)->push('', 503)->whenEmpty(Http::response('', 200));
+    $recorder = app(Recorder::class);
+    $counts = [];
+
+    Artisan::command('refract-test:many', function () use ($recorder, &$counts) {
+        // The run-end send at 500 spans and the full-buffer try at 1,000
+        // both get 503: the buffer is full of kept spans.
+        for ($i = 0; $i < 250; $i++) {
+            runTimeAgent();
+        }
+
+        // Run X starts while the wait lasts: dropped.
+        $recorder->start('run:x', 'invoke_agent', null, ['agent' => 'Dropped']);
+
+        $counts[] = count(Http::recorded());
+
+        // The model call takes over 5 s; the destination is back.
+        $recorder->monotonicNow += 5_000_000_000;
+
+        // The first step's start tries again, which frees the buffer.
+        $recorder->start('step:x:1', 'chat', 'run:x', ['model' => 'dropped']);
+
+        $counts[] = count(Http::recorded());
+
+        $recorder->end('step:x:1');
+        $recorder->start('tool:x', 'execute_tool', 'run:x', ['tool' => 'Dropped']);
+        $recorder->start('run:y', 'invoke_agent', 'tool:x', ['agent' => 'Dropped'], contextFrom: 'run:x');
+        $recorder->start('step:y:1', 'chat', 'run:y', ['model' => 'dropped']);
+        $recorder->end('step:y:1');
+        $recorder->end('run:y');
+        $recorder->end('tool:x');
+        $recorder->end('run:x');
+
+        // A run after it is recorded as usual.
+        runTimeAgent();
+    });
+
+    Artisan::call('refract-test:many');
+
+    $spans = deliveredSpans();
+
+    expect($counts)->toBe([2, 3])
+        ->and($spans)->toHaveCount(1_000 + 4)
+        ->and(array_filter($spans, fn (array $span) => str_contains($span['name'], 'Dropped') || str_contains($span['name'], 'dropped')))->toBe([]);
+});
