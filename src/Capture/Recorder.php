@@ -614,7 +614,9 @@ class Recorder
      * Close every open span as abandoned, then hand the kept spans and the finished spans to the transport as one batch.
      *
      * The buffer and the state kept between flushes are cleared even when
-     * building the batch fails or a reset throws.
+     * building the batch fails or a reset throws. The kept spans leave
+     * with this batch and are never kept again (send() keeps nothing), so
+     * the wait after a send that gave spans back ends too.
      */
     public function flush(): void
     {
@@ -626,6 +628,7 @@ class Recorder
             $batch = [...$this->kept, ...$this->batch($this->finished)];
         } finally {
             $this->kept = [];
+            $this->waitUntil = null;
             $this->open = [];
             $this->finished = [];
             $this->ended = [];

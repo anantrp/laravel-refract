@@ -1325,6 +1325,46 @@ it('L21: when the parts of one send fail with and without Retry-After, the next 
     '503, then 429 Retry-After 60' => [[503], [429, ['Retry-After' => '60']]],
 ]);
 
+it('L21: a full flush that delivers the kept spans ends the wait, the next job sends at the 5 s rule again', function () {
+    $log = bootClocked('sync');
+    Http::fakeSequence()->push('', 429, ['Retry-After' => '300'])->whenEmpty(Http::response('', 200));
+    $recorder = app(Recorder::class);
+    $second = 1_000_000_000;
+
+    // Job 1: the run-end send at 5 s gets 429 Retry-After 300 and keeps its spans.
+    for ($t = 1; $t <= 5; $t++) {
+        $recorder->monotonicNow = $t * $second;
+        runTimeAgent();
+    }
+
+    expect(Http::recorded())->toHaveCount(1);
+
+    // The job ends: the full flush delivers the kept spans (as JobAttempted does).
+    $recorder->flush();
+
+    expect(Http::recorded())->toHaveCount(2)
+        ->and(Http::recorded()[1][1]->successful())->toBeTrue();
+
+    // Job 2 on the same worker: runs 6 s apart send at their run end again (each run end holds its own run).
+    $counts = [];
+
+    foreach ([11, 17, 23] as $t) {
+        $recorder->monotonicNow = $t * $second;
+        runTimeAgent();
+        $counts[] = count(Http::recorded());
+    }
+
+    $recorder->flush();
+
+    $spans = deliveredSpans();
+
+    expect($counts)->toBe([2, 3, 4])
+        ->and($spans)->toHaveCount(32)
+        ->and(array_unique(array_column($spans, 'spanId')))->toHaveCount(32)
+        ->and($log->warnings)->toHaveCount(1)
+        ->and($log->warnings[0])->toContain('tried again');
+});
+
 it('L21: kept spans go out with the final batch at the flush point, in one queue job that is retried', function () {
     $log = bootClocked('queue');
     useDatabaseQueue();
