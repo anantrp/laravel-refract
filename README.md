@@ -217,7 +217,7 @@ The job goes to your default queue connection and its default queue.
 - On a 429 or 503 with `Retry-After` in whole seconds, the job waits that long when it is longer than its normal wait, at most 300 seconds. A short `Retry-After` never makes the job try sooner. An HTTP date, a negative number or text is ignored.
 - The job is never tied to your database transactions. It is pushed at once even on a connection with `after_commit`, and a rollback in your app does not remove it. The spans record what already happened: the model answered and the tools ran.
 - While a command, queue worker or tinker runs, Refract never writes a job to a `database` queue. It exports those sends in the process instead. Your app's transactions can then never hold or roll back Refract's work. The send at the end of the request, job or command uses the queue as usual.
-- A send while a console process runs (with `sync`, or with `queue` on `database`) that cannot reach the destination, or gets 408, 429 or 5xx, keeps its spans. Refract tries them again at a later send, at least 5 seconds later (or after `Retry-After`, at most 300 seconds). A full buffer always tries at once. What is still not sent at the end of the process goes out with the final batch.
+- Any send that Refract exports in the process while a console process runs, and that cannot reach the destination or gets 408, 429 or 5xx, keeps its spans. With `sync`, that is every send. With `queue`, it is a send on `database` or on a driver that exports with `sync`, a part too big for one queue message, and a part whose push to `redis`, `sqs` or `beanstalkd` fails. Refract tries them again at a later send, at least 5 seconds later (or after `Retry-After`, at most 300 seconds). A full buffer always tries at once. What is still not sent at the end of the process goes out with the final batch.
 - When the job gives up, it logs one warning. It does not throw, so nothing goes to your error tracker or the `failed_jobs` table.
 
 ### Export Failures
@@ -226,7 +226,7 @@ The job goes to your default queue connection and its default queue.
 | --- | --- | --- |
 | 2xx | Done | Done |
 | 2xx whose `partialSuccess` refuses spans or has a message | Done, one warning | Done, one warning |
-| Network error, 408, 429, 5xx | During a console process: kept and tried again later, one warning. At the end: dropped, one warning | Retried (4 tries, 10 s, 60 s then 300 s apart, or longer when a 429 or 503 asks with `Retry-After`, at most 300 s), then one warning |
+| Network error, 408, 429, 5xx | During a console process: kept and tried again later, one warning. At the end: dropped, one warning | Retried (4 tries, 10 s, 60 s then 300 s apart, or longer when a 429 or 503 asks with `Retry-After`, at most 300 s), then one warning. A send exported in the process during a console process (see [`queue`](#queue)): kept and tried again later, one warning |
 | Any other status (3xx, 400, 401, 403, 404, ...) | Dropped, one warning | Dropped, one warning |
 
 A rejected batch's warning names the status and the first 200 characters of the response body. Credentials the destination echoes in the body are masked as `[removed]`: values under key names that contain `key`, `token`, `secret`, `auth`, `password`, `passwd`, `credential` or `cookie` (in JSON, in header lines and in `key=value` pairs), and `Bearer` and `Basic` tokens. Other text, such as a plain error line, is kept.
