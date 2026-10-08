@@ -1,7 +1,7 @@
 <?php
 
 /*
- * Rule 12: layer borders. Each layer talks to the next only through src/Contracts.
+ * Layer borders: each layer talks to the next only through src/Contracts.
  */
 
 /**
@@ -51,19 +51,19 @@ function packageFiles(array $folders): array
     return $files;
 }
 
-arch('A1: Capture uses nothing from Transport or Export')
+arch('Capture uses nothing from Transport or Export')
     ->expect('Anantrp\Refract\Capture')
     ->not->toUse(['Anantrp\Refract\Transport', 'Anantrp\Refract\Export']);
 
-arch('A2: Transport uses only Contracts and Support from Refract (the Exporter contract is in Contracts)')
+arch('Transport uses only Contracts and Support from Refract (the Exporter contract is in Contracts)')
     ->expect('Anantrp\Refract\Transport')
     ->not->toUse(refractNamespacesExcept(['Contracts', 'Support', 'Transport']));
 
-arch('A3: Export uses nothing from Capture or Transport')
+arch('Export uses nothing from Capture or Transport')
     ->expect('Anantrp\Refract\Export')
     ->not->toUse(['Anantrp\Refract\Capture', 'Anantrp\Refract\Transport']);
 
-arch('A4: the platform names langfuse and Langfuse appear only in the Langfuse platform folder and the config', function () {
+arch('the platform names langfuse and Langfuse appear only in the Langfuse platform folder and the config', function () {
     $named = array_values(array_filter(
         packageFiles(['src', 'config']),
         fn (string $file) => preg_match('/langfuse/i', (string) file_get_contents(dirname(__DIR__, 2).'/'.$file)) === 1,
@@ -78,11 +78,11 @@ arch('A4: the platform names langfuse and Langfuse appear only in the Langfuse p
         ->and($outside)->toBe([]);
 });
 
-arch('A5: env() is used only in config/refract.php')
+arch('env() is used only in config/refract.php')
     ->expect('env')
     ->not->toBeUsed();
 
-arch('A5: no package file but config/refract.php calls env()', function () {
+arch('no package file but config/refract.php calls env()', function () {
     $calling = array_values(array_filter(
         packageFiles(['src', 'config']),
         fn (string $file) => preg_match('/(?<![\w>:$\\\\])env\s*\(/', (string) file_get_contents(dirname(__DIR__, 2).'/'.$file)) === 1,
@@ -91,11 +91,11 @@ arch('A5: no package file but config/refract.php calls env()', function () {
     expect($calling)->toBe(['config/refract.php']);
 });
 
-arch('A6: src never uses open-telemetry/sem-conv, a dev-only package (rule 11)')
+arch('src never uses open-telemetry/sem-conv, a dev-only package')
     ->expect('Anantrp\Refract')
     ->not->toUse('OpenTelemetry\SemConv');
 
-arch('A6: no package file names OpenTelemetry\SemConv, and composer.json requires sem-conv for dev only', function () {
+arch('no package file names OpenTelemetry\SemConv, and composer.json requires sem-conv for dev only', function () {
     $naming = array_values(array_filter(
         packageFiles(['src', 'config']),
         fn (string $file) => str_contains((string) file_get_contents(dirname(__DIR__, 2).'/'.$file), 'SemConv'),

@@ -153,7 +153,7 @@ afterEach(function () {
     Env::restore();
 });
 
-it('L1: a web request with transport sync exports after the response is sent, once', function () {
+it('a web request with transport sync exports after the response is sent, once', function () {
     bootWeb(lifecycleConfig('sync'));
     Http::fake();
 
@@ -173,7 +173,7 @@ it('L1: a web request with transport sync exports after the response is sent, on
     expect(batches()[0])->toHaveCount(4);
 });
 
-it('L1: an agent run in an afterResponse dispatch is exported once, after it ran', function () {
+it('an agent run in an afterResponse dispatch is exported once, after it ran', function () {
     bootWeb(lifecycleConfig('sync'));
     Http::fake();
 
@@ -193,7 +193,7 @@ it('L1: an agent run in an afterResponse dispatch is exported once, after it ran
     expect(batches()[0])->toHaveCount(4);
 });
 
-it('L1: an agent run in a terminating callback added after boot is exported once', function () {
+it('an agent run in a terminating callback added after boot is exported once', function () {
     bootWeb(lifecycleConfig('sync'));
     Http::fake();
 
@@ -213,7 +213,7 @@ it('L1: an agent run in a terminating callback added after boot is exported once
     expect(batches()[0])->toHaveCount(4);
 });
 
-it('L6: an async job is flushed at its end, and the next job on the worker starts with an empty buffer', function () {
+it('an async job is flushed at its end, and the next job on the worker starts with an empty buffer', function () {
     $this->refreshApplicationWithConfig(lifecycleConfig('sync'));
     Http::fake();
     useDatabaseQueue();
@@ -236,7 +236,7 @@ it('L6: an async job is flushed at its end, and the next job on the worker start
         ->and(array_intersect(array_column($first, 'spanId'), array_column($second, 'spanId')))->toBe([]);
 });
 
-it('L7: a job that fails after the agent ran still has its spans flushed, and the buffer is empty', function () {
+it('a job that fails after the agent ran still has its spans flushed, and the buffer is empty', function () {
     $this->refreshApplicationWithConfig(lifecycleConfig('sync'));
     Http::fake();
     useDatabaseQueue();
@@ -254,7 +254,7 @@ it('L7: a job that fails after the agent ran still has its spans flushed, and th
     Http::assertSentCount(1);
 });
 
-it('L8: a sync-driver job dispatched in a web request does not flush, its spans leave with the request', function () {
+it('a sync-driver job dispatched in a web request does not flush, its spans leave with the request', function () {
     bootWeb(lifecycleConfig('sync'));
     Http::fake();
 
@@ -276,7 +276,7 @@ it('L8: a sync-driver job dispatched in a web request does not flush, its spans 
     expect(batches()[0])->toHaveCount(8);
 });
 
-it('L9: Artisan::call() in a web request does not flush, the spans leave with the request', function () {
+it('Artisan::call() in a web request does not flush, the spans leave with the request', function () {
     bootWeb(lifecycleConfig('sync'));
     Http::fake();
     withConsoleEvents();
@@ -301,7 +301,7 @@ it('L9: Artisan::call() in a web request does not flush, the spans leave with th
     expect(batches()[0])->toHaveCount(4);
 });
 
-it('L10: a console command that runs an agent is flushed when it finishes', function () {
+it('a console command that runs an agent is flushed when it finishes', function () {
     $this->refreshApplicationWithConfig(lifecycleConfig('sync'));
     Http::fake();
     withConsoleEvents();
@@ -318,7 +318,7 @@ it('L10: a console command that runs an agent is flushed when it finishes', func
     expect(batches()[0])->toHaveCount(4);
 });
 
-it('L10: a command called from inside a command does not flush, open spans stay open', function () {
+it('a command called from inside a command does not flush, open spans stay open', function () {
     $this->refreshApplicationWithConfig(lifecycleConfig('sync'));
     Http::fake();
     withConsoleEvents();
@@ -371,7 +371,7 @@ function exportedRun(): array
     return $runs[0];
 }
 
-it('L2: a web request with transport queue dispatches one job after the response', function (string $driver) {
+it('a web request with transport queue dispatches one job after the response', function (string $driver) {
     bootWeb(lifecycleConfig('queue'));
     Http::fake();
     Queue::fake();
@@ -393,7 +393,7 @@ it('L2: a web request with transport queue dispatches one job after the response
     Http::assertNothingSent();
 })->with(['redis', 'database', 'sqs', 'beanstalkd']);
 
-it('L2: the job a web request dispatches on the database queue exports the batch in the worker', function () {
+it('the job a web request dispatches on the database queue exports the batch in the worker', function () {
     bootWeb(lifecycleConfig('queue'));
     Http::fake();
     useDatabaseQueue();
@@ -420,7 +420,7 @@ it('L2: the job a web request dispatches on the database queue exports the batch
         ->and(DB::table('jobs')->count())->toBe(0);
 });
 
-it('L3: transport queue on the sync driver exports with sync at the flush point, no job', function () {
+it('transport queue on the sync driver exports with sync at the flush point, no job', function () {
     $this->refreshApplicationWithConfig(lifecycleConfig('queue'));
     Http::fake();
     Queue::fake();
@@ -437,7 +437,7 @@ it('L3: transport queue on the sync driver exports with sync at the flush point,
     expect(batches()[0])->toHaveCount(4);
 });
 
-it('L4: transport queue on the deferred or background driver exports with sync, no span lost', function (string $driver) {
+it('transport queue on the deferred or background driver exports with sync, no span lost', function (string $driver) {
     $this->refreshApplicationWithConfig(lifecycleConfig('queue'));
     Http::fake();
     Queue::fake();
@@ -451,7 +451,7 @@ it('L4: transport queue on the deferred or background driver exports with sync, 
     expect(batches()[0])->toHaveCount(4);
 })->with(['deferred', 'background']);
 
-it('L5: transport queue on the failover driver or an unknown custom driver exports with sync', function (string $driver) {
+it('transport queue on the failover driver or an unknown custom driver exports with sync', function (string $driver) {
     $this->refreshApplicationWithConfig(lifecycleConfig('queue'));
     Http::fake();
     Queue::fake();
@@ -465,7 +465,7 @@ it('L5: transport queue on the failover driver or an unknown custom driver expor
     expect(batches()[0])->toHaveCount(4);
 })->with(['failover', 'my-custom-driver']);
 
-it('L13: a batch too big for the queue is exported with sync after the response, with one warning', function () {
+it('a batch too big for the queue is exported with sync after the response, with one warning', function () {
     bootWeb(lifecycleConfig('queue', [
         'refract.capture.content' => true,
         'refract.capture.max_bytes' => 2_000_000,
@@ -498,7 +498,7 @@ it('L13: a batch too big for the queue is exported with sync after the response,
         ->and($log->warnings[0])->toContain('too big for the queue');
 });
 
-it('L13: a big batch that compresses under the limit still goes through the queue', function () {
+it('a big batch that compresses under the limit still goes through the queue', function () {
     $this->refreshApplicationWithConfig(lifecycleConfig('queue', [
         'refract.capture.content' => true,
         'refract.capture.max_bytes' => 2_000_000,
@@ -515,7 +515,7 @@ it('L13: a big batch that compresses under the limit still goes through the queu
     Http::assertNothingSent();
 });
 
-it('L14: captured text with invalid UTF-8 goes through the queue with the bytes as U+FFFD, batch not lost', function () {
+it('captured text with invalid UTF-8 goes through the queue with the bytes as U+FFFD, batch not lost', function () {
     $this->refreshApplicationWithConfig(lifecycleConfig('queue', ['refract.capture.content' => true]));
     Http::fake();
     useDatabaseQueue();
@@ -533,7 +533,7 @@ it('L14: captured text with invalid UTF-8 goes through the queue with the bytes 
         ->and(Otlp::attributes(exportedRun())['gen_ai.input.messages'])->toContain("caf\u{FFFD} au lait");
 });
 
-it('L15: floats 1.0 and 0.0 are exported as doubles through the queue, same as sync', function (string $transport) {
+it('floats 1.0 and 0.0 are exported as doubles through the queue, same as sync', function (string $transport) {
     $this->refreshApplicationWithConfig(lifecycleConfig($transport, [
         'refract.context.attributes' => ['score' => 'app.score', 'zero' => 'app.zero'],
     ]));
@@ -558,7 +558,7 @@ it('L15: floats 1.0 and 0.0 are exported as doubles through the queue, same as s
         ->and($values['app.zero'])->toBe(['doubleValue' => 0.0]);
 })->with(['sync', 'queue']);
 
-it('L16: span times stay correct in a worker that runs for days, through the queue', function () {
+it('span times stay correct in a worker that runs for days, through the queue', function () {
     $this->refreshApplicationWithConfig(lifecycleConfig('queue'));
     Http::fake();
     useDatabaseQueue();
@@ -597,7 +597,7 @@ it('L16: span times stay correct in a worker that runs for days, through the que
         ->and($secondSpan['endTimeUnixNano'])->toBe((string) ($secondWall - $second));
 });
 
-it('L11: one run that makes 2,000 spans keeps 1,000, logs one warning, and memory stays flat', function () {
+it('one run that makes 2,000 spans keeps 1,000, logs one warning, and memory stays flat', function () {
     $transport = $this->captureNeutralSpans();
     Diagnostics::reset();
     Log::swap($log = new WarningLog);
@@ -632,7 +632,7 @@ it('L11: one run that makes 2,000 spans keeps 1,000, logs one warning, and memor
         ->and($grown)->toBeLessThan(100_000);
 });
 
-it('L11: while one open run holds the full buffer, dropped spans do not rescan the buffer', function () {
+it('while one open run holds the full buffer, dropped spans do not rescan the buffer', function () {
     $transport = $this->captureNeutralSpans();
     $recorder = app(Recorder::class);
     $fulls = 0;
@@ -664,7 +664,7 @@ it('L11: while one open run holds the full buffer, dropped spans do not rescan t
     expect($transport->spans)->toHaveCount(1_001);
 });
 
-it('L11: after a flush the buffer takes spans again', function () {
+it('after a flush the buffer takes spans again', function () {
     $transport = $this->captureNeutralSpans();
     $recorder = app(Recorder::class);
 
@@ -683,7 +683,7 @@ it('L11: after a flush the buffer takes spans again', function () {
     expect($transport->spans)->toHaveCount(1_004);
 });
 
-it('L11: the run, steps and tool of a run dropped at the cap leave the dropped keys when they end', function () {
+it('the run, steps and tool of a run dropped at the cap leave the dropped keys when they end', function () {
     $this->captureNeutralSpans();
     $recorder = app(Recorder::class);
     $keys = [];
@@ -735,7 +735,7 @@ function insideAppTrace(Closure $callback): void
     }
 }
 
-it('L12: a long command sends its finished runs while it runs, with no span lost, inside one app trace', function () {
+it('a long command sends its finished runs while it runs, with no span lost, inside one app trace', function () {
     $this->refreshApplicationWithConfig(lifecycleConfig('sync'));
     Http::fake();
     Diagnostics::reset();
@@ -781,7 +781,7 @@ it('L12: a long command sends its finished runs while it runs, with no span lost
     }
 });
 
-it('L12: a finished run is sent at the end of the next top-level run once 5 s passed since the last send', function () {
+it('a finished run is sent at the end of the next top-level run once 5 s passed since the last send', function () {
     $this->extenders = [Recorder::class => fn (Recorder $recorder, $app) => new ClockRecorder($app)];
     $this->refreshApplicationWithConfig(lifecycleConfig('sync'));
     Http::fake();
@@ -813,7 +813,7 @@ it('L12: a finished run is sent at the end of the next top-level run once 5 s pa
         ->and(batches()[1])->toHaveCount(8);
 });
 
-it('L12: a web request does not send while it runs, it sends once after the response', function () {
+it('a web request does not send while it runs, it sends once after the response', function () {
     bootWeb(lifecycleConfig('sync'));
     Http::fake();
 
@@ -837,7 +837,7 @@ it('L12: a web request does not send while it runs, it sends once after the resp
     expect(batches()[0])->toHaveCount(800);
 });
 
-it('L12: a sub-agent run ending does not send its own tree away from its parent run', function () {
+it('a sub-agent run ending does not send its own tree away from its parent run', function () {
     $transport = $this->captureNeutralSpans();
     $recorder = app(Recorder::class);
 
@@ -855,7 +855,7 @@ it('L12: a sub-agent run ending does not send its own tree away from its parent 
     expect($transport->spans)->toBe([]);
 });
 
-it('L12: only a top-level run ending fires the run-end send check, a sub-agent run ending does not', function () {
+it('only a top-level run ending fires the run-end send check, a sub-agent run ending does not', function () {
     $this->captureNeutralSpans();
     $recorder = app(Recorder::class);
     $ended = [];
@@ -876,7 +876,7 @@ it('L12: only a top-level run ending fires the run-end send check, a sub-agent r
     expect($ended)->toBe(['run:parent']);
 });
 
-it('L12: runs under 1,000 spans each never hit the cap in a console process, the held run is sent when the buffer is full', function (int $runs, int $size) {
+it('runs under 1,000 spans each never hit the cap in a console process, the held run is sent when the buffer is full', function (int $runs, int $size) {
     $transport = $this->captureNeutralSpans();
     Diagnostics::reset();
     Log::swap($log = new WarningLog);
@@ -905,7 +905,7 @@ it('L12: runs under 1,000 spans each never hit the cap in a console process, the
     '3 runs of 999 spans' => [3, 999],
 ]);
 
-it('L12: a full buffer in a console process sends only finished runs, an open run stays whole and open', function () {
+it('a full buffer in a console process sends only finished runs, an open run stays whole and open', function () {
     $transport = $this->captureNeutralSpans();
     $recorder = app(Recorder::class);
 
@@ -934,7 +934,7 @@ it('L12: a full buffer in a console process sends only finished runs, an open ru
     expect($transport->spans)->toHaveCount(1_102);
 });
 
-it('L18: a partial send leaves open runs, their open spans and the reset state alone', function () {
+it('a partial send leaves open runs, their open spans and the reset state alone', function () {
     $transport = $this->captureNeutralSpans();
     $recorder = app(Recorder::class);
     $resets = 0;
@@ -969,7 +969,7 @@ it('L18: a partial send leaves open runs, their open spans and the reset state a
         ->and($resets)->toBe(1);
 });
 
-it('L18: a run that failed over keeps its failover state through a partial send', function () {
+it('a run that failed over keeps its failover state through a partial send', function () {
     $transport = $this->captureNeutralSpans();
     config(['ai.providers.anthropic' => ['driver' => 'anthropic', 'key' => 'test']]);
 
@@ -1051,7 +1051,7 @@ function workAllJobs(int $most = 20): void
     }
 }
 
-it('L19: an app rollback does not lose the spans a command sends while it runs, transport queue on the app database queue', function (bool $rollBack) {
+it('an app rollback does not lose the spans a command sends while it runs, transport queue on the app database queue', function (bool $rollBack) {
     $this->refreshApplicationWithConfig(lifecycleConfig('queue'));
     Http::fake();
     useDatabaseQueue();
@@ -1087,7 +1087,7 @@ it('L19: an app rollback does not lose the spans a command sends while it runs, 
         ->and($log->warnings)->toBe([]);
 })->with(['rolled back' => true, 'committed' => false]);
 
-it('L19: a command still sends through a redis queue while it runs', function () {
+it('a command still sends through a redis queue while it runs', function () {
     $this->refreshApplicationWithConfig(lifecycleConfig('queue'));
     Http::fake();
     Queue::fake();
@@ -1110,7 +1110,7 @@ it('L19: a command still sends through a redis queue while it runs', function ()
     Http::assertNothingSent();
 });
 
-it('L20: a queue connection with after_commit pushes the export job at once, and an app rollback does not drop it', function () {
+it('a queue connection with after_commit pushes the export job at once, and an app rollback does not drop it', function () {
     $this->refreshApplicationWithConfig(lifecycleConfig('queue', [
         'database.connections.refract-queue' => ['driver' => 'sqlite', 'database' => ':memory:', 'prefix' => ''],
     ]));
@@ -1162,7 +1162,7 @@ function bootClocked(string $transport, array $config = []): WarningLog
     return $log;
 }
 
-it('L21: a send while a command runs that the destination cannot take now keeps the spans, waits 5 s, then sends each span once', function () {
+it('a send while a command runs that the destination cannot take now keeps the spans, waits 5 s, then sends each span once', function () {
     $log = bootClocked('sync');
     Http::fakeSequence()->push('', 503)->whenEmpty(Http::response('', 200));
     $recorder = app(Recorder::class);
@@ -1208,7 +1208,7 @@ it('L21: a send while a command runs that the destination cannot take now keeps 
         ->and($log->warnings[0])->not->toContain('dropped');
 });
 
-it('L21: kept spans keep the wall clock times of their first send', function () {
+it('kept spans keep the wall clock times of their first send', function () {
     // The OTLP destination sends times as they are (Langfuse moves tied start times apart).
     bootClocked('sync', ['refract.destination' => 'otlp', 'refract.destinations.otlp.endpoint' => 'https://otlp.test/v1/traces']);
     Http::fakeSequence()->push('', 503)->whenEmpty(Http::response('', 200));
@@ -1232,7 +1232,7 @@ it('L21: kept spans keep the wall clock times of their first send', function () 
     expect($first['startTimeUnixNano'])->toBe((string) (1_790_000_000_000_000_000 - 4 * $second));
 });
 
-it('L21: a 429 with Retry-After 30 while a command runs delays the next send 30 s', function () {
+it('a 429 with Retry-After 30 while a command runs delays the next send 30 s', function () {
     $log = bootClocked('sync');
     Http::fakeSequence()->push('', 429, ['Retry-After' => '30'])->whenEmpty(Http::response('', 200));
     $recorder = app(Recorder::class);
@@ -1259,7 +1259,7 @@ it('L21: a 429 with Retry-After 30 while a command runs delays the next send 30 
         ->and($log->warnings[0])->toContain('tried again');
 });
 
-it('L21: a send while a command runs that the destination rejects is dropped with its warning, not kept', function () {
+it('a send while a command runs that the destination rejects is dropped with its warning, not kept', function () {
     $log = bootClocked('sync');
     Http::fakeSequence()->push('bad', 400)->whenEmpty(Http::response('', 200));
     $recorder = app(Recorder::class);
@@ -1281,7 +1281,7 @@ it('L21: a send while a command runs that the destination rejects is dropped wit
         ->and($log->warnings[0])->toContain('HTTP 400');
 });
 
-it('L21: when one part of a send gets through and the next cannot, only the second part is kept and sent again, once', function () {
+it('when one part of a send gets through and the next cannot, only the second part is kept and sent again, once', function () {
     $log = bootClocked('sync');
     Http::fakeSequence()->push('', 200)->push('', 503)->whenEmpty(Http::response('', 200));
     $recorder = app(Recorder::class);
@@ -1318,7 +1318,7 @@ it('L21: when one part of a send gets through and the next cannot, only the seco
         ->and($log->warnings[0])->toContain('tried again');
 });
 
-it('L21: when the parts of one send fail with and without Retry-After, the next send waits the longest Retry-After', function (string $transport, array $first, array $second) {
+it('when the parts of one send fail with and without Retry-After, the next send waits the longest Retry-After', function (string $transport, array $first, array $second) {
     $log = bootClocked($transport);
     useQueueDriver('sync');
     Http::fakeSequence()->push('', ...$first)->push('', ...$second)->whenEmpty(Http::response('', 200));
@@ -1368,7 +1368,7 @@ it('L21: when the parts of one send fail with and without Retry-After, the next 
     '503, then 429 Retry-After 60' => [[503], [429, ['Retry-After' => '60']]],
 ]);
 
-it('L21: when a part of a send cannot reach the destination, the later parts of that send are kept without a try, then each is sent once', function (string $transport) {
+it('when a part of a send cannot reach the destination, the later parts of that send are kept without a try, then each is sent once', function (string $transport) {
     $log = bootClocked($transport);
     useQueueDriver('sync');
     $tries = 0;
@@ -1410,7 +1410,7 @@ it('L21: when a part of a send cannot reach the destination, the later parts of 
         ->and($log->warnings[0])->toContain('tried again');
 })->with(['sync', 'queue on the sync driver' => 'queue']);
 
-it('L21: a part that reached the destination but timed out does not stop the later parts of that send', function (string $message, int $tries) {
+it('a part that reached the destination but timed out does not stop the later parts of that send', function (string $message, int $tries) {
     bootClocked('sync');
     $calls = 0;
     Http::fake(function () use (&$calls, $message) {
@@ -1440,7 +1440,7 @@ it('L21: a part that reached the destination but timed out does not stop the lat
     'refused' => ['cURL error 7: Failed to connect to otlp.test port 443: Connection refused (see https://curl.se/libcurl/c/libcurl-errors.html) for https://otlp.test/v1/traces', 1],
 ]);
 
-it('L21: a full flush that delivers the kept spans ends the wait, the next job sends at the 5 s rule again', function () {
+it('a full flush that delivers the kept spans ends the wait, the next job sends at the 5 s rule again', function () {
     $log = bootClocked('sync');
     Http::fakeSequence()->push('', 429, ['Retry-After' => '300'])->whenEmpty(Http::response('', 200));
     $recorder = app(Recorder::class);
@@ -1480,7 +1480,7 @@ it('L21: a full flush that delivers the kept spans ends the wait, the next job s
         ->and($log->warnings[0])->toContain('tried again');
 });
 
-it('L21: kept spans go out with the final batch at the flush point, in one queue job that is retried', function () {
+it('kept spans go out with the final batch at the flush point, in one queue job that is retried', function () {
     $log = bootClocked('queue');
     useDatabaseQueue();
     $this->freezeTime();
@@ -1517,7 +1517,7 @@ it('L21: kept spans go out with the final batch at the flush point, in one queue
         ->and($log->warnings[0])->toContain('tried again');
 });
 
-it('L21: fast runs that fill the buffer while a failed send waits still send every span once, the full buffer does not wait', function () {
+it('fast runs that fill the buffer while a failed send waits still send every span once, the full buffer does not wait', function () {
     $log = bootClocked('sync');
     Http::fakeSequence()->push('', 503)->whenEmpty(Http::response('', 200));
 
@@ -1538,7 +1538,7 @@ it('L21: fast runs that fill the buffer while a failed send waits still send eve
         ->and($log->warnings[0])->toContain('tried again');
 });
 
-it('L21: while the destination stays down, a full buffer tries at most twice before the flush point', function () {
+it('while the destination stays down, a full buffer tries at most twice before the flush point', function () {
     $log = bootClocked('sync');
     Http::fake(fn () => Http::response('', 503));
     $beforeEnd = 0;
@@ -1562,7 +1562,7 @@ it('L21: while the destination stays down, a full buffer tries at most twice bef
         ->and(deliveredSpans())->toBe([]);
 });
 
-it('L21: after a failed full-buffer try with no run open, the next start once the wait is over tries again, and runs after the destination recovers are sent', function () {
+it('after a failed full-buffer try with no run open, the next start once the wait is over tries again, and runs after the destination recovers are sent', function () {
     $log = bootClocked('sync');
     Http::fakeSequence()->push('', 503)->push('', 503)->whenEmpty(Http::response('', 200));
     $recorder = app(Recorder::class);
@@ -1602,7 +1602,7 @@ it('L21: after a failed full-buffer try with no run open, the next start once th
         ->and($log->warnings)->toHaveCount(2);
 });
 
-it('L21: while the destination stays down, a full buffer with no run open tries at most once per wait, however many starts are dropped', function () {
+it('while the destination stays down, a full buffer with no run open tries at most once per wait, however many starts are dropped', function () {
     $log = bootClocked('sync');
     Http::fake(fn () => Http::response('', 503));
     $recorder = app(Recorder::class);
@@ -1639,7 +1639,7 @@ it('L21: while the destination stays down, a full buffer with no run open tries 
         ->and($log->warnings)->toHaveCount(3);
 });
 
-it('L11: once a send frees room, the steps, tools and sub-agents of a run dropped at the cap are dropped too, not recorded as new traces', function () {
+it('once a send frees room, the steps, tools and sub-agents of a run dropped at the cap are dropped too, not recorded as new traces', function () {
     bootClocked('sync');
     Http::fakeSequence()->push('', 503)->push('', 503)->whenEmpty(Http::response('', 200));
     $recorder = app(Recorder::class);
@@ -1687,7 +1687,7 @@ it('L11: once a send frees room, the steps, tools and sub-agents of a run droppe
         ->and(array_filter($spans, fn (array $span) => str_contains($span['name'], 'Dropped') || str_contains($span['name'], 'dropped')))->toBe([]);
 });
 
-it('L11: a run dropped at the cap that fails over stays dropped once a send frees room, its next attempt too', function (bool $subAgent) {
+it('a run dropped at the cap that fails over stays dropped once a send frees room, its next attempt too', function (bool $subAgent) {
     // The events of one real run with a failover, replayed under the invocation id x.
     config(['ai.providers.anthropic' => ['driver' => 'anthropic', 'key' => 'test']]);
     $events = [];

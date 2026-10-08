@@ -43,7 +43,7 @@ use Workbench\App\Ai\Agents\TimeAgent;
 use Workbench\App\Jobs\RunAgent;
 
 /*
- * Rule 1: never break the app. Rule 7: one warning path. Rule 10: no extra calls.
+ * Refract never breaks the app, warns through one path and makes no extra calls.
  */
 
 /**
@@ -154,7 +154,7 @@ afterEach(function () {
     CountingAgent::$refractCalls = [];
 });
 
-it('S1: a listener that throws lets every kind of run continue, with one warning that names no value', function () {
+it('a listener that throws lets every kind of run continue, with one warning that names no value', function () {
     $this->extenders[Recorder::class] = fn (Recorder $recorder, Application $app) => new ThrowingRecorder($app);
     $log = bootSafety();
 
@@ -168,7 +168,7 @@ it('S1: a listener that throws lets every kind of run continue, with one warning
         ->and($log->warnings[0])->not->toContain('SECRET');
 });
 
-it('S1: the app gets its own exception unchanged when the listener for the failure throws', function () {
+it('the app gets its own exception unchanged when the listener for the failure throws', function () {
     $this->extenders[Recorder::class] = fn (Recorder $recorder, Application $app) => new ThrowingRecorder($app);
     $log = bootSafety();
 
@@ -187,7 +187,7 @@ it('S1: the app gets its own exception unchanged when the listener for the failu
         ->and($log->warnings)->toHaveCount(1);
 });
 
-it('S1: a run whose context cannot be read is recorded without its context, with one warning', function () {
+it('a run whose context cannot be read is recorded without its context, with one warning', function () {
     bootSafety();
     $memory = $this->captureNeutralSpans();
     $this->loadMigrationsFrom(dirname(__DIR__, 2).'/vendor/laravel/ai/database/migrations');
@@ -219,7 +219,7 @@ it('S1: a run whose context cannot be read is recorded without its context, with
         ->and($log->warnings[0])->not->toContain('SECRET');
 });
 
-it('S2: a log that cannot be written throws nothing to the app', function () {
+it('a log that cannot be written throws nothing to the app', function () {
     $this->extenders[Recorder::class] = fn (Recorder $recorder, Application $app) => new ThrowingRecorder($app);
     bootSafety();
 
@@ -268,7 +268,7 @@ function safetyQueue(): void
     });
 }
 
-it('S3: a flush hook whose transport throws still clears the buffer, and the app is unaffected', function (string $hook) {
+it('a flush hook whose transport throws still clears the buffer, and the app is unaffected', function (string $hook) {
     $transport = new FlakyTransport;
     $this->extenders[Transport::class] = fn () => $transport;
 
@@ -320,7 +320,7 @@ it('S3: a flush hook whose transport throws still clears the buffer, and the app
         ->and($log->warnings[0])->not->toContain('SECRET');
 })->with(['web terminating', 'job end', 'command end']);
 
-it('S3: a flush that fails while building the batch, or a reset that throws, still clears the buffer', function () {
+it('a flush that fails while building the batch, or a reset that throws, still clears the buffer', function () {
     $transport = new FlakyTransport;
     $transport->throws = false;
     $this->extenders[Transport::class] = fn () => $transport;
@@ -357,7 +357,7 @@ it('S3: a flush that fails while building the batch, or a reset that throws, sti
         ->and(implode("\n", $log->warnings))->not->toContain('SECRET');
 });
 
-it('S4: 11 different internal errors give 10 warnings, then silence', function () {
+it('11 different internal errors give 10 warnings, then silence', function () {
     bootSafety();
     Log::swap($log = new WarningLog);
 
@@ -371,7 +371,7 @@ it('S4: 11 different internal errors give 10 warnings, then silence', function (
         ->and(implode("\n", $log->warnings))->not->toContain('again');
 });
 
-it('S5: instructions(), tools() and name() are called only by the SDK, never by Refract', function () {
+it('instructions(), tools() and name() are called only by the SDK, never by Refract', function () {
     bootSafety(['refract.capture.content' => true]);
 
     CountingAgent::fakeSteps();
@@ -409,7 +409,7 @@ it('S5: instructions(), tools() and name() are called only by the SDK, never by 
         ->and($runs->map(fn (array $attributes) => $attributes['gen_ai.agent.name'])->all())->toBe(['CountingAgent', 'CountingAgent', 'CountingAgent', 'counting_agent']);
 });
 
-it('S6: with Refract disabled no listener or flush hook is registered', function (bool $enabled) {
+it('with Refract disabled no listener or flush hook is registered', function (bool $enabled) {
     bootSafety(['refract.enabled' => $enabled]);
 
     $hooks = refractHooks();
@@ -428,7 +428,7 @@ it('S6: with Refract disabled no listener or flush hook is registered', function
     }
 })->with(['disabled' => false, 'enabled (control)' => true]);
 
-it('S7: 2,000 runs in one worker keep memory flat', function () {
+it('2,000 runs in one worker keep memory flat', function () {
     bootSafety(['refract.transport' => 'null', 'refract.capture.content' => true]);
 
     // The events of one real run with a failover, replayed under new invocation ids,
@@ -514,7 +514,7 @@ function throwingExporter(): Exporter
     };
 }
 
-it('S1: an exporter that throws on the sync transport drops the batch with one warning', function () {
+it('an exporter that throws on the sync transport drops the batch with one warning', function () {
     $this->extenders[Exporter::class] = fn () => throwingExporter();
     $log = bootSafety();
 
@@ -526,7 +526,7 @@ it('S1: an exporter that throws on the sync transport drops the batch with one w
         ->and($log->warnings[0])->not->toContain('SECRET');
 });
 
-it('S1: an exporter that throws in the queue job drops the batch with one warning, not reported as a failed job', function () {
+it('an exporter that throws in the queue job drops the batch with one warning, not reported as a failed job', function () {
     $this->extenders[Exporter::class] = fn () => throwingExporter();
     $log = bootSafety(['refract.transport' => 'queue']);
     safetyQueue();
@@ -548,7 +548,7 @@ it('S1: an exporter that throws in the queue job drops the batch with one warnin
         ->and($log->warnings[0])->not->toContain('SECRET');
 });
 
-it('S1: a batch the queue transport cannot encode is exported in this process with one warning', function () {
+it('a batch the queue transport cannot encode is exported in this process with one warning', function () {
     $log = bootSafety(['refract.transport' => 'queue']);
     safetyQueue();
 
@@ -567,7 +567,7 @@ it('S1: a batch the queue transport cannot encode is exported in this process wi
         ->and($log->warnings[0])->not->toContain('SECRET');
 });
 
-it('S1: the exporter guards translating, preparing and encoding, not only the HTTP call', function () {
+it('the exporter guards translating, preparing and encoding, not only the HTTP call', function () {
     $log = bootSafety();
 
     $platform = new class implements Platform

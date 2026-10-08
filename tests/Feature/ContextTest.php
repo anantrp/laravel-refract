@@ -42,7 +42,7 @@ function runAttributes(): array
     return array_values(array_map(Otlp::attributes(...), $runs));
 }
 
-it('X1: a saved run with a User participant records the full class, the id and Langfuse user.id', function () {
+it('a saved run with a User participant records the full class, the id and Langfuse user.id', function () {
     ChatAgent::fake(['Hello.']);
 
     ChatAgent::make()->forUser((new User)->forceFill(['id' => 42]))->prompt('Hello');
@@ -56,7 +56,7 @@ it('X1: a saved run with a User participant records the full class, the id and L
     ]);
 });
 
-it('X1: a saved run of an agent that only uses the conversation trait records its participant', function () {
+it('a saved run of an agent that only uses the conversation trait records its participant', function () {
     Context::add('refract.participant_type', Team::class);
     Context::add('refract.participant_id', '99');
 
@@ -73,7 +73,7 @@ it('X1: a saved run of an agent that only uses the conversation trait records it
     ]);
 });
 
-it('X2: a saved run with a Team participant records the participant but no user.id', function () {
+it('a saved run with a Team participant records the participant but no user.id', function () {
     ChatAgent::fake(['Hello.']);
 
     ChatAgent::make()->forParticipant((new Team)->forceFill(['id' => 7]))->prompt('Hello');
@@ -86,7 +86,7 @@ it('X2: a saved run with a Team participant records the participant but no user.
     ])->and($run)->not->toHaveKey('user.id');
 });
 
-it('X3: a saved run ignores the participant Context keys', function () {
+it('a saved run ignores the participant Context keys', function () {
     Context::add('refract.participant_type', Team::class);
     Context::add('refract.participant_id', '99');
 
@@ -103,7 +103,7 @@ it('X3: a saved run ignores the participant Context keys', function () {
     ]);
 });
 
-it('X4: a run not saved takes the participant from both Context keys and turns a morph alias into the class', function () {
+it('a run not saved takes the participant from both Context keys and turns a morph alias into the class', function () {
     Relation::morphMap(['user' => User::class]);
 
     Context::add('refract.participant_type', 'user');
@@ -122,7 +122,7 @@ it('X4: a run not saved takes the participant from both Context keys and turns a
     ]);
 });
 
-it('X4: a Context type that is already a class name is kept', function () {
+it('a Context type that is already a class name is kept', function () {
     Context::add('refract.participant_type', Team::class);
     Context::add('refract.participant_id', 'team-1');
 
@@ -138,7 +138,7 @@ it('X4: a Context type that is already a class name is kept', function () {
     ])->and($run)->not->toHaveKey('user.id');
 });
 
-it('X5: a run not saved with only one Context key set records no participant', function (string $key) {
+it('a run not saved with only one Context key set records no participant', function (string $key) {
     Context::add($key, $key === 'refract.participant_type' ? User::class : '5');
 
     TimeAgent::fakeTwoSteps();
@@ -152,7 +152,7 @@ it('X5: a run not saved with only one Context key set records no participant', f
         ->and($run)->not->toHaveKey('user.id');
 })->with(['refract.participant_type', 'refract.participant_id']);
 
-it('X6: a participant id 0 is recorded as "0"', function () {
+it('a participant id 0 is recorded as "0"', function () {
     ChatAgent::fake(['Hello.']);
     TimeAgent::fakeTwoSteps();
 
@@ -169,7 +169,7 @@ it('X6: a participant id 0 is recorded as "0"', function () {
         ->and(array_column($runs, 'user.id'))->toBe(['0', '0']);
 });
 
-it('X7: a sub-agent run uses its parent run\'s participant and session', function () {
+it('a sub-agent run uses its parent run\'s participant and session', function () {
     ChatAgent::fakeWithSubAgent();
 
     $response = ChatAgent::make()->forUser((new User)->forceFill(['id' => 42]))->prompt('Ask for the time.');
@@ -190,7 +190,7 @@ it('X7: a sub-agent run uses its parent run\'s participant and session', functio
     }
 });
 
-it('X8: a mapped Context key named like a GenAI attribute loses to the real value', function () {
+it('a mapped Context key named like a GenAI attribute loses to the real value', function () {
     $this->refreshApplicationWithConfig([
         ...$this->environmentConfig,
         'refract.context.attributes' => [
@@ -216,7 +216,7 @@ it('X8: a mapped Context key named like a GenAI attribute loses to the real valu
     ]);
 });
 
-it('X8: a mapped Context key never fills a real attribute that is empty, so it cannot make a participant or user.id', function () {
+it('a mapped Context key never fills a real attribute that is empty, so it cannot make a participant or user.id', function () {
     $this->refreshApplicationWithConfig([
         ...$this->environmentConfig,
         'refract.context.attributes' => [
@@ -247,7 +247,7 @@ it('X8: a mapped Context key never fills a real attribute that is empty, so it c
         ->and($run)->toHaveKey('app.tenant', 'acme');
 });
 
-it('X8: a Context key mapped to user.id never sets user.id; only a user participant does', function () {
+it('a Context key mapped to user.id never sets user.id; only a user participant does', function () {
     $this->refreshApplicationWithConfig([
         ...$this->environmentConfig,
         'refract.context.attributes' => ['uid' => 'user.id', 'tenant' => 'app.tenant'],
@@ -272,7 +272,7 @@ it('X8: a Context key mapped to user.id never sets user.id; only a user particip
         ->and($team)->toHaveKey('laravel.ai.participant.id', '7');
 });
 
-it('X9: APP_ENV "Staging EU 1" is sent to Langfuse as staging-eu-1', function () {
+it('APP_ENV "Staging EU 1" is sent to Langfuse as staging-eu-1', function () {
     $this->refreshApplicationWithConfig([
         ...$this->environmentConfig,
         'app.env' => 'Staging EU 1',
@@ -290,7 +290,7 @@ it('X9: APP_ENV "Staging EU 1" is sent to Langfuse as staging-eu-1', function ()
         ->and(Otlp::resource())->toHaveKey('deployment.environment.name', 'staging-eu-1');
 });
 
-it('X9: REFRACT_ENVIRONMENT wins over APP_ENV', function () {
+it('REFRACT_ENVIRONMENT wins over APP_ENV', function () {
     $this->refreshApplicationWithConfig([
         ...$this->environmentConfig,
         'refract.environment' => 'Production',
@@ -307,7 +307,7 @@ it('X9: REFRACT_ENVIRONMENT wins over APP_ENV', function () {
     expect(Otlp::resource())->toHaveKey('deployment.environment.name', 'production');
 });
 
-it('X11: service.name is OTEL_SERVICE_NAME when set, else the app name', function (?string $serviceName, string $expected) {
+it('service.name is OTEL_SERVICE_NAME when set, else the app name', function (?string $serviceName, string $expected) {
     $this->refreshApplicationWithConfig([
         ...$this->environmentConfig,
         'app.name' => 'Shop',
@@ -328,7 +328,7 @@ it('X11: service.name is OTEL_SERVICE_NAME when set, else the app name', functio
     'not set' => [null, 'Shop'],
 ]);
 
-it('X1: the OTLP destination gets the participant attributes and no user.id', function () {
+it('the OTLP destination gets the participant attributes and no user.id', function () {
     $this->refreshApplicationWithConfig([
         ...$this->environmentConfig,
         'refract.destination' => 'otlp',
@@ -350,7 +350,7 @@ it('X1: the OTLP destination gets the participant attributes and no user.id', fu
         ])->and($run)->not->toHaveKey('user.id');
 });
 
-it('X9: the OTLP destination gets the environment name as it is', function () {
+it('the OTLP destination gets the environment name as it is', function () {
     $this->refreshApplicationWithConfig([
         ...$this->environmentConfig,
         'app.env' => 'Staging EU 1',
@@ -370,7 +370,7 @@ it('X9: the OTLP destination gets the environment name as it is', function () {
         ->and(Otlp::resource())->toHaveKey('deployment.environment.name', 'Staging EU 1');
 });
 
-it('X12: a Context key mapped to a numeric attribute name is sent with the name as a JSON string', function () {
+it('a Context key mapped to a numeric attribute name is sent with the name as a JSON string', function () {
     $this->refreshApplicationWithConfig([
         ...$this->environmentConfig,
         'refract.context.attributes' => ['tenant' => '123'],
@@ -391,7 +391,7 @@ it('X12: a Context key mapped to a numeric attribute name is sent with the name 
         ->not->toContain('"key":123');
 });
 
-it('X13: a Context key mapped to a langfuse.* attribute is not sent to Langfuse; its own attributes still are', function () {
+it('a Context key mapped to a langfuse.* attribute is not sent to Langfuse; its own attributes still are', function () {
     $this->refreshApplicationWithConfig([
         ...$this->environmentConfig,
         'refract.context.attributes' => [

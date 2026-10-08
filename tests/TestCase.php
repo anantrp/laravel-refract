@@ -97,7 +97,7 @@ abstract class TestCase extends Orchestra
             'ai.providers.openai' => ['driver' => 'openai', 'key' => 'test'],
             'ai.conversations.generate_title' => false,
             'refract.transport' => 'null',
-            // Never touch the workbench database file that level 2 uses.
+            // Never touch the workbench database file that the live scenarios use.
             'database.default' => 'testing',
             'database.connections.testing' => ['driver' => 'sqlite', 'database' => self::sqliteFile(), 'prefix' => ''],
         ]);

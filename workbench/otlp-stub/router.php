@@ -1,7 +1,7 @@
 <?php
 
 /*
- * Stub OTLP receiver for level 2 evidence. Local only: not in the package, not in CI.
+ * Stub OTLP receiver for the live scenarios. Local only: not in the package, not in CI.
  *
  *   php -S 127.0.0.1:4318 workbench/otlp-stub/router.php
  *

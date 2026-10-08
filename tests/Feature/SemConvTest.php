@@ -17,8 +17,8 @@ use Workbench\App\Ai\Agents\TimeAgent;
 use Workbench\App\Models\User;
 
 /*
- * Row A6: every attribute name Refract emits that the OTel semantic conventions define is spelled
- * the way open-telemetry/sem-conv (require-dev only, rule 11) spells it, and is not deprecated there.
+ * Every attribute name Refract emits that the OTel semantic conventions define is spelled
+ * the way open-telemetry/sem-conv (require-dev only) spells it, and is not deprecated there.
  */
 
 /**
@@ -216,7 +216,7 @@ beforeEach(function () {
     Http::fake();
 });
 
-it('A6: the agent runs here emit every OTel attribute name Refract knows', function () {
+it('the agent runs here emit every OTel attribute name Refract knows', function () {
     expect(semConvEmitted()['names'])->toContain(
         'gen_ai.operation.name', 'gen_ai.provider.name', 'gen_ai.request.model', 'gen_ai.response.model',
         'gen_ai.response.finish_reasons', 'gen_ai.usage.input_tokens', 'gen_ai.usage.output_tokens',
@@ -226,7 +226,7 @@ it('A6: the agent runs here emit every OTel attribute name Refract knows', funct
     );
 });
 
-it('A6: every emitted attribute name outside laravel.* and langfuse.* is an OTel semantic convention name, and none is deprecated', function () {
+it('every emitted attribute name outside laravel.* and langfuse.* is an OTel semantic convention name, and none is deprecated', function () {
     $otel = array_values(array_filter(
         semConvEmitted()['names'],
         fn (string $name) => ! array_filter(SEM_CONV_OWN_PREFIXES, fn (string $prefix) => str_starts_with($name, $prefix)),
@@ -250,11 +250,11 @@ it('A6: every emitted attribute name outside laravel.* and langfuse.* is an OTel
         ->and(array_values(array_diff($unknown, SEM_CONV_NOT_DEFINED)))->toBe([]);
 });
 
-it('A6: no emitted name is a GenAI name newer conventions replaced', function () {
+it('no emitted name is a GenAI name newer conventions replaced', function () {
     expect(array_values(array_intersect(semConvEmitted()['names'], array_keys(SEM_CONV_REPLACED))))->toBe([]);
 });
 
-it('A6: no emitted name is spelled differently from the sem-conv name of the same constant', function () {
+it('no emitted name is spelled differently from the sem-conv name of the same constant', function () {
     $mismatched = [];
 
     foreach (semConvEmitted()['names'] as $name) {
@@ -264,7 +264,7 @@ it('A6: no emitted name is spelled differently from the sem-conv name of the sam
     expect($mismatched)->toBe([]);
 });
 
-it('A6: every emitted gen_ai.operation.name is a sem-conv operation value', function () {
+it('every emitted gen_ai.operation.name is a sem-conv operation value', function () {
     $values = [];
 
     foreach (semConvConstants() as $value => $constants) {
@@ -279,6 +279,6 @@ it('A6: every emitted gen_ai.operation.name is a sem-conv operation value', func
         ->and($values)->toContain('invoke_agent', 'chat', 'execute_tool');
 });
 
-it('A6: the error.type of an unknown exception is the sem-conv _OTHER value', function () {
+it('the error.type of an unknown exception is the sem-conv _OTHER value', function () {
     expect(GenAiTranslator::OTHER_ERROR)->toBe(ErrorAttributes::ERROR_TYPE_VALUE_OTHER);
 });

@@ -18,7 +18,7 @@ function translatedSpan(string $id, ?string $parent, int $start, int $end): arra
     ];
 }
 
-it('R11: Langfuse moves siblings that start in the same ms to distinct ms, children stay inside their parent', function () {
+it('Langfuse moves siblings that start in the same ms to distinct ms, children stay inside their parent', function () {
     $ms = 1_000_000;
     $base = 1_700_000_000_000 * $ms;
 
@@ -43,7 +43,7 @@ it('R11: Langfuse moves siblings that start in the same ms to distinct ms, child
         ->and(array_column($spans, 'span_id'))->toBe(['run', 'chat0', 'tool', 'chat1', 'sub']);
 });
 
-it('R11: Langfuse keeps sequential siblings in order after it moves a span', function () {
+it('Langfuse keeps sequential siblings in order after it moves a span', function () {
     $ms = 1_000_000;
     $base = 1_700_000_000_000 * $ms;
 
@@ -68,7 +68,7 @@ it('R11: Langfuse keeps sequential siblings in order after it moves a span', fun
         ->and($byId['run']['end'])->toBeGreaterThanOrEqual($byId['chat1']['end']);
 });
 
-it('R11: Langfuse keeps events inside their span after it moves the span', function () {
+it('Langfuse keeps events inside their span after it moves the span', function () {
     $ms = 1_000_000;
     $base = 1_700_000_000_000 * $ms;
 

@@ -14,7 +14,7 @@ use function Orchestra\Testbench\package_path;
 
 class Check extends Command
 {
-    protected $signature = 'refract:check {row : Matrix row id, for example R1}';
+    protected $signature = 'refract:check {row : Scenario name, for example R1}';
 
     protected $description = 'Run a row scenario, read its tree from Langfuse and compare it to workbench/expected/{row}.txt';
 

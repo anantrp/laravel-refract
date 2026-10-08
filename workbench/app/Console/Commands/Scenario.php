@@ -8,9 +8,9 @@ use Workbench\App\Scenarios;
 
 class Scenario extends Command
 {
-    protected $signature = 'refract:scenario {row : Matrix row id, for example R1}';
+    protected $signature = 'refract:scenario {row : Scenario name, for example R1}';
 
-    protected $description = 'Run a matrix row scenario and print its trace id on the last line';
+    protected $description = 'Run a scenario and print its trace id on the last line';
 
     public function handle(Scenarios $scenarios): int
     {

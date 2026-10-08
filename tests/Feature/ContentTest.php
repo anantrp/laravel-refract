@@ -123,7 +123,7 @@ beforeEach(function () {
     NotesTool::$note = 'Ship on Friday.';
 });
 
-it('P1: with capture off no span or event holds a prompt, output, tool argument, tool result or error message', function () {
+it('with capture off no span or event holds a prompt, output, tool argument, tool result or error message', function () {
     $this->refreshApplicationWithConfig(contentConfig());
 
     Http::fake();
@@ -187,7 +187,7 @@ it('P1: with capture off no span or event holds a prompt, output, tool argument,
         ->and($body)->not->toContain('gen_ai.tool.call.result');
 });
 
-it('P1: with capture off the neutral spans have an empty content bucket', function () {
+it('with capture off the neutral spans have an empty content bucket', function () {
     $memory = $this->captureNeutralSpans();
 
     NotesAgent::fakeTwoSteps();
@@ -199,7 +199,7 @@ it('P1: with capture off the neutral spans have an empty content bucket', functi
         ->and(array_column($memory->spans, 'content'))->toBe([[], [], [], []]);
 });
 
-it('P2: with capture on the prompt, step messages, output, tool arguments and tool result are recorded', function () {
+it('with capture on the prompt, step messages, output, tool arguments and tool result are recorded', function () {
     $this->environmentConfig = contentConfig(['refract.capture.content' => true]);
     $memory = $this->captureNeutralSpans();
 
@@ -243,7 +243,7 @@ it('P2: with capture on the prompt, step messages, output, tool arguments and to
     ])->and(json_encode($second['content']))->not->toContain('Ship on Friday.');
 });
 
-it('P2: content is exported as the OTel GenAI input, output and tool call attributes', function () {
+it('content is exported as the OTel GenAI input, output and tool call attributes', function () {
     $this->refreshApplicationWithConfig(contentConfig(['refract.capture.content' => true]));
 
     Http::fake();
@@ -277,7 +277,7 @@ it('P2: content is exported as the OTel GenAI input, output and tool call attrib
         ->and($tool['gen_ai.tool.call.result'])->toBe($result);
 });
 
-it('P2: empty tool call arguments are exported as a JSON object, not a list', function () {
+it('empty tool call arguments are exported as a JSON object, not a list', function () {
     $this->refreshApplicationWithConfig(contentConfig(['refract.capture.content' => true]));
 
     Http::fake();
@@ -294,7 +294,7 @@ it('P2: empty tool call arguments are exported as a JSON object, not a list', fu
         ->and($tool['gen_ai.tool.call.arguments'])->toBe('{}');
 });
 
-it('P2: a stream records the same content as prompt()', function () {
+it('a stream records the same content as prompt()', function () {
     $this->environmentConfig = contentConfig(['refract.capture.content' => true]);
     $memory = $this->captureNeutralSpans();
 
@@ -318,7 +318,7 @@ it('P2: a stream records the same content as prompt()', function () {
     ]);
 });
 
-it('P2: abandoned and failed spans keep their input and get no output', function () {
+it('abandoned and failed spans keep their input and get no output', function () {
     $this->environmentConfig = contentConfig(['refract.capture.content' => true]);
     $memory = $this->captureNeutralSpans();
 
@@ -341,7 +341,7 @@ it('P2: abandoned and failed spans keep their input and get no output', function
     }
 });
 
-it('P3: a value over the byte cap is cut and marked with its original size', function () {
+it('a value over the byte cap is cut and marked with its original size', function () {
     $this->environmentConfig = contentConfig(['refract.capture.content' => true, 'refract.capture.max_bytes' => 64]);
     $memory = $this->captureNeutralSpans();
 
@@ -362,7 +362,7 @@ it('P3: a value over the byte cap is cut and marked with its original size', fun
         ->and($run['content']['output'][0]['parts'][0]['content'])->toBe('Short.');
 });
 
-it('P3: a cut never splits a multibyte character', function () {
+it('a cut never splits a multibyte character', function () {
     $this->environmentConfig = contentConfig(['refract.capture.content' => true, 'refract.capture.max_bytes' => 64]);
     $memory = $this->captureNeutralSpans();
 
@@ -379,7 +379,7 @@ it('P3: a cut never splits a multibyte character', function () {
         ->and($cut)->toStartWith('éé');
 });
 
-it('P3: at the minimum byte cap of 64 a cut value, marker included, never exceeds the cap', function (string $value) {
+it('at the minimum byte cap of 64 a cut value, marker included, never exceeds the cap', function (string $value) {
     $this->environmentConfig = contentConfig(['refract.capture.content' => true, 'refract.capture.max_bytes' => 64]);
     $this->refreshApplication();
 
@@ -395,7 +395,7 @@ it('P3: at the minimum byte cap of 64 a cut value, marker included, never exceed
     '10 MB' => [str_repeat('a', 10_000_000)],
 ]);
 
-it('P3: the default byte cap is 128 KB', function () {
+it('the default byte cap is 128 KB', function () {
     $this->environmentConfig = contentConfig(['refract.capture.content' => true]);
     $memory = $this->captureNeutralSpans();
 
@@ -413,7 +413,7 @@ it('P3: the default byte cap is 128 KB', function () {
         ->and($second['content']['output'][0]['parts'][0]['content'])->toEndWith('[cut, original size 131073 bytes]');
 });
 
-it('P4: the mask runs on every captured value before export, and before the cut', function () {
+it('the mask runs on every captured value before export, and before the cut', function () {
     $this->refreshApplicationWithConfig(contentConfig([
         'refract.capture.content' => true,
         'refract.capture.mask' => RecordingMask::class,
@@ -447,7 +447,7 @@ it('P4: the mask runs on every captured value before export, and before the cut'
         ->and($tool['gen_ai.tool.call.result'])->toBe('{"topic":"[masked] topic","note":"the [masked] note"}');
 });
 
-it('P5: a mask that throws fully masks the value, the run continues and one warning names no value', function () {
+it('a mask that throws fully masks the value, the run continues and one warning names no value', function () {
     $this->environmentConfig = contentConfig([
         'refract.capture.content' => true,
         'refract.capture.mask' => ThrowingMask::class,
@@ -479,7 +479,7 @@ it('P5: a mask that throws fully masks the value, the run continues and one warn
         ->and($log->warnings[0])->not->toContain('secret');
 });
 
-it('P5: a mask class that cannot be made fully masks every value with one warning', function (mixed $mask) {
+it('a mask class that cannot be made fully masks every value with one warning', function (mixed $mask) {
     $this->environmentConfig = contentConfig([
         'refract.capture.content' => true,
         'refract.capture.mask' => $mask,
@@ -504,7 +504,7 @@ it('P5: a mask class that cannot be made fully masks every value with one warnin
     'not a string' => [['App\\Masks\\Missing']],
 ]);
 
-it('P6: with capture on no attachment of any kind leaves a trace, in the run input or the step history', function () {
+it('with capture on no attachment of any kind leaves a trace, in the run input or the step history', function () {
     $this->refreshApplicationWithConfig(contentConfig(['refract.capture.content' => true]));
 
     Http::fake();
@@ -547,7 +547,7 @@ it('P6: with capture on no attachment of any kind leaves a trace, in the run inp
     expect(TrapImage::$calls)->toBe([]);
 });
 
-it('P6: a tool result that is a file, or holds files, records [file] for each file and calls no file method', function (Closure $result, string $expected) {
+it('a tool result that is a file, or holds files, records [file] for each file and calls no file method', function (Closure $result, string $expected) {
     $this->environmentConfig = contentConfig(['refract.capture.content' => true]);
     $memory = $this->captureNeutralSpans();
 
@@ -590,7 +590,7 @@ it('P6: a tool result that is a file, or holds files, records [file] for each fi
     ],
 ]);
 
-it('P2: a tool result in the history from withMessages() is a reference only and leaves no trace of its text', function () {
+it('a tool result in the history from withMessages() is a reference only and leaves no trace of its text', function () {
     $this->refreshApplicationWithConfig(contentConfig(['refract.capture.content' => true]));
 
     Http::fake();
@@ -618,7 +618,7 @@ it('P2: a tool result in the history from withMessages() is a reference only and
     ])->and(sentBodies())->not->toContain('SECRET');
 });
 
-it('P2: a tool result in the history of a saved conversation is a reference only and leaves no trace of its text', function () {
+it('a tool result in the history of a saved conversation is a reference only and leaves no trace of its text', function () {
     $this->refreshApplicationWithConfig(contentConfig(['refract.capture.content' => true]));
     $this->loadMigrationsFrom(dirname(__DIR__, 2).'/vendor/laravel/ai/database/migrations');
 
@@ -652,7 +652,7 @@ it('P2: a tool result in the history of a saved conversation is a reference only
     )->and(sentBodies())->not->toContain('SECRET');
 });
 
-it('P6: each kind of file in a tool result records [file], directly or inside a value', function (Closure $file) {
+it('each kind of file in a tool result records [file], directly or inside a value', function (Closure $file) {
     $this->environmentConfig = contentConfig(['refract.capture.content' => true]);
     $this->refreshApplication();
 
@@ -701,7 +701,7 @@ it('P6: each kind of file in a tool result records [file], directly or inside a 
     'StoreCreated' => [fn () => new StoreCreated('run', Mockery::mock(Provider::class), 'Docs', null, collect(['file-SECRET']), null, Mockery::mock(Store::class))],
 ]);
 
-it('P6: SDK file responses returned by a tool leave no bytes or id in the tool span or the next step', function () {
+it('SDK file responses returned by a tool leave no bytes or id in the tool span or the next step', function () {
     $this->environmentConfig = contentConfig(['refract.capture.content' => true]);
     $memory = $this->captureNeutralSpans();
 
@@ -722,7 +722,7 @@ it('P6: SDK file responses returned by a tool leave no bytes or id in the tool s
         ->and(json_encode($memory->spans))->not->toContain('SECRET');
 });
 
-it('P6: an SDK response inside a Collection is its class name, so the file bytes its steps hold leave no trace', function () {
+it('an SDK response inside a Collection is its class name, so the file bytes its steps hold leave no trace', function () {
     $this->environmentConfig = contentConfig(['refract.capture.content' => true]);
     $memory = $this->captureNeutralSpans();
 
@@ -744,7 +744,7 @@ it('P6: an SDK response inside a Collection is its class name, so the file bytes
         ->and(json_encode($memory->spans))->not->toContain('SECRET');
 });
 
-it('P11: objects other than arrays and Collections in a tool result are their class names and are never walked, serialized or iterated', function () {
+it('objects other than arrays and Collections in a tool result are their class names and are never walked, serialized or iterated', function () {
     $this->environmentConfig = contentConfig(['refract.capture.content' => true]);
     $this->refreshApplication();
 
@@ -777,7 +777,7 @@ it('P11: objects other than arrays and Collections in a tool result are their cl
         ->and(TrapImage::$calls)->toBe([]);
 });
 
-it('P11: a LazyCollection tool result, alone or inside a Collection, is never run by Refract', function (Closure $result, string $expected) {
+it('a LazyCollection tool result, alone or inside a Collection, is never run by Refract', function (Closure $result, string $expected) {
     $this->environmentConfig = contentConfig(['refract.capture.content' => true]);
     $memory = $this->captureNeutralSpans();
 
@@ -804,7 +804,7 @@ it('P11: a LazyCollection tool result, alone or inside a Collection, is never ru
     'in a Collection' => [fn (LazyCollection $lazy) => collect(['rows' => $lazy]), '{"rows":"'.addslashes(LazyCollection::class).'"}'],
 ]);
 
-it('P11: a model inside a tool result is its class name, so its appended accessors never run', function () {
+it('a model inside a tool result is its class name, so its appended accessors never run', function () {
     $this->environmentConfig = contentConfig(['refract.capture.content' => true]);
     $memory = $this->captureNeutralSpans();
 
@@ -836,7 +836,7 @@ it('P11: a model inside a tool result is its class name, so its appended accesso
         ->and(json_encode($memory->spans))->not->toContain('SECRET');
 });
 
-it('P11: a tool result object (Collection) is recorded as text', function () {
+it('a tool result object (Collection) is recorded as text', function () {
     $this->refreshApplicationWithConfig(contentConfig(['refract.capture.content' => true]));
 
     Http::fake();
@@ -871,7 +871,7 @@ function nested(int $depth): array
     return $value;
 }
 
-it('P13: a value that cannot be encoded as JSON is recorded as a marker with one warning that names no value', function (Closure $value) {
+it('a value that cannot be encoded as JSON is recorded as a marker with one warning that names no value', function (Closure $value) {
     $this->environmentConfig = contentConfig(['refract.capture.content' => true]);
     $this->refreshApplication();
 
@@ -892,7 +892,7 @@ it('P13: a value that cannot be encoded as JSON is recorded as a marker with one
     'nested deeper than 512' => [fn () => nested(600)],
 ]);
 
-it('P13: a tool result that cannot be encoded keeps the rest of the step content', function () {
+it('a tool result that cannot be encoded keeps the rest of the step content', function () {
     $this->environmentConfig = contentConfig(['refract.capture.content' => true]);
     $memory = $this->captureNeutralSpans();
 
@@ -911,7 +911,7 @@ it('P13: a tool result that cannot be encoded keeps the rest of the step content
         ->and(end($second['content']['input'])['parts'])->toBe([['type' => 'tool_call_response', 'id' => 'call_1', 'name' => 'FileTool']]);
 });
 
-it('P13: tool call arguments too deep to nest in the messages are exported as their JSON text', function () {
+it('tool call arguments too deep to nest in the messages are exported as their JSON text', function () {
     $arguments = (string) json_encode(nested(510));
 
     $span = (new GenAiTranslator)->translate([
@@ -928,7 +928,7 @@ it('P13: tool call arguments too deep to nest in the messages are exported as th
     ]]);
 });
 
-it('P13: a tool call response in messages exported as JSON text still gets its fixed response', function () {
+it('a tool call response in messages exported as JSON text still gets its fixed response', function () {
     $arguments = (string) json_encode(nested(510));
 
     $span = (new GenAiTranslator)->translate([
@@ -959,7 +959,7 @@ function fillBuffer(string $run, int $spans): void
     }
 }
 
-it('P14: with capture on the end content of a span dropped at the cap, or under a dropped parent, is never built, so the mask is not called for its output or result', function (int $filler, array $seen) {
+it('with capture on the end content of a span dropped at the cap, or under a dropped parent, is never built, so the mask is not called for its output or result', function (int $filler, array $seen) {
     $this->environmentConfig = contentConfig([
         'refract.capture.content' => true,
         'refract.capture.mask' => RecordingMask::class,

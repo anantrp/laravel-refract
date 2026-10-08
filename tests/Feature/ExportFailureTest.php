@@ -24,7 +24,7 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 
 /*
- * Rule 8: retry on a network error, 408, 429 and 5xx; drop every other
+ * Retry on a network error, 408, 429 and 5xx; drop every other
  * status with one warning. The queue job tries 4 times, 10 s, 60 s then
  * 300 s apart, or after the Retry-After seconds of a 429 or 503 (at most 300).
  */
@@ -129,7 +129,7 @@ function secondsUntilRetry(): int
 dataset('retryable', ['408' => 408, '429' => 429, '500' => 500, '503' => 503, 'network error' => 'network']);
 dataset('rejected', ['400' => 400, '401' => 401, '403' => 403, '404' => 404]);
 
-it('E1: a 2xx is done with no log', function (string $transport, int $status) {
+it('a 2xx is done with no log', function (string $transport, int $status) {
     $log = bootExport($transport);
     fakeDestination($status);
     useExportQueue();
@@ -146,7 +146,7 @@ it('E1: a 2xx is done with no log', function (string $transport, int $status) {
     expect($log->warnings)->toBe([]);
 })->with(['sync', 'queue'])->with([200, 202, 204]);
 
-it('E8: a 2xx that refuses some spans is done, not retried, and logs one warning with the count and the message', function (string $transport, string $body, string $count, string $message) {
+it('a 2xx that refuses some spans is done, not retried, and logs one warning with the count and the message', function (string $transport, string $body, string $count, string $message) {
     $log = bootExport($transport);
     fakeDestination(200, $body);
     useExportQueue();
@@ -171,7 +171,7 @@ it('E8: a 2xx that refuses some spans is done, not retried, and logs one warning
     'message only' => ['{"partialSuccess":{"errorMessage":"slow down"}}', '0 span', 'slow down'],
 ]);
 
-it('E8: the partial success message leaves out credentials the destination echoed', function () {
+it('the partial success message leaves out credentials the destination echoed', function () {
     $log = bootExport('sync');
     fakeDestination(200, json_encode(['partialSuccess' => [
         'rejectedSpans' => 1,
@@ -186,7 +186,7 @@ it('E8: the partial success message leaves out credentials the destination echoe
         ->and($log->warnings[0])->not->toContain('K1-SECRET');
 });
 
-it('E8: a 2xx with no refused spans logs nothing', function (string $body) {
+it('a 2xx with no refused spans logs nothing', function (string $body) {
     $log = bootExport('sync');
     fakeDestination(200, $body);
 
@@ -207,7 +207,7 @@ it('E8: a 2xx with no refused spans logs nothing', function (string $body) {
     'negative count' => '{"partialSuccess":{"rejectedSpans":-1}}',
 ]);
 
-it('E2: a 400, 401, 403 or 404 is not retried and logs one warning with the status and the first 200 chars of the body', function (string $transport, int $status) {
+it('a 400, 401, 403 or 404 is not retried and logs one warning with the status and the first 200 chars of the body', function (string $transport, int $status) {
     $log = bootExport($transport);
     fakeDestination($status, str_repeat('é', 200).'TAIL');
     useExportQueue();
@@ -234,7 +234,7 @@ it('E2: a 400, 401, 403 or 404 is not retried and logs one warning with the stat
         ->and($log->warnings[0])->not->toContain('pk-test');
 })->with(['sync', 'queue'])->with('rejected');
 
-it('E2: an HTTP client error that is not a network error is dropped with one warning, nothing reaches the app', function (string $transport, string $error) {
+it('an HTTP client error that is not a network error is dropped with one warning, nothing reaches the app', function (string $transport, string $error) {
     $log = bootExport($transport);
 
     if ($error === 'exception from the client') {
@@ -256,7 +256,7 @@ it('E2: an HTTP client error that is not a network error is dropped with one war
         ->and($log->warnings[0])->toContain($error === 'stray request' ? 'StrayRequestException' : 'RuntimeException');
 })->with(['sync', 'queue'])->with(['exception from the client', 'stray request']);
 
-it('E2: a request exception that carries a response is judged by its status', function () {
+it('a request exception that carries a response is judged by its status', function () {
     $log = bootExport('sync');
     Http::fake(fn () => throw new RequestException(new Response(new GuzzleHttp\Psr7\Response(401, [], 'no key'))));
 
@@ -267,7 +267,7 @@ it('E2: a request exception that carries a response is judged by its status', fu
         ->and($log->warnings[0])->toContain('no key');
 });
 
-it('E3: a 408, 429, 5xx or network error on queue is retried, 4 tries, 10 s, 60 s then 300 s apart', function (int|string $status) {
+it('a 408, 429, 5xx or network error on queue is retried, 4 tries, 10 s, 60 s then 300 s apart', function (int|string $status) {
     $log = bootExport('queue');
     // The backoff is checked to the second: a clock tick during the test must not change it.
     $this->freezeTime();
@@ -325,7 +325,7 @@ it('E3: a 408, 429, 5xx or network error on queue is retried, 4 tries, 10 s, 60 
     Http::assertSentCount(4);
 })->with('retryable');
 
-it('E3: a queued batch that succeeds on a later try logs nothing', function () {
+it('a queued batch that succeeds on a later try logs nothing', function () {
     $log = bootExport('queue');
     Http::fakeSequence()->push('', 503)->push('', 200);
     useExportQueue();
@@ -341,7 +341,7 @@ it('E3: a queued batch that succeeds on a later try logs nothing', function () {
         ->and($log->warnings)->toBe([]);
 });
 
-it('E7: a 429 or 503 with Retry-After in seconds on queue waits that long when it is longer than the backoff', function (int $status) {
+it('a 429 or 503 with Retry-After in seconds on queue waits that long when it is longer than the backoff', function (int $status) {
     $log = bootExport('queue');
     $this->freezeTime();
     fakeRetryAfter($status, '30');
@@ -367,7 +367,7 @@ it('E7: a 429 or 503 with Retry-After in seconds on queue waits that long when i
         ->and($log->warnings)->toBe([]);
 })->with(['429' => 429, '503' => 503]);
 
-it('E7: a Retry-After shorter than the backoff waits the backoff of the attempt', function (string $retryAfter) {
+it('a Retry-After shorter than the backoff waits the backoff of the attempt', function (string $retryAfter) {
     bootExport('queue');
     $this->freezeTime();
     fakeRetryAfter(503, $retryAfter);
@@ -380,7 +380,7 @@ it('E7: a Retry-After shorter than the backoff waits the backoff of the attempt'
     expect(secondsUntilRetry())->toBe(10);
 })->with(['0' => '0', '1' => '1', '3' => '3', '9' => '9']);
 
-it('E7: a Retry-After of 30 s on the third try waits the 300 s backoff', function () {
+it('a Retry-After of 30 s on the third try waits the 300 s backoff', function () {
     bootExport('queue');
     $this->freezeTime();
     fakeRetryAfter(429, '30');
@@ -398,7 +398,7 @@ it('E7: a Retry-After of 30 s on the third try waits the 300 s backoff', functio
     expect(secondsUntilRetry())->toBe(300);
 });
 
-it('E7: a Retry-After over 300 s waits 300 s', function (string $retryAfter) {
+it('a Retry-After over 300 s waits 300 s', function (string $retryAfter) {
     bootExport('queue');
     $this->freezeTime();
     fakeRetryAfter(429, $retryAfter);
@@ -411,7 +411,7 @@ it('E7: a Retry-After over 300 s waits 300 s', function (string $retryAfter) {
     expect(secondsUntilRetry())->toBe(300);
 })->with(['301', '3600', '99999999999999999999999']);
 
-it('E7: a Retry-After that is not whole seconds, or on another status, is ignored and the backoff is used', function (int $status, string $retryAfter) {
+it('a Retry-After that is not whole seconds, or on another status, is ignored and the backoff is used', function (int $status, string $retryAfter) {
     bootExport('queue');
     $this->freezeTime();
     fakeRetryAfter($status, $retryAfter);
@@ -432,7 +432,7 @@ it('E7: a Retry-After that is not whole seconds, or on another status, is ignore
     'on 408' => [408, '3'],
 ]);
 
-it('E7: a Retry-After of 0 s on every try still waits the backoff, so a batch survives an outage of a few minutes', function () {
+it('a Retry-After of 0 s on every try still waits the backoff, so a batch survives an outage of a few minutes', function () {
     $log = bootExport('queue');
     $this->freezeTime();
     fakeRetryAfter(503, '0');
@@ -454,7 +454,7 @@ it('E7: a Retry-After of 0 s on every try still waits the backoff, so a batch su
         ->and($log->warnings)->toBe([]);
 });
 
-it('E7: a Retry-After on sync is not waited for: no retry and one warning, like E4', function (int $status) {
+it('a Retry-After on sync is not waited for: no retry and one warning, like any failed sync send', function (int $status) {
     $log = bootExport('sync');
     fakeRetryAfter($status, '3');
 
@@ -465,7 +465,7 @@ it('E7: a Retry-After on sync is not waited for: no retry and one warning, like 
         ->and($log->warnings[0])->toContain('dropped');
 })->with(['429' => 429, '503' => 503]);
 
-it('E4: a 408, 429, 5xx or network error on sync is not retried and logs one warning', function (int|string $status) {
+it('a 408, 429, 5xx or network error on sync is not retried and logs one warning', function (int|string $status) {
     $log = bootExport('sync');
     fakeDestination($status);
 
@@ -481,7 +481,7 @@ it('E4: a 408, 429, 5xx or network error on sync is not retried and logs one war
     expect($log->warnings)->toHaveCount(1);
 })->with('retryable');
 
-it('E4: the queue transport exporting in this process does not retry and logs one warning, like sync', function (Closure $setup, Closure $call, int $queueWarnings) {
+it('the queue transport exporting in this process does not retry and logs one warning, like sync', function (Closure $setup, Closure $call, int $queueWarnings) {
     $log = bootExport('queue');
     fakeDestination(503);
     useExportQueue();
@@ -500,7 +500,7 @@ it('E4: the queue transport exporting in this process does not retry and logs on
     'too big for the queue' => [fn () => null, fn () => ['padding' => bin2hex(random_bytes(200_000))], 1],
 ]);
 
-it('E5: a queue job that gives up logs one warning from failed() and is not sent to the error tracker', function () {
+it('a queue job that gives up logs one warning from failed() and is not sent to the error tracker', function () {
     $log = bootExport('queue');
     Exceptions::fake();
     fakeDestination(503);
@@ -526,7 +526,7 @@ it('E5: a queue job that gives up logs one warning from failed() and is not sent
         ->and($log->warnings[0])->toContain('4 tries');
 });
 
-it('E5: failed() called by the queue logs one warning and does not throw', function () {
+it('failed() called by the queue logs one warning and does not throw', function () {
     $log = bootExport('queue');
 
     $job = new ExportSpans('');
@@ -540,7 +540,7 @@ it('E5: failed() called by the queue logs one warning and does not throw', funct
         ->and($job->backoff)->toBe([10, 60, 300]);
 });
 
-it('E6: a 401 and then an outage in one process give two different warnings', function (string $transport) {
+it('a 401 and then an outage in one process give two different warnings', function (string $transport) {
     $log = bootExport($transport);
     Http::fakeSequence()->push('bad key', 401)->whenEmpty(Http::response('down', 503));
     useExportQueue();
@@ -562,7 +562,7 @@ it('E6: a 401 and then an outage in one process give two different warnings', fu
         ->and($log->warnings[1])->not->toBe($log->warnings[0]);
 })->with(['sync', 'queue']);
 
-it('E2: the body excerpt in the warning leaves out header lines and credentials the destination echoed', function () {
+it('the body excerpt in the warning leaves out header lines and credentials the destination echoed', function () {
     $log = bootExport('sync');
     fakeDestination(401, implode("\n", [
         '{"error":"bad key","authorization":"Basic cGstdGVzdDpzay10ZXN0"}',
@@ -583,7 +583,7 @@ it('E2: the body excerpt in the warning leaves out header lines and credentials 
     }
 });
 
-it('E2: the body excerpt masks values by key name and keeps plain error lines', function () {
+it('the body excerpt masks values by key name and keeps plain error lines', function () {
     $log = bootExport('sync');
     fakeDestination(400, implode("\n", [
         'Error: invalid project',
@@ -602,7 +602,7 @@ it('E2: the body excerpt masks values by key name and keeps plain error lines', 
     }
 });
 
-it('E5: failed() called by the queue for another cause names that cause, not a network error or status', function () {
+it('failed() called by the queue for another cause names that cause, not a network error or status', function () {
     $log = bootExport('queue');
 
     (new ExportSpans(''))->failed(new RuntimeException('The job timed out.'));
@@ -614,7 +614,7 @@ it('E5: failed() called by the queue for another cause names that cause, not a n
         ->and($log->warnings[0])->not->toContain('timed out');
 });
 
-it('E3: a batch that cannot be retried because the export job is not on a queue is dropped with one warning', function () {
+it('a batch that cannot be retried because the export job is not on a queue is dropped with one warning', function () {
     $log = bootExport('queue');
     fakeDestination(503);
 
@@ -633,7 +633,7 @@ it('E3: a batch that cannot be retried because the export job is not on a queue 
         ->and($log->warnings[0])->toContain('dropped');
 });
 
-it('E9: a redirect is not followed and counts as rejected, so the headers never go to another host', function (string $transport, int $status) {
+it('a redirect is not followed and counts as rejected, so the headers never go to another host', function (string $transport, int $status) {
     $log = bootExport($transport);
     useExportQueue();
 
@@ -679,7 +679,7 @@ function sendCompressed(string $transport, string $destination, ?string $compres
     return Http::recorded()[0][0];
 }
 
-it('E11: by default the body is gzipped and sent with Content-Encoding: gzip, to both destinations', function (string $transport, string $destination, ?string $compression) {
+it('by default the body is gzipped and sent with Content-Encoding: gzip, to both destinations', function (string $transport, string $destination, ?string $compression) {
     $request = sendCompressed($transport, $destination, $compression);
 
     $json = gzdecode($request->body());
@@ -695,7 +695,7 @@ it('E11: by default the body is gzipped and sent with Content-Encoding: gzip, to
     'GZIP' => 'GZIP',
 ]);
 
-it('E11: when gzip fails the body is sent plain, with no Content-Encoding', function () {
+it('when gzip fails the body is sent plain, with no Content-Encoding', function () {
     $log = bootExport('sync');
     fakeDestination(200);
 
@@ -716,7 +716,7 @@ it('E11: when gzip fails the body is sent plain, with no Content-Encoding', func
         ->and($log->warnings)->toBe([]);
 });
 
-it('E12: with none the body is not gzipped and has no Content-Encoding, for both destinations', function (string $transport, string $destination, string $compression) {
+it('with none the body is not gzipped and has no Content-Encoding, for both destinations', function (string $transport, string $destination, string $compression) {
     $request = sendCompressed($transport, $destination, $compression);
 
     expect($request->header('Content-Encoding'))->toBe([])
@@ -725,7 +725,7 @@ it('E12: with none the body is not gzipped and has no Content-Encoding, for both
 })->with(['sync', 'queue'])->with(['otlp', 'langfuse'])->with(['none', 'NONE']);
 
 /*
- * E10: a batch over 4 MB of OTLP JSON (before gzip) is sent in parts of
+ * A batch over 4 MB of OTLP JSON (before gzip) is sent in parts of
  * 4 MB or less, cut between run trees. A run tree is cut only when it alone
  * is too big.
  */
@@ -788,7 +788,7 @@ function partTraces(): array
     }, partBodies());
 }
 
-it('E10: a batch over 4 MB on sync is sent in parts of 4 MB or less, each run tree whole in one part', function () {
+it('a batch over 4 MB on sync is sent in parts of 4 MB or less, each run tree whole in one part', function () {
     $log = bootExport('sync');
     fakeDestination(200);
 
@@ -806,7 +806,7 @@ it('E10: a batch over 4 MB on sync is sent in parts of 4 MB or less, each run tr
         ->and($log->warnings)->toBe([]);
 });
 
-it('E10: a batch of 4 MB or less is sent in one request', function (string $transport) {
+it('a batch of 4 MB or less is sent in one request', function (string $transport) {
     bootExport($transport);
     fakeDestination(200);
     useExportQueue();
@@ -824,7 +824,7 @@ it('E10: a batch of 4 MB or less is sent in one request', function (string $tran
     expect(Otlp::spans())->toHaveCount(4);
 })->with(['sync', 'queue']);
 
-it('E10: the size is the encoded OTLP JSON, so text that grows when escaped is split by its escaped size', function () {
+it('the size is the encoded OTLP JSON, so text that grows when escaped is split by its escaped size', function () {
     bootExport('sync');
     fakeDestination(200);
 
@@ -838,7 +838,7 @@ it('E10: the size is the encoded OTLP JSON, so text that grows when escaped is s
         ->and(Otlp::spans())->toHaveCount(4);
 });
 
-it('E10: a run tree bigger than 4 MB is split, and the other trees stay whole', function () {
+it('a run tree bigger than 4 MB is split, and the other trees stay whole', function () {
     $log = bootExport('sync');
     fakeDestination(200);
 
@@ -857,7 +857,7 @@ it('E10: a run tree bigger than 4 MB is split, and the other trees stay whole', 
         ->and($log->warnings)->toBe([]);
 });
 
-it('E10: a single span bigger than 4 MB is sent alone, with one warning', function () {
+it('a single span bigger than 4 MB is sent alone, with one warning', function () {
     $log = bootExport('sync');
     fakeDestination(200);
 
@@ -877,7 +877,7 @@ it('E10: a single span bigger than 4 MB is sent alone, with one warning', functi
         ->and($log->warnings[0])->toContain('over the 4000000 byte limit');
 });
 
-it('E10: on sync failed parts warn once per kind and the later parts are still sent', function () {
+it('on sync failed parts warn once per kind and the later parts are still sent', function () {
     $log = bootExport('sync');
     // Two parts fail the same way (503): one warning for both.
     Http::fake(['*' => Http::sequence()->push('bad', 400)->push('', 503)->push('', 503)->push('', 200)]);
@@ -892,7 +892,7 @@ it('E10: on sync failed parts warn once per kind and the later parts are still s
         ->and($log->warnings[1])->toContain('could not be exported');
 });
 
-it('E10: on queue each part is its own job, so a retry sends only the part that failed', function () {
+it('on queue each part is its own job, so a retry sends only the part that failed', function () {
     $log = bootExport('queue');
     useExportQueue();
 
@@ -922,7 +922,7 @@ it('E10: on queue each part is its own job, so a retry sends only the part that 
         ->and($log->warnings)->toBe([]);
 });
 
-it('E10: on queue a part too big for one job is exported in this process, and the other parts are still queued', function () {
+it('on queue a part too big for one job is exported in this process, and the other parts are still queued', function () {
     $log = bootExport('queue');
     fakeDestination(200);
     useExportQueue();
@@ -944,7 +944,7 @@ it('E10: on queue a part too big for one job is exported in this process, and th
     expect(Otlp::spans())->toHaveCount(5);
 });
 
-it('E10: the limit is exact: a run tree of exactly 4 MB is one request, one byte more is split', function () {
+it('the limit is exact: a run tree of exactly 4 MB is one request, one byte more is split', function () {
     bootExport('sync');
     fakeDestination(200);
 
@@ -962,7 +962,7 @@ it('E10: the limit is exact: a run tree of exactly 4 MB is one request, one byte
     expect(partBodies())->toHaveCount(2);
 });
 
-it('E13: every export request waits at most 15 s for the destination', function (string $transport) {
+it('every export request waits at most 15 s for the destination', function (string $transport) {
     bootExport($transport);
     useExportQueue();
     $timeouts = [];

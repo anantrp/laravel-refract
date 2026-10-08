@@ -273,14 +273,14 @@ afterEach(function () {
 
 dataset('env vars', fn () => array_keys(envCases()));
 
-it('C1: an env var that is missing gives the default', function (string $var) {
+it('an env var that is missing gives the default', function (string $var) {
     [$result, $warnings] = runEnvCase($var, null);
 
     expect($result)->toBe(envCases()[$var]['default'])
         ->and($warnings)->toHaveCount(envCases()[$var]['warnings']);
 })->with('env vars');
 
-it('C2: an env var set to empty gives the default with no warning about it', function (string $var) {
+it('an env var set to empty gives the default with no warning about it', function (string $var) {
     [$result, $warnings] = runEnvCase($var, '');
 
     expect($result)->toBe(envCases()[$var]['default'])
@@ -301,7 +301,7 @@ function invalidOutcome(string $var): array
         : [$case['default'], $case['warnings'] + 1];
 }
 
-it('C3: an invalid env var gives the default and one warning', function (string $var) {
+it('an invalid env var gives the default and one warning', function (string $var) {
     [$result, $warnings] = runEnvCase($var, envCases()[$var]['invalid']);
     [$expected, $count] = invalidOutcome($var);
 
@@ -312,7 +312,7 @@ it('C3: an invalid env var gives the default and one warning', function (string 
         ->and($about)->toHaveCount(1);
 })->with('env vars');
 
-it('C3: an invalid LANGFUSE_BASE_URL or REFRACT_OTLP_ENDPOINT exports nothing, with one warning, to no fallback host', function (array $env, string $var, string $value) {
+it('an invalid LANGFUSE_BASE_URL or REFRACT_OTLP_ENDPOINT exports nothing, with one warning, to no fallback host', function (array $env, string $var, string $value) {
     Env::set([...BASE_ENV, ...$env, $var => $value]);
 
     $log = loadRefract();
@@ -332,7 +332,7 @@ it('C3: an invalid LANGFUSE_BASE_URL or REFRACT_OTLP_ENDPOINT exports nothing, w
     '(false)' => '(false)',
 ]);
 
-it('C3: a destination whose platform is not a Platform class exports nothing, with one warning', function (mixed $platform) {
+it('a destination whose platform is not a Platform class exports nothing, with one warning', function (mixed $platform) {
     Env::set(BASE_ENV);
 
     $log = loadRefract();
@@ -350,7 +350,7 @@ it('C3: a destination whose platform is not a Platform class exports nothing, wi
     'empty' => [null],
 ]);
 
-it('C2: with no otlp destination in the config and REFRACT_DESTINATION missing or empty, one warning names the missing default destination and nothing is exported', function (?string $destination) {
+it('with no otlp destination in the config and REFRACT_DESTINATION missing or empty, one warning names the missing default destination and nothing is exported', function (?string $destination) {
     Env::set([...BASE_ENV, 'REFRACT_DESTINATION' => $destination]);
 
     $log = loadRefract();
@@ -369,7 +369,7 @@ it('C2: with no otlp destination in the config and REFRACT_DESTINATION missing o
     'empty' => [''],
 ]);
 
-it('C1: each destination names its platform class in the config', function () {
+it('each destination names its platform class in the config', function () {
     Env::set(BASE_ENV);
 
     loadRefract();
@@ -394,7 +394,7 @@ function urlHostCases(): array
     ];
 }
 
-it('C1: a URL with an underscore or non-ASCII host is used, not the default', function (array $env, string $var, string $value, string $url) {
+it('a URL with an underscore or non-ASCII host is used, not the default', function (array $env, string $var, string $value, string $url) {
     Env::set([...BASE_ENV, ...$env, $var => $value]);
 
     loadRefract();
@@ -402,7 +402,7 @@ it('C1: a URL with an underscore or non-ASCII host is used, not the default', fu
     expect(exported()['url'] ?? null)->toBe($url);
 })->with(urlHostCases());
 
-it('C3: a URL with an underscore or non-ASCII host is not invalid and gives no warning', function (array $env, string $var, string $value) {
+it('a URL with an underscore or non-ASCII host is not invalid and gives no warning', function (array $env, string $var, string $value) {
     Env::set([...BASE_ENV, ...$env, $var => $value]);
 
     $log = loadRefract();
@@ -411,7 +411,7 @@ it('C3: a URL with an underscore or non-ASCII host is not invalid and gives no w
     expect($log->warnings)->toBe([]);
 })->with(urlHostCases());
 
-it('C3: a URL with a scheme other than http or https, or with no host, is invalid', function (array $env, string $var) {
+it('a URL with a scheme other than http or https, or with no host, is invalid', function (array $env, string $var) {
     foreach (['ftp://otel_collector:4318', 'http://', 'otel_collector:4318', 'http:///v1/traces'] as $value) {
         Env::set([...BASE_ENV, ...$env, $var => $value]);
 
@@ -422,7 +422,7 @@ it('C3: a URL with a scheme other than http or https, or with no host, is invali
     }
 })->with(urlHostCases());
 
-it('C3: a byte cap under 64, 0, negative, a fraction or text gives 128 KB and one warning', function (string $value) {
+it('a byte cap under 64, 0, negative, a fraction or text gives 128 KB and one warning', function (string $value) {
     [$result, $warnings] = runEnvCase('REFRACT_CAPTURE_MAX_BYTES', $value);
 
     expect($result)->toBe(131_072)
@@ -430,14 +430,14 @@ it('C3: a byte cap under 64, 0, negative, a fraction or text gives 128 KB and on
         ->and($warnings[0])->toContain('refract.capture.max_bytes');
 })->with(['63', '1', '0', '-5', '1.5', '1e3', '128KB']);
 
-it('C1: a byte cap of 64, the minimum, is used', function () {
+it('a byte cap of 64, the minimum, is used', function () {
     [$result, $warnings] = runEnvCase('REFRACT_CAPTURE_MAX_BYTES', '64');
 
     expect($result)->toBe(64)
         ->and($warnings)->toBe([]);
 });
 
-it('C1: capture turned on and a byte cap set are used', function () {
+it('capture turned on and a byte cap set are used', function () {
     Env::set([...BASE_ENV, 'OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT' => 'true', 'REFRACT_CAPTURE_MAX_BYTES' => '1000']);
 
     $log = loadRefract();
@@ -447,7 +447,7 @@ it('C1: capture turned on and a byte cap set are used', function () {
         ->and($log->warnings)->toBe([]);
 });
 
-it('C4: OTEL headers are not sent to the REFRACT_OTLP_ENDPOINT', function () {
+it('OTEL headers are not sent to the REFRACT_OTLP_ENDPOINT', function () {
     Env::set([
         ...BASE_ENV,
         'REFRACT_OTLP_ENDPOINT' => 'https://otlp.test/v1/traces',
@@ -464,7 +464,7 @@ it('C4: OTEL headers are not sent to the REFRACT_OTLP_ENDPOINT', function () {
     ])->and($log->warnings)->toBe([]);
 });
 
-it('C4: OTEL_EXPORTER_OTLP_ENDPOINT gets the traces path and the URL-decoded OTEL headers', function (string $endpoint) {
+it('OTEL_EXPORTER_OTLP_ENDPOINT gets the traces path and the URL-decoded OTEL headers', function (string $endpoint) {
     Env::set([
         ...BASE_ENV,
         'REFRACT_OTLP_ENDPOINT' => null,
@@ -480,7 +480,7 @@ it('C4: OTEL_EXPORTER_OTLP_ENDPOINT gets the traces path and the URL-decoded OTE
     ])->and($log->warnings)->toBe([]);
 })->with(['https://collector.test:4318/base', 'https://collector.test:4318/base/']);
 
-it('C4: REFRACT_OTLP_HEADERS win over OTEL headers on the OTEL endpoint', function () {
+it('REFRACT_OTLP_HEADERS win over OTEL headers on the OTEL endpoint', function () {
     Env::set([
         ...BASE_ENV,
         'REFRACT_OTLP_ENDPOINT' => null,
@@ -494,7 +494,7 @@ it('C4: REFRACT_OTLP_HEADERS win over OTEL headers on the OTEL endpoint', functi
     expect(exported()['headers'] ?? null)->toBe(['x-otel' => '1', 'x-team' => 'refract']);
 });
 
-it('C5: no OTLP endpoint at all exports nothing and warns once', function () {
+it('no OTLP endpoint at all exports nothing and warns once', function () {
     Env::set([...BASE_ENV, 'REFRACT_OTLP_ENDPOINT' => null, 'OTEL_EXPORTER_OTLP_ENDPOINT' => null]);
 
     $log = loadRefract();
@@ -504,7 +504,7 @@ it('C5: no OTLP endpoint at all exports nothing and warns once', function () {
         ->and($log->warnings)->toHaveCount(1);
 });
 
-it('C5: the transport and exporter are built on the first send, so no endpoint warns only once spans are sent', function () {
+it('the transport and exporter are built on the first send, so no endpoint warns only once spans are sent', function () {
     $this->refreshApplicationWithConfig(['refract.transport' => 'sync', 'refract.destination' => 'otlp']);
 
     expect(app()->resolved(Transport::class))->toBeFalse()
@@ -530,7 +530,7 @@ it('C5: the transport and exporter are built on the first send, so no endpoint w
     Http::assertNothingSent();
 });
 
-it('C6: LANGFUSE_BASE_URL empty sends to Langfuse Cloud', function () {
+it('LANGFUSE_BASE_URL empty sends to Langfuse Cloud', function () {
     Env::set([...BASE_ENV, ...LANGFUSE_ENV, 'LANGFUSE_BASE_URL' => '']);
 
     $log = loadRefract();
@@ -539,7 +539,7 @@ it('C6: LANGFUSE_BASE_URL empty sends to Langfuse Cloud', function () {
         ->and($log->warnings)->toBe([]);
 });
 
-it('C6: LANGFUSE_BASE_URL set sends to that Langfuse', function () {
+it('LANGFUSE_BASE_URL set sends to that Langfuse', function () {
     Env::set([...BASE_ENV, ...LANGFUSE_ENV, 'LANGFUSE_BASE_URL' => 'https://langfuse.example.test/']);
 
     loadRefract();
@@ -547,7 +547,7 @@ it('C6: LANGFUSE_BASE_URL set sends to that Langfuse', function () {
     expect(exported()['url'] ?? null)->toBe('https://langfuse.example.test/api/public/otel/v1/traces');
 });
 
-it('C8: Langfuse keys missing export nothing and warn once', function (array $keys) {
+it('Langfuse keys missing export nothing and warn once', function (array $keys) {
     Env::set([...BASE_ENV, ...LANGFUSE_ENV, ...$keys]);
 
     $log = loadRefract();
@@ -581,7 +581,7 @@ it('reads the participant from the Context keys named in config', function () {
 });
 
 /**
- * The C4 to C8 cases: the env, how to read the result, the result and the warnings it gives.
+ * The destination cases: the env, how to read the result, the result and the warnings it gives.
  *
  * @return array<string, array{env: array<string, string|null>, read: Closure(): mixed, expected: mixed, warnings: int}>
  */
@@ -590,7 +590,7 @@ function destinationCases(): array
     $sent = fn () => ($request = exported()) === null ? null : ['url' => $request['url'], 'headers' => $request['headers']];
 
     return [
-        'C4: OTEL headers not sent to the Refract endpoint' => [
+        'OTEL headers not sent to the Refract endpoint' => [
             'env' => [
                 'REFRACT_OTLP_HEADERS' => 'x-refract=1',
                 'OTEL_EXPORTER_OTLP_ENDPOINT' => 'https://collector.test:4318',
@@ -598,7 +598,7 @@ function destinationCases(): array
             ],
             'read' => $sent, 'expected' => ['url' => 'https://otlp.test/v1/traces', 'headers' => ['x-refract' => '1']], 'warnings' => 0,
         ],
-        'C4: OTEL endpoint with its headers' => [
+        'OTEL endpoint with its headers' => [
             'env' => [
                 'REFRACT_OTLP_ENDPOINT' => null,
                 'OTEL_EXPORTER_OTLP_ENDPOINT' => 'https://collector.test:4318',
@@ -606,10 +606,10 @@ function destinationCases(): array
             ],
             'read' => $sent, 'expected' => ['url' => 'https://collector.test:4318/v1/traces', 'headers' => ['x-otel' => 'a=b']], 'warnings' => 0,
         ],
-        'C5: no OTLP endpoint' => [
+        'no OTLP endpoint' => [
             'env' => ['REFRACT_OTLP_ENDPOINT' => null], 'read' => $sent, 'expected' => null, 'warnings' => 1,
         ],
-        'C6: LANGFUSE_BASE_URL empty' => [
+        'LANGFUSE_BASE_URL empty' => [
             'env' => [...LANGFUSE_ENV, 'LANGFUSE_BASE_URL' => ''], 'read' => $sent,
             'expected' => ['url' => LANGFUSE_CLOUD, 'headers' => [
                 'authorization' => 'Basic '.base64_encode('pk-test:sk-test'),
@@ -617,14 +617,14 @@ function destinationCases(): array
             ]],
             'warnings' => 0,
         ],
-        'C8: Langfuse keys missing' => [
+        'Langfuse keys missing' => [
             'env' => [...LANGFUSE_ENV, 'LANGFUSE_SECRET_KEY' => null], 'read' => $sent, 'expected' => null, 'warnings' => 1,
         ],
     ];
 }
 
 /**
- * Every C1 to C6 and C8 case, by name.
+ * Every env case (missing, empty, invalid) and every destination case, by name.
  *
  * @return list<string>
  */
@@ -632,29 +632,29 @@ function allConfigCases(): array
 {
     $cases = [];
 
-    foreach (['C1', 'C2', 'C3'] as $column) {
+    foreach (['missing', 'empty', 'invalid'] as $column) {
         foreach (array_keys(envCases()) as $var) {
             $cases[] = "{$column}: {$var}";
         }
     }
 
-    return [...$cases, ...array_keys(destinationCases())];
+    return [...$cases, ...array_map(fn (string $name) => "destination: {$name}", array_keys(destinationCases()))];
 }
 
-it('C7: under config:cache every case gives the same result, and env changes after caching do not matter', function (string $case) {
+it('under config:cache every case gives the same result, and env changes after caching do not matter', function (string $case) {
     [$column, $name] = explode(': ', $case, 2);
 
-    if (in_array($column, ['C1', 'C2', 'C3'], true)) {
-        $value = ['C1' => null, 'C2' => '', 'C3' => envCases()[$name]['invalid']][$column];
+    if ($column !== 'destination') {
+        $value = ['missing' => null, 'empty' => '', 'invalid' => envCases()[$name]['invalid']][$column];
 
         [$fresh] = runEnvCase($name, $value);
         [$cached, $cachedWarnings] = runEnvCase($name, $value, cached: true);
 
-        [$expected, $warnings] = $column === 'C3'
+        [$expected, $warnings] = $column === 'invalid'
             ? invalidOutcome($name)
             : [envCases()[$name]['default'], envCases()[$name]['warnings']];
     } else {
-        $destination = destinationCases()[$case];
+        $destination = destinationCases()[$name];
 
         Env::set([...BASE_ENV, ...$destination['env']]);
         loadRefract();

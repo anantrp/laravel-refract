@@ -42,7 +42,7 @@ class Scenarios
     }
 
     /**
-     * Run a matrix row inside a fresh active OTel span and return its trace id.
+     * Run a scenario inside a fresh active OTel span and return its trace id.
      */
     public function run(string $row): string
     {

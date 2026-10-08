@@ -35,7 +35,7 @@ beforeEach(function () {
     Http::fake();
 });
 
-it('R1: prompt() with 2 steps and 1 tool gives invoke_agent > chat, execute_tool, chat in start order', function () {
+it('prompt() with 2 steps and 1 tool gives invoke_agent > chat, execute_tool, chat in start order', function () {
     TimeAgent::fakeTwoSteps();
 
     TimeAgent::make()->prompt('What time is it?');
@@ -82,7 +82,7 @@ it('R1: prompt() with 2 steps and 1 tool gives invoke_agent > chat, execute_tool
         && $request->hasHeader('Authorization', 'Basic '.base64_encode('pk-test:sk-test')));
 });
 
-it('R2: a sub-agent run called from a tool nests under that tool span', function () {
+it('a sub-agent run called from a tool nests under that tool span', function () {
     SupervisorAgent::fakeTwoSteps();
 
     SupervisorAgent::make()->prompt('Ask for the time.');
@@ -115,7 +115,7 @@ it('R2: a sub-agent run called from a tool nests under that tool span', function
         ->and($subRun['endTimeUnixNano'] <= $tool['endTimeUnixNano'])->toBeTrue();
 });
 
-it('R3: provider failover gives one run span showing the provider that answered, with the failover as an event', function () {
+it('provider failover gives one run span showing the provider that answered, with the failover as an event', function () {
     config(['ai.providers.anthropic' => ['driver' => 'anthropic', 'key' => 'test']]);
 
     TimeAgent::fake(fn (string $prompt, $attachments, TextProvider $provider) => $provider->name() === 'openai'
@@ -159,7 +159,7 @@ it('R3: provider failover gives one run span showing the provider that answered,
         ->and($event['timeUnixNano'] <= $answered['startTimeUnixNano'])->toBeTrue();
 });
 
-it('R4: a stream read to the end gives the same tree as prompt()', function () {
+it('a stream read to the end gives the same tree as prompt()', function () {
     TimeAgent::fakeTwoSteps();
 
     foreach (TimeAgent::make()->stream('What time is it?') as $event) {
@@ -186,7 +186,7 @@ it('R4: a stream read to the end gives the same tree as prompt()', function () {
         ->and(array_column(array_column($spans, 'status'), 'code'))->toBe([1, 1, 1, 1]);
 });
 
-it('R5: a stream stopped early has its open spans closed as abandoned at flush', function () {
+it('a stream stopped early has its open spans closed as abandoned at flush', function () {
     TimeAgent::fakeTwoSteps();
 
     foreach (TimeAgent::make()->stream('What time is it?') as $event) {
@@ -214,7 +214,7 @@ it('R5: a stream stopped early has its open spans closed as abandoned at flush',
     expect($spans[1]['parentSpanId'])->toBe($spans[0]['spanId']);
 });
 
-it('R5: a flush closes open children before their parent, so no abandoned child ends after its parent', function () {
+it('a flush closes open children before their parent, so no abandoned child ends after its parent', function () {
     // A monotonic clock that moves on every read, so each end gets its own time.
     $this->extendBeforeBoot(Recorder::class, fn (Recorder $recorder, $app) => new class($app) extends ClockRecorder
     {
@@ -246,7 +246,7 @@ it('R5: a flush closes open children before their parent, so no abandoned child 
     }
 });
 
-it('R6: a stream read again after it stopped is a separate run, not a failover', function () {
+it('a stream read again after it stopped is a separate run, not a failover', function () {
     TimeAgent::fake(['First answer.', 'Second answer.']);
 
     $stream = TimeAgent::make()->stream('What time is it?');
@@ -283,7 +283,7 @@ it('R6: a stream read again after it stopped is a separate run, not a failover',
         ->and(array_merge(...array_column($spans, 'events')))->toBe([]);
 });
 
-it('R7: approval events sit inside the run span and a resumed run records no prompt', function () {
+it('approval events sit inside the run span and a resumed run records no prompt', function () {
     $this->environmentConfig['refract.capture.content'] = true;
     $memory = $this->captureNeutralSpans();
 
@@ -335,7 +335,7 @@ it('R7: approval events sit inside the run span and a resumed run records no pro
         ->and($resume['content']['output'])->toBe([['role' => 'assistant', 'parts' => [['type' => 'text', 'content' => 'It is 12:00.']]]]);
 });
 
-it('R7: approval events are exported with the tool name, call id and decision', function () {
+it('approval events are exported with the tool name, call id and decision', function () {
     TimeAgent::fake([
         (new TextResponse('', new TextUsage, new Meta('openai', 'fake')))
             ->withPendingApprovals(collect([new PendingApproval('call_1', 'CurrentTime', [])])),
@@ -369,7 +369,7 @@ it('R7: approval events are exported with the tool name, call id and decision', 
     }
 });
 
-it('R8: a run that throws has status error with the exception class and the app gets the same exception', function () {
+it('a run that throws has status error with the exception class and the app gets the same exception', function () {
     $thrown = new RuntimeException('secret detail from the provider');
 
     TimeAgent::fake(fn () => throw $thrown);
@@ -394,7 +394,7 @@ it('R8: a run that throws has status error with the exception class and the app 
         ->and(Otlp::body(Http::recorded()[0][0]))->not->toContain('secret detail');
 });
 
-it('R8: a run that throws closes its open children as abandoned before it ends', function () {
+it('a run that throws closes its open children as abandoned before it ends', function () {
     // The app's own listener throws after Refract opened the tool span; no ToolFailed follows.
     Event::listen(InvokingTool::class, fn () => throw new RuntimeException('The app listener failed.'));
 
@@ -419,7 +419,7 @@ it('R8: a run that throws closes its open children as abandoned before it ends',
     }
 });
 
-it('R8: a failed run closes its open children deepest first, a re-started key too, so no abandoned child ends after its parent', function () {
+it('a failed run closes its open children deepest first, a re-started key too, so no abandoned child ends after its parent', function () {
     // A monotonic clock that moves on every read, so each end gets its own time.
     $this->extendBeforeBoot(Recorder::class, fn (Recorder $recorder, $app) => new class($app) extends ClockRecorder
     {
@@ -466,7 +466,7 @@ it('R8: a failed run closes its open children deepest first, a re-started key to
     }
 });
 
-it('R13: a failed run and its failed step have error.type set to the exception class', function () {
+it('a failed run and its failed step have error.type set to the exception class', function () {
     TimeAgent::fake(fn () => throw new RuntimeException('secret detail from the provider'));
 
     rescue(fn () => TimeAgent::make()->prompt('What time is it?'), report: false);
@@ -481,7 +481,7 @@ it('R13: a failed run and its failed step have error.type set to the exception c
         ->and(Otlp::attributes($step))->toHaveKey('error.type', RuntimeException::class);
 });
 
-it('R13: a failed tool has error.type set to the exception class', function () {
+it('a failed tool has error.type set to the exception class', function () {
     BrokenToolAgent::fakeSteps();
 
     rescue(fn () => BrokenToolAgent::make()->prompt('Use the tool.'), report: false);
@@ -497,7 +497,7 @@ it('R13: a failed tool has error.type set to the exception class', function () {
         ->and(Otlp::body(Http::recorded()[0][0]))->not->toContain('secret detail');
 });
 
-it('R13: a span that did not fail has no error.type', function () {
+it('a span that did not fail has no error.type', function () {
     TimeAgent::fakeTwoSteps();
     TimeAgent::make()->prompt('What time is it?');
 
@@ -514,7 +514,7 @@ it('R13: a span that did not fail has no error.type', function () {
     }
 });
 
-it('R9: a run joins the app\'s active OTel trace as a child', function () {
+it('a run joins the app\'s active OTel trace as a child', function () {
     $traceId = str_repeat('ab', 16);
     $spanId = str_repeat('cd', 8);
 
@@ -536,7 +536,7 @@ it('R9: a run joins the app\'s active OTel trace as a child', function () {
         ->and($spans[0]['parentSpanId'])->toBe($spanId);
 });
 
-it('R10: two runs in one trace each keep their own session.id', function () {
+it('two runs in one trace each keep their own session.id', function () {
     $this->loadMigrationsFrom(dirname(__DIR__, 2).'/vendor/laravel/ai/database/migrations');
 
     ChatAgent::fake(['First.', 'Second.', 'Third.']);
@@ -563,7 +563,7 @@ it('R10: two runs in one trace each keep their own session.id', function () {
         ->and(Otlp::attributes($runs[1]))->toHaveKey('gen_ai.conversation.id', $second->conversationId);
 });
 
-it('R10: a failed run of an agent that only uses the conversation trait keeps its session.id', function () {
+it('a failed run of an agent that only uses the conversation trait keeps its session.id', function () {
     $this->loadMigrationsFrom(dirname(__DIR__, 2).'/vendor/laravel/ai/database/migrations');
 
     TraitChatAgent::fake(fn () => throw new RuntimeException('down'));
@@ -579,7 +579,7 @@ it('R10: a failed run of an agent that only uses the conversation trait keeps it
         ->and(Otlp::attributes($run))->toHaveKey('session.id', 'conversation-1');
 });
 
-it('R12: chat spans export the final_step flag as laravel.ai.final_step', function () {
+it('chat spans export the final_step flag as laravel.ai.final_step', function () {
     TimeAgent::fakeTwoSteps();
 
     TimeAgent::make()->prompt('What time is it?');
