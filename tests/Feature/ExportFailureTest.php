@@ -877,15 +877,16 @@ it('E10: a single span bigger than 4 MB is sent alone, with one warning', functi
         ->and($log->warnings[0])->toContain('over the 4000000 byte limit');
 });
 
-it('E10: on sync each failed part gives its own warning and the later parts are still sent', function () {
+it('E10: on sync failed parts warn once per kind and the later parts are still sent', function () {
     $log = bootExport('sync');
-    Http::fake(['*' => Http::sequence()->push('bad', 400)->push('', 503)->push('', 200)]);
+    // Two parts fail the same way (503): one warning for both.
+    Http::fake(['*' => Http::sequence()->push('bad', 400)->push('', 503)->push('', 503)->push('', 200)]);
 
-    $trees = array_map(fn () => runTree([randomText(1_500_000), randomText(1_500_000)]), range(1, 3));
+    $trees = array_map(fn () => runTree([randomText(1_500_000), randomText(1_500_000)]), range(1, 4));
 
     app(Transport::class)->send(array_merge(...$trees));
 
-    Http::assertSentCount(3);
+    Http::assertSentCount(4);
     expect($log->warnings)->toHaveCount(2)
         ->and($log->warnings[0])->toContain('HTTP 400')
         ->and($log->warnings[1])->toContain('could not be exported');

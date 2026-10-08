@@ -35,6 +35,19 @@ const SEM_CONV_NOT_DEFINED = [
 ];
 
 /**
+ * The GenAI names newer conventions replaced. sem-conv 1.44.0 has only the archived schema-1.32
+ * gen_ai names and does not mark gen_ai.system deprecated, so the deprecation check cannot catch
+ * it. The others are marked deprecated there; they stay here so the check does not depend on it.
+ */
+const SEM_CONV_REPLACED = [
+    'gen_ai.system' => 'gen_ai.provider.name',
+    'gen_ai.usage.prompt_tokens' => 'gen_ai.usage.input_tokens',
+    'gen_ai.usage.completion_tokens' => 'gen_ai.usage.output_tokens',
+    'gen_ai.prompt' => 'gen_ai.input.messages',
+    'gen_ai.completion' => 'gen_ai.output.messages',
+];
+
+/**
  * The prefixes of Refract's own and the platform's attribute names, outside the OTel conventions.
  */
 const SEM_CONV_OWN_PREFIXES = ['laravel.', 'langfuse.'];
@@ -226,6 +239,10 @@ it('A6: every emitted attribute name outside laravel.* and langfuse.* is an OTel
     expect($otel)->not->toBe([])
         ->and($deprecated)->toBe([])
         ->and(array_values(array_diff($unknown, SEM_CONV_NOT_DEFINED)))->toBe([]);
+});
+
+it('A6: no emitted name is a GenAI name newer conventions replaced', function () {
+    expect(array_values(array_intersect(semConvEmitted()['names'], array_keys(SEM_CONV_REPLACED))))->toBe([]);
 });
 
 it('A6: no emitted name is spelled differently from the sem-conv name of the same constant', function () {
