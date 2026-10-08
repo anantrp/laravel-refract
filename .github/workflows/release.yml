@@ -28,7 +28,7 @@ jobs:
       - name: Read the release notes from CHANGELOG.md
         run: |
           version="${GITHUB_REF_NAME#v}"
-          heading=$(grep -m1 -E "^## \[${version//./\\.}\]" CHANGELOG.md || true)
+          heading=$(awk -v start="## [$version]" 'index($0, start) == 1 { print; exit }' CHANGELOG.md)
 
           if [ -z "$heading" ]; then
             echo "::error::CHANGELOG.md has no section for $version."
