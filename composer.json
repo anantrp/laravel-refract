@@ -1,6 +1,7 @@
 {
     "name": "anantrp/laravel-refract",
     "description": "Record every Laravel AI SDK run as an OpenTelemetry trace and send it to Langfuse or any OTLP backend.",
+    "type": "library",
     "keywords": ["laravel", "ai", "laravel-ai", "observability", "opentelemetry", "otlp", "langfuse", "tracing"],
     "homepage": "https://github.com/anantrp/laravel-refract",
     "license": "MIT",
@@ -10,6 +11,10 @@
             "email": "anant26692@gmail.com"
         }
     ],
+    "support": {
+        "issues": "https://github.com/anantrp/laravel-refract/issues",
+        "source": "https://github.com/anantrp/laravel-refract"
+    },
     "require": {
         "php": "^8.3",
         "illuminate/console": "^12.0|^13.0",
