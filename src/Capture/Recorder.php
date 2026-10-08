@@ -150,6 +150,7 @@ class Recorder
      * frees, so it never becomes a new trace without its run. A parent that
      * is not open for any other reason still falls back to the active trace.
      * Content given as a closure is built only for a span the buffer keeps.
+     * The mask may record spans of its own, so the cap is checked again after.
      *
      * @param  array<string, mixed>  $call
      * @param  array<string, mixed>  $context
@@ -170,15 +171,14 @@ class Recorder
             }
         }
 
-        $full = $this->full();
+        if ($this->drops($key, $parentKey)) {
+            return;
+        }
 
-        if ($full || ($parentKey !== null && isset($this->dropped[$parentKey]))) {
-            if ($full) {
-                Diagnostics::warn('buffer.full', 'The buffer holds '.self::MAX_SPANS.' spans, the most it can between two flushes. New spans are dropped until a send frees room.');
-            }
+        $content = $this->content($content);
 
-            $this->dropped[$key] = true;
-
+        // The content build runs the app's mask, which may record spans.
+        if ($this->drops($key, $parentKey)) {
             return;
         }
 
@@ -193,8 +193,6 @@ class Recorder
             [$traceId, $parentSpanId] = $this->activeTrace();
         }
 
-        $content = $this->content($content);
-
         $this->open[$key] = [
             'trace_id' => $traceId,
             'span_id' => bin2hex(random_bytes(8)),
@@ -207,6 +205,28 @@ class Recorder
             'context_from' => $contextFrom === null ? null : ($this->open[$contextFrom]['span_id'] ?? null),
             'events' => [],
         ];
+    }
+
+    /**
+     * Drop the span under the given key when the buffer is full or its parent was dropped at the cap.
+     *
+     * @phpstan-impure
+     */
+    protected function drops(string $key, ?string $parentKey): bool
+    {
+        $full = $this->full();
+
+        if (! $full && ($parentKey === null || ! isset($this->dropped[$parentKey]))) {
+            return false;
+        }
+
+        if ($full) {
+            Diagnostics::warn('buffer.full', 'The buffer holds '.self::MAX_SPANS.' spans, the most it can between two flushes. New spans are dropped until a send frees room.');
+        }
+
+        $this->dropped[$key] = true;
+
+        return true;
     }
 
     /**
@@ -270,7 +290,8 @@ class Recorder
     /**
      * End the given span, merging in the call, context and content data known only at its end.
      *
-     * Content given as a closure is built only when the span is open.
+     * Content given as a closure is built only when the span is open. The
+     * span is read after it, so what the mask adds to the span is kept.
      *
      * @param  array<string, mixed>  $call
      * @param  array<string, mixed>  $context
@@ -278,6 +299,8 @@ class Recorder
      */
     public function end(string $key, string $status = 'ok', ?string $message = null, array $call = [], array $context = [], array|Closure $content = []): void
     {
+        $content = isset($this->open[$key]) ? $this->content($content) : [];
+
         $span = $this->open[$key] ?? null;
 
         if ($span === null) {
@@ -285,8 +308,6 @@ class Recorder
 
             return;
         }
-
-        $content = $this->content($content);
 
         unset($this->open[$key]);
 

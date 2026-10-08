@@ -8,6 +8,7 @@ use Anantrp\Refract\Tests\Support\Ai\FileAgent;
 use Anantrp\Refract\Tests\Support\Ai\FileTool;
 use Anantrp\Refract\Tests\Support\Ai\NotesAgent;
 use Anantrp\Refract\Tests\Support\Ai\NotesTool;
+use Anantrp\Refract\Tests\Support\Ai\PromptingMask;
 use Anantrp\Refract\Tests\Support\Ai\RecordingMask;
 use Anantrp\Refract\Tests\Support\Ai\ThrowingMask;
 use Anantrp\Refract\Tests\Support\Ai\TrapImage;
@@ -21,6 +22,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Http\Client\Request;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\LazyCollection;
@@ -33,6 +35,7 @@ use Laravel\Ai\Events\CreatingStore;
 use Laravel\Ai\Events\FileAddedToStore;
 use Laravel\Ai\Events\FileDeleted;
 use Laravel\Ai\Events\FileRemovedFromStore;
+use Laravel\Ai\Events\PromptingAgent;
 use Laravel\Ai\Events\RemovingFileFromStore;
 use Laravel\Ai\Events\StoreCreated;
 use Laravel\Ai\Exceptions\RateLimitedException;
@@ -1156,4 +1159,79 @@ it('P14: the time to build a span\'s content counts before its start and before 
 
     expect($run['end'] - $run['start'])->toBe($second)
         ->and($run['content'])->toBe(['input' => 'built', 'output' => 'built']);
+});
+
+it('P14: a mask that records spans of its own while a span starts cannot fill the buffer past 1,000', function () {
+    $this->environmentConfig = contentConfig([
+        'refract.capture.content' => true,
+        'refract.capture.mask' => PromptingMask::class,
+    ]);
+    $memory = $this->captureNeutralSpans();
+
+    Diagnostics::reset();
+    Log::swap($log = new WarningLog);
+    PromptingMask::$prompted = false;
+
+    // One span of room. The mask's own run takes it while NotesAgent's run starts.
+    fillBuffer('long', 999, endRun: false);
+
+    TimeAgent::fake(['It is noon.']);
+    NotesAgent::fakeTwoSteps();
+    $response = NotesAgent::make()->prompt('What is new?');
+
+    app(Recorder::class)->flush();
+
+    expect($response->text)->toBe('The release is on Friday.')
+        ->and(PromptingMask::$prompted)->toBeTrue()
+        ->and($memory->spans)->toHaveCount(1_000)
+        ->and(array_filter($memory->spans, fn (array $span) => ($span['call']['agent'] ?? null) === 'NotesAgent'))->toBe([])
+        ->and($log->warnings)->toHaveCount(1);
+});
+
+it('P14: an event or call data a content closure adds to its own span while the span ends is kept', function () {
+    $memory = $this->captureNeutralSpans();
+    $recorder = app(Recorder::class);
+
+    $recorder->start('run:a', 'invoke_agent', null, ['agent' => 'A']);
+    $recorder->end('run:a', content: function () use ($recorder) {
+        $recorder->update('run:a', ['model' => 'm']);
+        $recorder->event('run:a', 'failover');
+
+        return ['output' => 'built'];
+    });
+    $recorder->flush();
+
+    [$run] = $memory->spans;
+
+    expect($run['call'])->toBe(['agent' => 'A', 'model' => 'm'])
+        ->and(array_column($run['events'], 'kind'))->toBe(['failover'])
+        ->and($run['content'])->toBe(['output' => 'built']);
+});
+
+it('P14: in a console process the steps and tool of a run dropped at the cap are never captured once a full-buffer send frees room', function () {
+    $this->environmentConfig = contentConfig([
+        'refract.capture.content' => true,
+        'refract.capture.mask' => RecordingMask::class,
+    ]);
+    $memory = $this->captureNeutralSpans();
+
+    expect(app()->runningInConsole())->toBeTrue();
+
+    Log::swap(new WarningLog);
+
+    // An open run holds the full buffer, so NotesAgent's run is dropped.
+    fillBuffer('long', 1_000, endRun: false);
+
+    // The open run ends right after: the first step's start sends it and frees room.
+    Event::listen(PromptingAgent::class, fn () => app(Recorder::class)->end('run:long'));
+
+    NotesAgent::fakeTwoSteps();
+    NotesAgent::make()->prompt('What is new?');
+
+    expect($memory->spans)->toHaveCount(1_000);
+
+    app(Recorder::class)->flush();
+
+    expect(RecordingMask::$seen)->toBe([])
+        ->and($memory->spans)->toHaveCount(1_000);
 });
