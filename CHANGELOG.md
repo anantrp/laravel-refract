@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-## [0.1.0] - unreleased
+## [0.1.0] - 2026-10-09
 
 First release.
 
@@ -27,3 +27,6 @@ First release.
 - The `queue` job tries 4 times, 10 s, 60 s, then 300 s apart. A `Retry-After` on a 429 or 503 can make it wait longer, at most 300 s.
 - Refract is never tied to the app's database transactions. An app rollback does not remove spans.
 - A send in the process while a console process runs keeps its spans when the destination fails, and tries them again later. Once a part cannot connect, the later parts of that send wait for the next try.
+
+[Unreleased]: https://github.com/anantrp/laravel-refract/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/anantrp/laravel-refract/releases/tag/v0.1.0
