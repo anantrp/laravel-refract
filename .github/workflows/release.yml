@@ -5,7 +5,7 @@ on:
     tags: ['v*']
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   tests:
@@ -15,17 +15,20 @@ jobs:
     needs: tests
     runs-on: ubuntu-latest
 
+    permissions:
+      contents: write
+
     env:
       PACKAGIST_USERNAME: ${{ secrets.PACKAGIST_USERNAME }}
       PACKAGIST_TOKEN: ${{ secrets.PACKAGIST_TOKEN }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Read the release notes from CHANGELOG.md
         run: |
           version="${GITHUB_REF_NAME#v}"
-          heading=$(grep -m1 -F "## [$version]" CHANGELOG.md || true)
+          heading=$(grep -m1 -E "^## \[${version//./\\.}\]" CHANGELOG.md || true)
 
           if [ -z "$heading" ]; then
             echo "::error::CHANGELOG.md has no section for $version."
@@ -37,12 +40,19 @@ jobs:
             exit 1
           fi
 
-          awk -v heading="$heading" '$0 == heading { found = 1; next } found && /^## \[/ { exit } found { print }' CHANGELOG.md > notes.md
+          awk -v heading="$heading" '$0 == heading { found = 1; next } found && (/^## \[/ || /^\[[^]]*\]: /) { exit } found { print }' CHANGELOG.md > notes.md
 
       - name: Create the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file notes.md --verify-tag
+        run: |
+          prerelease=()
+
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            prerelease=(--prerelease)
+          fi
+
+          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file notes.md --verify-tag "${prerelease[@]}"
 
       - name: Update the package on Packagist
         if: env.PACKAGIST_TOKEN != ''
@@ -50,5 +60,5 @@ jobs:
           curl --fail --silent --show-error -X POST \
             -H 'Content-Type: application/json' \
             -H "Authorization: Bearer ${PACKAGIST_USERNAME}:${PACKAGIST_TOKEN}" \
-            -d '{"repository":"https://github.com/${{ github.repository }}"}' \
+            -d "{\"repository\":\"https://github.com/${GITHUB_REPOSITORY}\"}" \
             https://packagist.org/api/update-package
