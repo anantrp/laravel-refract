@@ -15,18 +15,10 @@ use Throwable;
 /**
  * Exports each batch in the current process, at the flush point.
  *
- * At the flush point it does not retry: a batch the destination could not
- * take now (a network error, 408, 429 or 5xx) is dropped with one warning. A rejected batch
- * has already been warned about by the exporter. An exporter that throws
- * drops the batch with one warning.
- *
- * A send while the process keeps going (sendNow) does not drop a part the
- * destination could not take now: it gives it back to be tried again later.
- * Once a part cannot connect to the destination, the later parts of that
- * send are given back without a try, so a host that is down costs one timeout.
- *
- * A batch the exporter splits into parts is sent one part after another.
- * A failed part does not stop the later parts. Failures warn once per kind.
+ * At the flush point a failed batch is dropped with one warning. A send
+ * while the process keeps going gives a failed part back to be tried again
+ * later, and once a part cannot connect, the later parts are given back
+ * without a try.
  */
 class SyncTransport implements SendNow, Transport
 {

@@ -19,22 +19,9 @@ use Throwable;
 /**
  * Translates neutral spans, applies the platform's changes and posts OTLP JSON.
  *
- * A 2xx is ok, with one warning when its OTLP partialSuccess refuses
- * spans (never retried). A network error, 408, 429 or 5xx is retryable: the
- * transport decides whether to try again, and when. A 429 or 503 may say
- * when with Retry-After, read in whole seconds only and capped at 300.
- * Every other status, a redirect too (it is never followed), is rejected
- * and warned about here, with the status and the start of the body. Any
- * other error, from the HTTP client or from translating and encoding the
- * spans, is rejected with one warning.
- *
- * With gzip on, the body is gzipped and sent with Content-Encoding: gzip.
- * If gzip fails, the body is sent plain, with no such header.
- *
- * A batch is split into parts of at most 4 MB of OTLP JSON (counted
- * before gzip), cut between run trees. A run tree is the spans under one
- * span whose parent is not in the batch. A tree is cut only when it alone
- * is too big, and a span too big for a part is sent alone with one warning.
+ * A network error, 408, 429 or 5xx is retryable, and the transport decides
+ * when to try again. Every other status is rejected and warned about here.
+ * Redirects are never followed, so the headers never reach another host.
  */
 class HttpExporter implements Exporter, Parts, Reachability, RetryAfter
 {

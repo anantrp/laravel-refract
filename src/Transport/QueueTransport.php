@@ -14,21 +14,11 @@ use Throwable;
 /**
  * Exports each batch from a queue worker, on the app's default queue connection.
  *
- * A job is dispatched only on an async driver in the allow-list. Every
- * other driver (sync, deferred, background, failover, custom), a batch too
- * big for the queue, or a failed dispatch exports in this process instead,
- * like the sync transport: no retry at the flush point.
- *
- * A send while the process keeps going (sendNow) never writes to a
- * database queue: the app may hold a transaction on that database, and a
- * rollback would remove the job. It exports in this process instead, and
- * every part exported in this process that the destination could not take
- * now is given back to be tried again later. Once a part cannot connect to
- * the destination, the later parts are given back without a try.
- *
- * A batch the exporter splits into parts is queued as one job per part,
- * so a retry never sends a part again that already got through. Each part
- * that cannot go through the queue is exported in this process on its own.
+ * A driver outside the allow-list, a batch too big for the queue, or a
+ * failed dispatch exports in this process instead. A send while the
+ * process keeps going never writes to a database queue, because a rollback
+ * of the app's transaction would remove the job. Each part is its own job,
+ * so a retry never sends a part again that already got through.
  */
 class QueueTransport implements SendNow, Transport
 {

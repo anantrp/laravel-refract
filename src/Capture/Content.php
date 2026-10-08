@@ -39,24 +39,10 @@ use UnitEnum;
 /**
  * Builds the content bucket of a span: prompts, messages, outputs, tool arguments and results.
  *
- * Off by default. Every captured string goes through the mask, then is
- * cut at the byte cap and marked with its original size. Files are never
- * recorded: attachments are left out, and a file in a value becomes
- * "[file]" with no method of the file called.
- *
- * A tool result is walked only through arrays and Collections; any other
- * object in it becomes its class name and none of its methods run. A
- * top-level Stringable result (not a collection) is cast, as the SDK
- * does. Only plain arrays and scalars are returned.
- *
- * A tool result in a step's message history is a reference only (its
- * call id and tool name), never its text: the SDK has already turned it
- * into text there, so a file in it is its bytes. The result is recorded
- * on the tool span only.
- *
- * Message: {role: user|assistant|tool, parts: list<Part>, finish_reason?}
- * Part: {type: text, content} | {type: tool_call, id, name, arguments}
- *     | {type: tool_call_response, id, name}
+ * Every string goes through the mask, then is cut at the byte cap. Files are
+ * never recorded, and no method of an object in a tool result is called.
+ * A tool result in a message history is a reference only: the SDK has
+ * already turned it into text there, so a file in it would be its bytes.
  *
  * @phpstan-type Part array<string, string>
  * @phpstan-type ContentMessage array{role: string, parts: list<Part>, finish_reason?: string}

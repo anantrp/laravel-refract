@@ -14,18 +14,10 @@ use Throwable;
 /**
  * Exports one batch of neutral spans from a queue worker.
  *
- * The batch travels as gzipped JSON, base64 encoded: the queue payload is
- * JSON, so invalid UTF-8 becomes U+FFFD and floats keep their fraction.
- *
- * A retryable result (network error, 408, 429, 5xx) is tried again, 4
- * tries in all: after the backoff of the attempt (10 s, 60 s, then 300 s),
- * or after the Retry-After seconds the exporter read from a 429 or 503 when
- * they are longer (the exporter caps them at 300 s). The job
- * never throws for it: after the last try it deletes itself and warns once
- * from failed(), so it is not reported to the exception handler, not
- * stored as a failed job and fires no JobFailed event. Error trackers never see it. Nothing else in the job
- * throws either: a failure to decode or export drops the batch with one
- * warning.
+ * The batch travels as gzipped JSON, base64 encoded, so invalid UTF-8 and
+ * floats survive the JSON queue payload. After the last try the job deletes
+ * itself and warns once, so it never reaches the exception handler or the
+ * failed jobs table.
  */
 class ExportSpans implements ShouldQueue
 {
