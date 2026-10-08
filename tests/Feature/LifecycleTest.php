@@ -25,7 +25,9 @@ use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Facades\Schema;
 use Laravel\Ai\Contracts\Providers\TextProvider;
 use Laravel\Ai\Events\AgentFailedOver;
+use Laravel\Ai\Events\PromptingAgent;
 use Laravel\Ai\Exceptions\RateLimitedException;
+use Laravel\Ai\Prompts\AgentPrompt;
 use OpenTelemetry\API\Trace\Span;
 use OpenTelemetry\API\Trace\SpanContext;
 use OpenTelemetry\API\Trace\TraceFlags;
@@ -1571,3 +1573,99 @@ it('L11: once a send frees room, the steps, tools and sub-agents of a run droppe
         ->and($spans)->toHaveCount(1_000 + 4)
         ->and(array_filter($spans, fn (array $span) => str_contains($span['name'], 'Dropped') || str_contains($span['name'], 'dropped')))->toBe([]);
 });
+
+it('L11: a run dropped at the cap that fails over stays dropped once a send frees room, its next attempt too', function (bool $subAgent) {
+    // The events of one real run with a failover, replayed under the invocation id x.
+    config(['ai.providers.anthropic' => ['driver' => 'anthropic', 'key' => 'test']]);
+    $events = [];
+
+    Event::listen('Laravel\Ai\Events\*', function (string $name, array $payload) use (&$events) {
+        $events[] = $payload[0];
+    });
+
+    TimeAgent::fake(fn (string $prompt, $attachments, TextProvider $provider) => $provider->name() === 'openai'
+        ? throw RateLimitedException::forProvider('openai')
+        : 'It is 12:00.');
+    TimeAgent::make()->prompt('What time is it?', provider: ['openai' => 'gpt-a', 'anthropic' => 'claude-b']);
+
+    $failover = array_search(true, array_map(fn (object $event) => $event instanceof AgentFailedOver, $events), true);
+
+    $replay = function (array $events) use ($subAgent) {
+        foreach ($events as $event) {
+            $copy = clone $event;
+            $copy->invocationId = 'x';
+
+            // A sub-agent: the prompt names the tool that called it.
+            if ($subAgent && $copy instanceof PromptingAgent) {
+                $prompt = $copy->prompt;
+                $copy->prompt = new AgentPrompt($prompt->agent, $prompt->prompt, $prompt->attachments, $prompt->provider, $prompt->model,
+                    invocationId: 'x', parentToolInvocationId: 't');
+            }
+
+            app('events')->dispatch($copy);
+        }
+    };
+
+    bootClocked('sync');
+    config(['ai.providers.anthropic' => ['driver' => 'anthropic', 'key' => 'test']]);
+    Http::fakeSequence()->push('', 503)->push('', 503)->whenEmpty(Http::response('', 200));
+    $recorder = app(Recorder::class);
+
+    $counts = [];
+
+    Artisan::command('refract-test:many', function () use ($recorder, $replay, $events, $failover, $subAgent, &$counts) {
+        // The sub-agent's parent run and tool, open before the buffer fills.
+        if ($subAgent) {
+            $recorder->start('run:p', 'invoke_agent', null, ['agent' => 'Parent']);
+            $recorder->start('tool:t', 'execute_tool', 'run:p', ['tool' => 'Dropped']);
+        }
+
+        // The run-end send at 500 spans and the full-buffer try at 1,000
+        // both get 503: the buffer is full of kept spans (and the two open ones).
+        for ($i = 0; $i < ($subAgent ? 249 : 250); $i++) {
+            runTimeAgent();
+        }
+
+        if ($subAgent) {
+            $recorder->start('run:fill', 'invoke_agent', null, ['agent' => 'Fill']);
+            $recorder->end('run:fill');
+            $recorder->start('run:fill', 'invoke_agent', null, ['agent' => 'Fill']);
+            $recorder->end('run:fill');
+        }
+
+        // Run x starts while the wait lasts: dropped. Its first attempt fails over.
+        $replay(array_slice($events, 0, $failover + 1));
+
+        $counts[] = count(Http::recorded());
+
+        // The first attempt took over 5 s; the destination is back.
+        $recorder->monotonicNow += 5_000_000_000;
+
+        // The next attempt: its first new span tries again, which frees the buffer.
+        $replay(array_slice($events, $failover + 1));
+
+        $counts[] = count(Http::recorded());
+
+        if ($subAgent) {
+            $recorder->end('tool:t');
+            $recorder->end('run:p');
+        }
+
+        // A run after it is recorded as usual.
+        runTimeAgent();
+    });
+
+    Artisan::call('refract-test:many');
+
+    $spans = deliveredSpans();
+    $ofX = array_filter($spans, fn (array $span) => (Otlp::attributes($span)['laravel.ai.invocation_id'] ?? null) === 'x'
+        || str_contains($span['name'], 'gpt-a') || str_contains($span['name'], 'claude-b'));
+
+    expect($counts)->toBe([2, 3])
+        ->and($ofX)->toBe([])
+        ->and(array_filter($spans, fn (array $span) => $span['name'] === 'invoke_agent TimeAgent'))->not->toBe([]);
+
+    if ($subAgent) {
+        expect(array_column($spans, 'name'))->toContain('invoke_agent Parent', 'execute_tool Dropped');
+    }
+})->with(['a top-level run' => false, 'a sub-agent under a tool still open' => true]);

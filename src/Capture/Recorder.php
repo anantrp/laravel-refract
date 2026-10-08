@@ -243,6 +243,14 @@ class Recorder
     }
 
     /**
+     * Check whether the span under the given key was dropped at the cap and has not ended.
+     */
+    public function isDropped(string $key): bool
+    {
+        return isset($this->dropped[$key]);
+    }
+
+    /**
      * Merge the given call data into an open span.
      *
      * @param  array<string, mixed>  $call

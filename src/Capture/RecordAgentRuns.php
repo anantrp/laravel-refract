@@ -80,7 +80,8 @@ class RecordAgentRuns
      * flush, since a new conversation has its id only when that run ends.
      *
      * The attempt after a failover keeps the run span it failed over from,
-     * and the span shows the provider and model of that attempt.
+     * and the span shows the provider and model of that attempt. A run
+     * dropped at the cap stays dropped for that attempt, with its children.
      * A run resumed from approval decisions sent no prompt text, so it is
      * marked as resumed and no prompt is ever recorded for it.
      */
@@ -95,6 +96,10 @@ class RecordAgentRuns
                     'model' => $event->prompt->model,
                 ]);
 
+                return;
+            }
+
+            if ($this->recorder->isDropped($this->runKey($event->invocationId))) {
                 return;
             }
         }
