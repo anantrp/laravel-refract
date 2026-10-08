@@ -13,6 +13,7 @@ use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\RequestException;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Str;
 use Throwable;
 
 /**
@@ -63,12 +64,22 @@ class HttpExporter implements Exporter, Parts, Reachability, RetryAfter
     protected const MAX_RETRY_AFTER = 300;
 
     /**
+     * The cURL errors raised before a connection to the destination is made.
+     */
+    protected const CONNECT_ERRORS = [5, 6, 7, 35, 51, 60, 83, 90, 91, 96, 97, 98];
+
+    /**
+     * The cURL timeout messages that mean the connection was never made.
+     */
+    protected const CONNECT_TIMEOUTS = ['connection timed out', 'connection timeout', 'connection time-out', 'resolving timed out', 'name lookup timed out', 'ssl connection timeout', 'aborted due to timeout'];
+
+    /**
      * The seconds the destination asked to wait after the last export, or null.
      */
     protected ?int $retryAfter = null;
 
     /**
-     * Whether the last export got no answer: the destination could not be reached.
+     * Whether the last export could not connect to the destination.
      */
     protected bool $unreachable = false;
 
@@ -108,8 +119,8 @@ class HttpExporter implements Exporter, Parts, Reachability, RetryAfter
                 ->timeout(self::TIMEOUT)
                 ->withBody($body, 'application/json')
                 ->post($this->platform->endpoint());
-        } catch (ConnectionException) {
-            $this->unreachable = true;
+        } catch (ConnectionException $e) {
+            $this->unreachable = $this->beforeConnect($e);
 
             return ExportResult::Retryable;
         } catch (RequestException $e) {
@@ -286,6 +297,24 @@ class HttpExporter implements Exporter, Parts, Reachability, RetryAfter
         } catch (Throwable) {
             return false;
         }
+    }
+
+    /**
+     * Determine if the given connection error happened before the destination was reached.
+     */
+    protected function beforeConnect(ConnectionException $e): bool
+    {
+        if (preg_match('/cURL error (\d+):/', $e->getMessage(), $matches) !== 1) {
+            return true;
+        }
+
+        $error = (int) $matches[1];
+
+        if ($error === 28) {
+            return Str::contains($e->getMessage(), self::CONNECT_TIMEOUTS, ignoreCase: true);
+        }
+
+        return in_array($error, self::CONNECT_ERRORS, true);
     }
 
     public function retryAfter(): ?int

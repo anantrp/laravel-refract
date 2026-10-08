@@ -1410,6 +1410,36 @@ it('L21: when a part of a send cannot reach the destination, the later parts of 
         ->and($log->warnings[0])->toContain('tried again');
 })->with(['sync', 'queue on the sync driver' => 'queue']);
 
+it('L21: a part that reached the destination but timed out does not stop the later parts of that send', function (string $message, int $tries) {
+    bootClocked('sync');
+    $calls = 0;
+    Http::fake(function () use (&$calls, $message) {
+        return ++$calls === 1 ? Http::failedConnection($message)(...func_get_args()) : Http::response('', 200);
+    });
+    $recorder = app(Recorder::class);
+    $sec = 1_000_000_000;
+
+    // Each run is about 2.5 MB of OTLP JSON: two runs do not fit one 4 MB part.
+    $run = function (string $name) use ($recorder) {
+        $recorder->start("run:{$name}", 'invoke_agent', null, ['agent' => $name]);
+        $recorder->start("tool:{$name}", 'execute_tool', "run:{$name}", ['agent' => $name], content: ['result' => bin2hex(random_bytes(1_250_000))]);
+        $recorder->end("tool:{$name}");
+        $recorder->end("run:{$name}");
+    };
+
+    $run('A');
+    $run('B');
+    $recorder->monotonicNow = 5 * $sec;
+    $run('C');
+
+    expect($calls)->toBe($tries);
+})->with([
+    'read timeout' => ['cURL error 28: Operation timed out after 15001 milliseconds with 0 bytes received (see https://curl.se/libcurl/c/libcurl-errors.html) for https://otlp.test/v1/traces', 2],
+    'connection reset after send' => ['cURL error 56: Recv failure: Connection reset by peer (see https://curl.se/libcurl/c/libcurl-errors.html) for https://otlp.test/v1/traces', 2],
+    'connect timeout' => ['cURL error 28: Connection timed out after 15001 milliseconds (see https://curl.se/libcurl/c/libcurl-errors.html) for https://otlp.test/v1/traces', 1],
+    'refused' => ['cURL error 7: Failed to connect to otlp.test port 443: Connection refused (see https://curl.se/libcurl/c/libcurl-errors.html) for https://otlp.test/v1/traces', 1],
+]);
+
 it('L21: a full flush that delivers the kept spans ends the wait, the next job sends at the 5 s rule again', function () {
     $log = bootClocked('sync');
     Http::fakeSequence()->push('', 429, ['Retry-After' => '300'])->whenEmpty(Http::response('', 200));

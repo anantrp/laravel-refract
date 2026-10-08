@@ -10,7 +10,7 @@ namespace Anantrp\Refract\Contracts;
 interface Reachability
 {
     /**
-     * Determine if the last export got no answer at all: the destination could not be reached.
+     * Determine if the last export could not connect to the destination.
      */
     public function unreachable(): bool;
 }
