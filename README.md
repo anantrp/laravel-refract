@@ -204,7 +204,7 @@ The transport decides when and in which process traces are exported. No transpor
 
 | Transport | What it does |
 | --- | --- |
-| `sync` | Exports in the same process: after the response is sent, at the end of a queued job, or at the end of a console command. The final batch gets no retry. A send while a console process runs keeps its spans when it fails (see [Sends While a Console Process Runs](#sends-while-a-console-process-runs)). |
+| `sync` | Exports in the same process: after the response is sent, at the end of a queued job, or at the end of a console command. The final batch gets no retry. A send while a console process runs keeps its spans on a network error, 408, 429 or 5xx (see [Sends While a Console Process Runs](#sends-while-a-console-process-runs)). |
 | `queue` | Pushes one job per batch, or per part of a big batch (see [Request Size](#request-size)). A queue worker exports it. |
 | `null` | Discards the spans. |
 
@@ -226,7 +226,7 @@ The job goes to your default queue connection and its default queue. A queue wor
 
 In a command, queue worker or tinker, Refract sends finished runs while the process keeps going (see [Bounded Memory](#bounded-memory)). These rules apply to those sends.
 
-Refract never writes these sends to a `database` queue, so a rollback in your app never removes them. On `redis`, `sqs` and `beanstalkd`, each send is a queue job with the job's own retries.
+Refract never writes these sends to a `database` queue, so a rollback in your app never removes them. With `queue`, on `redis`, `sqs` and `beanstalkd`, each send is a queue job with the job's own retries.
 
 Refract exports these sends in the process:
 
@@ -239,12 +239,12 @@ For a send in the process:
 
 - The send waits for the destination, up to 15 seconds. A send inside an open `DB::transaction()` keeps your transaction open while it waits.
 - When the send cannot reach the destination, or gets 408, 429 or 5xx, Refract keeps its spans and logs one warning. It tries them again at a later send, at least 5 seconds later. After a `Retry-After`, it waits that long, at most 300 seconds.
-- When one part cannot connect, Refract keeps the later parts of that send without a try. "Cannot connect" means the host is not found, refuses the connection, or does not answer the connection in time. So a destination that is down costs one timeout per send, not one per part.
+- When one part cannot connect, Refract keeps the later parts of that send without a try. "Cannot connect" means the host or proxy is not found, or the host refuses the connection. It also means the connection times out or the TLS handshake fails. So a destination that is down costs one timeout per send, not one per part.
 - A part that connected but got no answer in time does not stop the later parts.
 - A full buffer tries at once, without the 5-second wait. If that try also fails, Refract drops new spans until a later try works. The next try comes at the first new span after an open top-level run ends, or after the wait is over.
 - At the end of the process, the spans that Refract still keeps go out with the final batch.
 
-The final batch at the end of a request, job or command uses the queue as usual. When Refract exports the final batch in the process, it tries every part. Then a destination that is down costs up to 15 seconds per part (10 seconds when the host does not answer the connection).
+With `queue`, the final batch at the end of a request, job or command uses the queue as usual. When Refract exports the final batch in the process, it tries every part. Then a destination that is down costs up to 15 seconds per part (10 seconds when the host does not answer the connection).
 
 ### Export Failures
 
@@ -294,9 +294,10 @@ How values are recorded:
 | --- | --- |
 | A string | The string |
 | An array or Collection | JSON, in full. Refract walks the arrays and Collections inside it. |
+| A number or boolean (top level only) | Cast to a string. `false` becomes an empty string. |
 | A `Stringable` (top level only) | Its `__toString()`, as the SDK does |
 | A backed enum inside an array or Collection | Its value |
-| A file inside an array or Collection | `[file]` |
+| A file, at any level | `[file]` |
 | Any other object | Its class name. Refract runs none of its methods. |
 | A value that cannot be encoded as JSON, for example one with a pure enum | `[not encodable as JSON]`, with one warning |
 
