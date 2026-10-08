@@ -200,7 +200,7 @@ The transport decides when and in which process traces are exported. No transpor
 
 | Transport | What it does |
 | --- | --- |
-| `sync` | Exports in the same process: after the response is sent, at the end of a queued job, or at the end of a console command. No retry at that point. A send while a console process runs that cannot reach the destination keeps its spans and tries again later (see [`queue`](#queue)). |
+| `sync` | Exports in the same process: after the response is sent, at the end of a queued job, or at the end of a console command. No retry at that point. A send while a console process runs that cannot reach the destination, or gets 408, 429 or 5xx, keeps its spans and tries again later (see [`queue`](#queue)). |
 | `queue` | Pushes one job per batch, or per part of a big batch (see [Request Size](#request-size)). A queue worker exports it. |
 | `null` | Discards the spans. |
 
