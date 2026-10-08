@@ -14,8 +14,9 @@ interface SendNow extends RetryAfter
      * Send the given batch of neutral spans while the process keeps going.
      *
      * A part exported in this process that the destination could not take
-     * now (Retryable) is given back, not dropped. A part that got through,
-     * or was rejected, is never given back.
+     * now (Retryable) is given back, not dropped. Once a part cannot connect
+     * to the destination, the later parts are given back without a try. A
+     * part that got through, or was rejected, is never given back.
      *
      * @param  list<array<string, mixed>>  $spans
      * @return list<array<string, mixed>> The neutral spans to try again later, as given.

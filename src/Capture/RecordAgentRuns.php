@@ -259,7 +259,7 @@ class RecordAgentRuns
      * Get the agent's name without running its code: a sub-agent takes the
      * name of the tool span that called it, which the SDK resolved for the
      * tool; any other run takes its class name. The SDK calls name() only
-     * when it wraps the agent as a tool. (Rule 10)
+     * when it wraps the agent as a tool.
      */
     protected function agentName(Agent $agent, ?string $parentKey): string
     {

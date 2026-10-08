@@ -216,8 +216,8 @@ The job goes to your default queue connection and its default queue.
 - The job tries 4 times when the destination cannot be reached or answers 408, 429 or 5xx. It waits 10 seconds before the second try, 60 seconds before the third and 300 seconds before the fourth. So a batch survives an outage of about 6 minutes.
 - On a 429 or 503 with `Retry-After` in whole seconds, the job waits that long when it is longer than its normal wait, at most 300 seconds. A short `Retry-After` never makes the job try sooner. An HTTP date, a negative number or text is ignored.
 - The job is never tied to your database transactions. It is pushed at once even on a connection with `after_commit`, and a rollback in your app does not remove it. The spans record what already happened: the model answered and the tools ran.
-- While a command, queue worker or tinker runs, Refract never writes a job to a `database` queue. It exports those sends in the process instead. Your app's transactions can then never hold or roll back Refract's work. The send at the end of the request, job or command uses the queue as usual.
-- Any send that Refract exports in the process while a console process runs, and that cannot reach the destination or gets 408, 429 or 5xx, keeps its spans. With `sync`, that is every send. With `queue`, it is a send on `database` or on a driver that exports with `sync`, a part too big for one queue message, and a part whose push to `redis`, `sqs` or `beanstalkd` fails. Refract tries them again at a later send, at least 5 seconds later (or after `Retry-After`, at most 300 seconds). Once one part of a send cannot reach the destination, the later parts of that send are kept without a try, so a destination that is down blocks the process for one timeout per send, not one per part. The final batch at the end of the request, job or command still tries every part, so there a destination that is down costs one timeout (15 seconds) per part. A full buffer tries at once, without that wait. If that try also fails, new spans are dropped until a later try works: the next try comes at the first new span after an open top-level run ends or after the wait is over (see Bounded memory). What is still not sent at the end of the process goes out with the final batch.
+- While a command, queue worker or tinker runs, Refract never writes a job to a `database` queue. It exports those sends in the process instead, so a rollback in your app never removes Refract's work. A send that runs inside an open `DB::transaction()` still waits for the destination (up to 15 seconds), and your transaction stays open while it waits. The send at the end of the request, job or command uses the queue as usual.
+- Any send that Refract exports in the process while a console process runs, and that cannot reach the destination or gets 408, 429 or 5xx, keeps its spans. With `sync`, that is every send. With `queue`, it is a send on `database` or on a driver that exports with `sync`, a part too big for one queue message, and a part whose push to `redis`, `sqs` or `beanstalkd` fails. Refract tries them again at a later send, at least 5 seconds later (or after `Retry-After`, at most 300 seconds). Once one part of a send cannot connect to the destination (the host is not found, refuses the connection, or the connection times out), the later parts of that send are kept without a try, so a destination that is down blocks the process for one timeout per send, not one per part. A part that connected but got no answer in time does not stop the later parts. The final batch at the end of the request, job or command still tries every part, so there a destination that is down costs one timeout (15 seconds) per part. A full buffer tries at once, without that wait. If that try also fails, new spans are dropped until a later try works: the next try comes at the first new span after an open top-level run ends or after the wait is over (see Bounded memory). What is still not sent at the end of the process goes out with the final batch.
 - When the job gives up, it logs one warning. It does not throw, so nothing goes to your error tracker or the `failed_jobs` table.
 
 ### Export Failures
@@ -366,9 +366,17 @@ Context::add('trigger', 'schedule');
 
 ## Known Limitations
 
-- **(L17)** Laravel Octane is not supported.
-- **(X10)** With a morph map, the participant type is the full class name, so it does not match the `participant_type` column of the `agent_conversations` table (which holds the alias).
-- **(P12)** With no `mask` set, a secret inside captured content is sent as is.
+- Laravel Octane is not supported.
+- With a morph map, the participant type is the full class name, so it does not match the `participant_type` column of the `agent_conversations` table (which holds the alias).
+- With no `mask` set, a secret inside captured content is sent as is.
+- Only agent runs are traced. Embeddings, images, audio and other SDK operations are not.
+- A web request sends once, after the response. A request whose runs make more than 1,000 spans loses the spans past the cap.
+- With `sync`, the send after the response still runs in the same PHP-FPM worker. A destination that is down keeps that worker busy for up to 15 seconds per part.
+- Sends inside a queue job run under that job's `timeout`. A slow or down destination adds up to 15 seconds per send, and with `sync` the send at the end of the job adds up to 15 seconds per part. Give jobs that run agents room in their `timeout`.
+- Spans not yet sent are lost when the worker kills a job at its `timeout`, or when a command ends by a signal, `exit()` or `dd()`.
+- On `beanstalkd`, a job over the server's size limit (64 KB by default) cannot be pushed, so it is exported with `sync` instead, with no retry.
+- When a queue push throws after the job reached the queue, the batch is also exported with `sync`, so it can arrive twice.
+- An app listener on `AgentPrompted` that runs another agent while the buffer is full can make Refract send a run before the SDK adds its tool approval events. Those events are then lost.
 
 ## Contributing
 
@@ -387,7 +395,7 @@ composer build
 vendor/bin/testbench refract:check R1
 ```
 
-`refract:check` runs the scenario for a row, reads the trace from Langfuse, and compares it to `workbench/expected/{row}.txt`. It prints `PASS` or `FAIL`.
+`refract:check` runs the named scenario (one per file in `workbench/expected`), reads the trace from Langfuse, and compares it to `workbench/expected/{scenario}.txt`. It prints `PASS` or `FAIL`.
 
 ## License
 
