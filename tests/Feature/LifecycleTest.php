@@ -3,6 +3,7 @@
 use Anantrp\Refract\Capture\Recorder;
 use Anantrp\Refract\Contracts\Transport;
 use Anantrp\Refract\Support\Diagnostics;
+use Anantrp\Refract\Tests\Support\Ai\NotesAgent;
 use Anantrp\Refract\Tests\Support\ClockRecorder;
 use Anantrp\Refract\Tests\Support\Env;
 use Anantrp\Refract\Tests\Support\Jobs\RunAgentThenFail;
@@ -25,7 +26,9 @@ use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Facades\Schema;
 use Laravel\Ai\Contracts\Providers\TextProvider;
 use Laravel\Ai\Events\AgentFailedOver;
+use Laravel\Ai\Events\InvokingTool;
 use Laravel\Ai\Events\PromptingAgent;
+use Laravel\Ai\Events\StartingStep;
 use Laravel\Ai\Exceptions\RateLimitedException;
 use Laravel\Ai\Prompts\AgentPrompt;
 use OpenTelemetry\API\Trace\Span;
@@ -678,6 +681,44 @@ it('L11: after a flush the buffer takes spans again', function () {
     $recorder->flush();
 
     expect($transport->spans)->toHaveCount(1_004);
+});
+
+it('L11: the run, steps and tool of a run dropped at the cap leave the dropped keys when they end', function () {
+    $this->captureNeutralSpans();
+    $recorder = app(Recorder::class);
+    $keys = [];
+
+    // These listeners run after Refract's, so each span has just started.
+    Event::listen(PromptingAgent::class, function (PromptingAgent $event) use (&$keys) {
+        $keys[] = "run:{$event->invocationId}";
+    });
+    Event::listen(StartingStep::class, function (StartingStep $event) use (&$keys) {
+        $keys[] = "step:{$event->invocationId}:{$event->stepNumber}";
+    });
+    Event::listen(InvokingTool::class, function (InvokingTool $event) use (&$keys) {
+        $keys[] = "tool:{$event->toolInvocationId}";
+    });
+
+    // An open run holds the full buffer, so a full-buffer send frees no room.
+    $recorder->start('run:long', 'invoke_agent', null, []);
+
+    for ($i = 1; $i < 1_000; $i++) {
+        $recorder->start("tool:{$i}", 'execute_tool', 'run:long', []);
+        $recorder->end("tool:{$i}");
+    }
+
+    $dropped = [];
+
+    Event::listen([PromptingAgent::class, StartingStep::class, InvokingTool::class], function () use ($recorder, &$keys, &$dropped) {
+        $dropped[] = $recorder->isDropped(end($keys));
+    });
+
+    NotesAgent::fakeTwoSteps();
+    NotesAgent::make()->prompt('What is new?');
+
+    expect($keys)->toHaveCount(4)
+        ->and($dropped)->toBe([true, true, true, true])
+        ->and(array_filter($keys, $recorder->isDropped(...)))->toBe([]);
 });
 
 /**

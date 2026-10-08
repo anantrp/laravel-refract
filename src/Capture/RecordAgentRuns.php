@@ -128,12 +128,13 @@ class RecordAgentRuns
      */
     public function agentPrompted(AgentPrompted $event): void
     {
+        $key = $this->runKey($event->invocationId);
         $conversationId = $event->response->conversationId;
 
         $this->recorder->end(
-            $this->runKey($event->invocationId),
+            $key,
             context: $conversationId === null ? [] : ['session' => $conversationId],
-            content: $this->content->runOutput($event->response),
+            content: $this->recorder->isOpen($key) ? $this->content->runOutput($event->response) : [],
         );
     }
 
@@ -172,14 +173,15 @@ class RecordAgentRuns
 
     public function stepCompleted(StepCompleted $event): void
     {
+        $key = $this->stepKey($event->invocationId, $event->stepNumber);
         $response = $event->response;
 
-        $this->recorder->end($this->stepKey($event->invocationId, $event->stepNumber), call: [
+        $this->recorder->end($key, call: [
             'response_model' => $response->meta->model,
             'finish_reason' => $response->finishReason->value,
             'input_tokens' => $response->usage->inputTokens,
             'output_tokens' => $response->usage->outputTokens,
-        ], content: $this->content->stepOutput($response));
+        ], content: $this->recorder->isOpen($key) ? $this->content->stepOutput($response) : []);
     }
 
     public function stepFailed(StepFailed $event): void
@@ -197,7 +199,9 @@ class RecordAgentRuns
 
     public function toolInvoked(ToolInvoked $event): void
     {
-        $this->recorder->end($this->toolKey($event->toolInvocationId), content: $this->content->toolResult($event->result));
+        $key = $this->toolKey($event->toolInvocationId);
+
+        $this->recorder->end($key, content: $this->recorder->isOpen($key) ? $this->content->toolResult($event->result) : []);
     }
 
     public function toolFailed(ToolFailed $event): void

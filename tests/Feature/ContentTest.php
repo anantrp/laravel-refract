@@ -944,3 +944,58 @@ it('P13: a tool call response in messages exported as JSON text still gets its f
         ['role' => 'tool', 'parts' => [['type' => 'tool_call_response', 'id' => 'call_1', 'name' => 'NotesTool', 'response' => GenAiTranslator::TOOL_RESULT_REFERENCE]]],
     ]);
 });
+
+/**
+ * Fill the buffer with the given number of spans: one open run and its tools.
+ */
+function fillBuffer(string $run, int $spans): void
+{
+    $recorder = app(Recorder::class);
+    $recorder->start("run:{$run}", 'invoke_agent', null, ['agent' => 'Filler']);
+
+    for ($i = 1; $i < $spans; $i++) {
+        $recorder->start("tool:{$run}:{$i}", 'execute_tool', "run:{$run}", ['tool' => 'Filler']);
+        $recorder->end("tool:{$run}:{$i}");
+    }
+}
+
+it('P14: with capture on the end content of a span dropped at the cap, or under a dropped parent, is never built, so the mask is not called for its output or result', function (int $filler, array $seen) {
+    $this->environmentConfig = contentConfig([
+        'refract.capture.content' => true,
+        'refract.capture.mask' => RecordingMask::class,
+    ]);
+    $memory = $this->captureNeutralSpans();
+
+    Diagnostics::reset();
+    Log::swap($log = new WarningLog);
+
+    // An open run holds the buffer, so a full-buffer send frees no room.
+    fillBuffer('long', $filler);
+
+    NotesAgent::fakeTwoSteps();
+    $response = NotesAgent::make()->prompt('What is new?');
+
+    app(Recorder::class)->flush();
+
+    $recorded = array_values(array_filter($memory->spans, fn (array $span) => ($span['call']['agent'] ?? null) === 'NotesAgent'));
+
+    expect($response->text)->toBe('The release is on Friday.')
+        ->and(array_count_values(RecordingMask::$seen))->toBe($seen)
+        ->and($log->warnings)->toHaveCount(1)
+        ->and($memory->spans)->toHaveCount(1_000)
+        ->and(array_column($recorded, 'content'))->toBe($filler === 1_000 ? [] : [[
+            'input' => [['role' => 'user', 'parts' => [['type' => 'text', 'content' => 'What is new?']]]],
+            'output' => [['role' => 'assistant', 'parts' => [['type' => 'text', 'content' => 'The release is on Friday.']]]],
+        ]]);
+})->with([
+    // The start values are still masked (backlog): the prompt, each step's input, the tool's arguments.
+    'the run dropped at the cap, its steps and tool under it' => [1_000, [
+        'What is new?' => 3,
+        '{"topic":"release"}' => 2,
+    ]],
+    'the run kept, its steps and tool dropped at the cap' => [999, [
+        'What is new?' => 3,
+        '{"topic":"release"}' => 2,
+        'The release is on Friday.' => 1,
+    ]],
+]);

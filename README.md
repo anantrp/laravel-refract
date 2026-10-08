@@ -289,6 +289,8 @@ class MaskSecrets
 
 The mask fails closed. When it throws or does not return a string, the value becomes `<fully masked due to failed mask function>` and one warning is logged. When the class cannot be made or is not invokable, every value is masked that way. The run always continues.
 
+The mask is not called for the output or tool result of a span dropped at the cap (see Bounded memory). Its prompt, input and tool arguments still go through the mask.
+
 ## Participant
 
 The participant is who the run is for. Refract records it as `laravel.ai.participant.type` and `laravel.ai.participant.id`. The type is always the full class name, for example `App\Models\User`.
