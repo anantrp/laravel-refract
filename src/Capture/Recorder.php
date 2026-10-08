@@ -464,7 +464,8 @@ class Recorder
      * the run that ended last, since a new span is starting. It sends even
      * while waiting after a send that gave spans back: else new spans are
      * dropped. A failed try leaves the buffer full of kept spans: the next
-     * try comes when a run ends, or at the first start after the new wait.
+     * try comes at the first new span after an open top-level run ends or
+     * after the wait is over.
      */
     public function flushAllFinished(): void
     {
