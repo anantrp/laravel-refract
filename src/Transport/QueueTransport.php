@@ -52,11 +52,6 @@ class QueueTransport implements SendNow, Transport
     protected SyncTransport $inProcess;
 
     /**
-     * The seconds the destination asked to wait after the last part given back, or null.
-     */
-    protected ?int $retryAfter = null;
-
-    /**
      * Create a new queue transport instance.
      */
     public function __construct(protected Container $container, Exporter $exporter)
@@ -75,22 +70,17 @@ class QueueTransport implements SendNow, Transport
 
     public function sendNow(array $spans): array
     {
-        $this->retryAfter = null;
+        $this->inProcess->forgetRetryAfter();
 
-        return $this->sendParts($spans, true, function (array $part) {
-            $kept = $this->inProcess->exportNow($part);
-
-            if ($kept !== []) {
-                $this->retryAfter = $this->inProcess->retryAfter();
-            }
-
-            return $kept;
-        });
+        return $this->sendParts($spans, true, fn (array $part) => $this->inProcess->exportNow($part));
     }
 
+    /**
+     * Get the longest wait in seconds the destination asked for across the parts exported in this process in the last send, or null.
+     */
     public function retryAfter(): ?int
     {
-        return $this->retryAfter;
+        return $this->inProcess->retryAfter();
     }
 
     /**

@@ -1275,6 +1275,56 @@ it('L21: when one part of a send gets through and the next cannot, only the seco
         ->and($log->warnings[0])->toContain('tried again');
 });
 
+it('L21: when the parts of one send fail with and without Retry-After, the next send waits the longest Retry-After', function (string $transport, array $first, array $second) {
+    $log = bootClocked($transport);
+    useQueueDriver('sync');
+    Http::fakeSequence()->push('', ...$first)->push('', ...$second)->whenEmpty(Http::response('', 200));
+    $recorder = app(Recorder::class);
+    $sec = 1_000_000_000;
+
+    // Each run is about 2.5 MB of OTLP JSON: two runs do not fit one 4 MB part.
+    $run = function (string $name) use ($recorder) {
+        $recorder->start("run:{$name}", 'invoke_agent', null, ['agent' => $name]);
+        $recorder->start("tool:{$name}", 'execute_tool', "run:{$name}", ['agent' => $name], content: ['result' => bin2hex(random_bytes(1_250_000))]);
+        $recorder->end("tool:{$name}");
+        $recorder->end("run:{$name}");
+    };
+
+    // At 5 s, A and B are sent in two parts: one gets 429 Retry-After 60, the other 503.
+    $run('A');
+    $run('B');
+    $recorder->monotonicNow = 5 * $sec;
+    $run('C');
+
+    expect(Http::recorded())->toHaveCount(2);
+
+    // Past the 5 s rule, but inside the 60 s the destination asked for: no send.
+    $recorder->monotonicNow = 10 * $sec;
+    $run('D');
+    $recorder->monotonicNow = 65 * $sec - 1;
+    $run('E');
+
+    expect(Http::recorded())->toHaveCount(2);
+
+    // 60 s after the failed send: the next run end sends.
+    $recorder->monotonicNow = 65 * $sec;
+    $run('F');
+
+    expect(count(Http::recorded()))->toBeGreaterThan(2);
+
+    $recorder->flush();
+
+    $spans = deliveredSpans();
+
+    expect($spans)->toHaveCount(12)
+        ->and(array_unique(array_column($spans, 'spanId')))->toHaveCount(12)
+        ->and($log->warnings)->toHaveCount(1)
+        ->and($log->warnings[0])->toContain('tried again');
+})->with(['sync', 'queue on the sync driver' => 'queue'])->with([
+    '429 Retry-After 60, then 503' => [[429, ['Retry-After' => '60']], [503]],
+    '503, then 429 Retry-After 60' => [[503], [429, ['Retry-After' => '60']]],
+]);
+
 it('L21: kept spans go out with the final batch at the flush point, in one queue job that is retried', function () {
     $log = bootClocked('queue');
     useDatabaseQueue();

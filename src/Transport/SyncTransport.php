@@ -28,7 +28,7 @@ use Throwable;
 class SyncTransport implements SendNow, Transport
 {
     /**
-     * The seconds the destination asked to wait after the last part given back, or null.
+     * The longest wait in seconds the destination asked for across the parts given back in this send, or null.
      */
     protected ?int $retryAfter = null;
 
@@ -46,7 +46,7 @@ class SyncTransport implements SendNow, Transport
 
     public function sendNow(array $spans): array
     {
-        $this->retryAfter = null;
+        $this->forgetRetryAfter();
 
         $kept = [];
 
@@ -60,6 +60,14 @@ class SyncTransport implements SendNow, Transport
     public function retryAfter(): ?int
     {
         return $this->retryAfter;
+    }
+
+    /**
+     * Forget the wait the destination asked for, at the start of a send that may span many parts.
+     */
+    public function forgetRetryAfter(): void
+    {
+        $this->retryAfter = null;
     }
 
     /**
@@ -101,7 +109,11 @@ class SyncTransport implements SendNow, Transport
             return [];
         }
 
-        $this->retryAfter = $this->exporter instanceof RetryAfter ? $this->exporter->retryAfter() : null;
+        $seconds = $this->exporter instanceof RetryAfter ? $this->exporter->retryAfter() : null;
+
+        if ($seconds !== null && ($this->retryAfter === null || $seconds > $this->retryAfter)) {
+            $this->retryAfter = $seconds;
+        }
 
         Diagnostics::warn('export.kept', 'Spans could not be exported while the process runs: the destination could not be reached or answered 408, 429 or 5xx. They are kept and tried again later.');
 
