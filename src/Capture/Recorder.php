@@ -160,7 +160,7 @@ class Recorder
         }
 
         if ($this->full()) {
-            Diagnostics::warn('buffer.full', 'The buffer holds '.self::MAX_SPANS.' spans, the most it can between two flushes. New spans are dropped until the next flush.');
+            Diagnostics::warn('buffer.full', 'The buffer holds '.self::MAX_SPANS.' spans, the most it can between two flushes. New spans are dropped until a send frees room.');
 
             return;
         }
