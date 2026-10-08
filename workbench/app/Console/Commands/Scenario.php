@@ -8,14 +8,14 @@ use Workbench\App\Scenarios;
 
 class Scenario extends Command
 {
-    protected $signature = 'refract:scenario {row : Scenario name, for example R1}';
+    protected $signature = 'refract:scenario {scenario : Scenario name, for example R1}';
 
     protected $description = 'Run a scenario and print its trace id on the last line';
 
     public function handle(Scenarios $scenarios): int
     {
         try {
-            $traceId = $scenarios->run($this->rowArgument());
+            $traceId = $scenarios->run($this->scenarioArgument());
         } catch (InvalidArgumentException $e) {
             $this->error($e->getMessage());
 
@@ -27,10 +27,10 @@ class Scenario extends Command
         return self::SUCCESS;
     }
 
-    protected function rowArgument(): string
+    protected function scenarioArgument(): string
     {
-        $row = $this->argument('row');
+        $name = $this->argument('scenario');
 
-        return is_string($row) ? strtoupper($row) : '';
+        return is_string($name) ? strtoupper($name) : '';
     }
 }

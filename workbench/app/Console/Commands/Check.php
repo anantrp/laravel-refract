@@ -14,32 +14,32 @@ use function Orchestra\Testbench\package_path;
 
 class Check extends Command
 {
-    protected $signature = 'refract:check {row : Scenario name, for example R1}';
+    protected $signature = 'refract:check {scenario : Scenario name, for example R1}';
 
-    protected $description = 'Run a row scenario, read its tree from Langfuse and compare it to workbench/expected/{row}.txt';
+    protected $description = 'Run a scenario, read its tree from Langfuse and compare it to workbench/expected/{scenario}.txt';
 
     public function handle(TreeReader $reader, Scenarios $scenarios): int
     {
-        $row = $this->argument('row');
-        $row = is_string($row) ? strtoupper($row) : '';
+        $name = $this->argument('scenario');
+        $name = is_string($name) ? strtoupper($name) : '';
 
         try {
             $reader->ensureKeys();
 
-            $expectedFile = package_path('workbench', 'expected', "{$row}.txt");
+            $expectedFile = package_path('workbench', 'expected', "{$name}.txt");
 
             if (! is_file($expectedFile)) {
-                return $this->failWith("no expected file workbench/expected/{$row}.txt");
+                return $this->failWith("no expected file workbench/expected/{$name}.txt");
             }
 
             // A separate process, so Refract flushes when that command ends.
             $scenario = Process::path(package_path())
-                ->env($scenarios->environment($row))
+                ->env($scenarios->environment($name))
                 ->timeout(120)
-                ->run([PHP_BINARY, 'vendor/bin/testbench', 'refract:scenario', $row]);
+                ->run([PHP_BINARY, 'vendor/bin/testbench', 'refract:scenario', $name]);
 
             if ($scenario->failed()) {
-                return $this->failWith("scenario {$row} failed:\n".trim($scenario->output()."\n".$scenario->errorOutput()));
+                return $this->failWith("scenario {$name} failed:\n".trim($scenario->output()."\n".$scenario->errorOutput()));
             }
 
             $lines = preg_split('/\R/', trim($scenario->output())) ?: [];
