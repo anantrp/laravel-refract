@@ -1429,8 +1429,9 @@ it('L21: while the destination stays down, a full buffer tries at most twice bef
     $beforeEnd = 0;
 
     // One run-end send (at 500 spans), then the full buffer tries. A failed
-    // try leaves the buffer full of kept spans, so no new span gets in and
-    // only a run open at that moment can end and try once more.
+    // try leaves the buffer full of kept spans, so no new span gets in; the
+    // clock does not move, so the wait never ends and only a run open at
+    // that moment can end and try once more.
     Artisan::command('refract-test:many', function () use (&$beforeEnd) {
         for ($i = 0; $i < 400; $i++) {
             runTimeAgent();
@@ -1444,4 +1445,81 @@ it('L21: while the destination stays down, a full buffer tries at most twice bef
     expect($beforeEnd)->toBeLessThanOrEqual(3)
         ->and(Http::recorded())->toHaveCount($beforeEnd + 1)
         ->and(deliveredSpans())->toBe([]);
+});
+
+it('L21: after a failed full-buffer try with no run open, the next start once the wait is over tries again, and runs after the destination recovers are sent', function () {
+    $log = bootClocked('sync');
+    Http::fakeSequence()->push('', 503)->push('', 503)->whenEmpty(Http::response('', 200));
+    $recorder = app(Recorder::class);
+    $counts = [];
+
+    Artisan::command('refract-test:many', function () use ($recorder, &$counts) {
+        // The run-end send at 500 spans gets 503, then the full-buffer try
+        // at 1,000 spans gets 503: the buffer is full of kept spans, no run
+        // is open, and the 50 runs after it are dropped.
+        for ($i = 0; $i < 300; $i++) {
+            runTimeAgent();
+        }
+
+        $counts[] = count(Http::recorded());
+
+        // The destination is back; the 5 s wait is over.
+        $recorder->monotonicNow += 5_000_000_000;
+
+        for ($i = 0; $i < 50; $i++) {
+            runTimeAgent();
+        }
+
+        $counts[] = count(Http::recorded());
+    });
+
+    Artisan::call('refract-test:many');
+
+    $spans = deliveredSpans();
+    $runs = array_filter($spans, fn (array $span) => str_starts_with($span['name'], 'invoke_agent'));
+
+    // 1,000 kept spans in the try after the wait, the 50 later runs at the end of the command.
+    expect($counts)->toBe([2, 3])
+        ->and(Http::recorded())->toHaveCount(4)
+        ->and($spans)->toHaveCount(1_000 + 50 * 4)
+        ->and(array_unique(array_column($spans, 'spanId')))->toHaveCount(1_200)
+        ->and($runs)->toHaveCount(250 + 50)
+        ->and($log->warnings)->toHaveCount(2);
+});
+
+it('L21: while the destination stays down, a full buffer with no run open tries at most once per wait, however many starts are dropped', function () {
+    $log = bootClocked('sync');
+    Http::fake(fn () => Http::response('', 503));
+    $recorder = app(Recorder::class);
+    $beforeEnd = 0;
+
+    Artisan::command('refract-test:many', function () use ($recorder, &$beforeEnd) {
+        // The run-end send at 500 spans, then the full-buffer try at 1,000: both fail.
+        for ($i = 0; $i < 251; $i++) {
+            runTimeAgent();
+        }
+
+        expect(Http::recorded())->toHaveCount(2);
+
+        // 600 s, one run and 100 more dropped starts each second.
+        for ($t = 1; $t <= 600; $t++) {
+            $recorder->monotonicNow += 1_000_000_000;
+            runTimeAgent();
+
+            for ($i = 0; $i < 100; $i++) {
+                $recorder->start("tool:{$t}:{$i}", 'execute_tool', null, []);
+            }
+        }
+
+        $beforeEnd = count(Http::recorded());
+    });
+
+    Artisan::call('refract-test:many');
+
+    // Each failed try starts a new 5 s wait: one try at 5 s, 10 s, ... 600 s.
+    expect($beforeEnd)->toBe(2 + 600 / 5)
+        ->and(Http::recorded())->toHaveCount($beforeEnd + 1)
+        ->and(deliveredSpans())->toBe([])
+        // Kept, buffer full, and the final batch dropped: one warning each.
+        ->and($log->warnings)->toHaveCount(3);
 });

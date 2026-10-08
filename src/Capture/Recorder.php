@@ -115,7 +115,8 @@ class Recorder
      *
      * Set when a span ends whose parent is not open, and at each flush. A
      * tree can finish only then, so a full buffer does not run the callbacks
-     * again on every dropped span.
+     * again on every dropped span. A full buffer also runs them when the
+     * wait after a failed send is over (see retryDue()).
      */
     protected bool $treeEnded = true;
 
@@ -150,7 +151,7 @@ class Recorder
             $this->abandon($key);
         }
 
-        if ($this->treeEnded && $this->full()) {
+        if ($this->full() && ($this->treeEnded || $this->retryDue())) {
             $this->treeEnded = false;
 
             foreach ($this->fulls as $callback) {
@@ -434,8 +435,8 @@ class Recorder
      * Used when the buffer is full: by then the SDK has added its events to
      * the run that ended last, since a new span is starting. It sends even
      * while waiting after a send that gave spans back: else new spans are
-     * dropped. A failed try leaves the buffer full of kept spans, so only a
-     * run open at that moment can end and try once more.
+     * dropped. A failed try leaves the buffer full of kept spans: the next
+     * try comes when a run ends, or at the first start after the new wait.
      */
     public function flushAllFinished(): void
     {
@@ -472,6 +473,17 @@ class Recorder
         }
 
         $this->send($positions);
+    }
+
+    /**
+     * Determine if the kept spans may be tried again: the wait after the send that gave them back is over.
+     *
+     * A failed try starts a new wait, so while the destination stays down a
+     * full buffer tries at most once per wait, however many spans it drops.
+     */
+    protected function retryDue(): bool
+    {
+        return $this->kept !== [] && ! $this->waiting();
     }
 
     /**
