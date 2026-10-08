@@ -82,9 +82,14 @@ function semConvConstants(): array
         }
     }
 
-    $constants = [];
+    $index = [];
 
     foreach ($classes as $class => $source) {
+        // The archived classes are deprecated in sem-conv: a later release may remove them.
+        if (! class_exists($class) && ! interface_exists($class)) {
+            continue;
+        }
+
         foreach ((new ReflectionClass($class))->getReflectionConstants() as $constant) {
             $value = $constant->getValue();
 
@@ -94,7 +99,7 @@ function semConvConstants(): array
 
             preg_match('/@deprecated\s+(.+)/', (string) $constant->getDocComment(), $deprecated);
 
-            $constants[$value][] = [
+            $index[$value][] = [
                 'constant' => $class.'::'.$constant->getName(),
                 'value' => str_ends_with($class, 'Values') || str_contains($constant->getName(), '_VALUE_'),
                 'source' => $source,
@@ -103,7 +108,11 @@ function semConvConstants(): array
         }
     }
 
-    return $constants;
+    // A broken install that loads no sem-conv class must fail here, not pass with nothing to check.
+    expect($index)->not->toBeEmpty('No open-telemetry/sem-conv class loaded.')
+        ->toHaveKey('error.type', message: 'open-telemetry/sem-conv does not define error.type.');
+
+    return $constants = $index;
 }
 
 /**
