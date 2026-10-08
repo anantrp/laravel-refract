@@ -119,7 +119,7 @@ class RecordAgentRuns
         ],
             context: $parentKey === null ? $this->context->of($agent) : [],
             contextFrom: $parentKey === null ? null : $this->recorder->parentKey($parentKey),
-            content: $event->prompt->hasApprovalDecisions() ? [] : fn () => $this->content->runInput($event->prompt),
+            content: $event->prompt->hasApprovalDecisions() ? [] : $this->content->runInput($event->prompt),
         );
     }
 
@@ -133,7 +133,7 @@ class RecordAgentRuns
         $this->recorder->end(
             $this->runKey($event->invocationId),
             context: $conversationId === null ? [] : ['session' => $conversationId],
-            content: fn () => $this->content->runOutput($event->response),
+            content: $this->content->runOutput($event->response),
         );
     }
 
@@ -167,7 +167,7 @@ class RecordAgentRuns
             'model' => $event->model,
             'step' => $event->stepNumber,
             'final_step' => $event->isFinalStep,
-        ], content: fn () => $this->content->stepInput($event->messages));
+        ], content: $this->content->stepInput($event->messages));
     }
 
     public function stepCompleted(StepCompleted $event): void
@@ -179,7 +179,7 @@ class RecordAgentRuns
             'finish_reason' => $response->finishReason->value,
             'input_tokens' => $response->usage->inputTokens,
             'output_tokens' => $response->usage->outputTokens,
-        ], content: fn () => $this->content->stepOutput($response));
+        ], content: $this->content->stepOutput($response));
     }
 
     public function stepFailed(StepFailed $event): void
@@ -192,12 +192,12 @@ class RecordAgentRuns
         $this->recorder->start($this->toolKey($event->toolInvocationId), 'execute_tool', $this->runKey($event->invocationId), [
             'tool' => ToolNameResolver::resolve($event->tool),
             'tool_invocation_id' => $event->toolInvocationId,
-        ], content: fn () => $this->content->toolArguments($event->arguments));
+        ], content: $this->content->toolArguments($event->arguments));
     }
 
     public function toolInvoked(ToolInvoked $event): void
     {
-        $this->recorder->end($this->toolKey($event->toolInvocationId), content: fn () => $this->content->toolResult($event->result));
+        $this->recorder->end($this->toolKey($event->toolInvocationId), content: $this->content->toolResult($event->result));
     }
 
     public function toolFailed(ToolFailed $event): void

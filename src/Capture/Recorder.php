@@ -149,14 +149,13 @@ class Recorder
      * whose parent was dropped at the cap is dropped too, even once room
      * frees, so it never becomes a new trace without its run. A parent that
      * is not open for any other reason still falls back to the active trace.
-     * Content given as a closure is built only for a span the buffer keeps.
      *
      * @param  array<string, mixed>  $call
      * @param  array<string, mixed>  $context
      * @param  string|null  $contextFrom  The key of the open span whose context this span takes.
-     * @param  array<string, mixed>|Closure(): array<string, mixed>  $content
+     * @param  array<string, mixed>  $content
      */
-    public function start(string $key, string $kind, ?string $parentKey, array $call, array $context = [], ?string $contextFrom = null, array|Closure $content = []): void
+    public function start(string $key, string $kind, ?string $parentKey, array $call, array $context = [], ?string $contextFrom = null, array $content = []): void
     {
         if (isset($this->open[$key])) {
             $this->abandon($key);
@@ -192,8 +191,6 @@ class Recorder
         } else {
             [$traceId, $parentSpanId] = $this->activeTrace();
         }
-
-        $content = $this->content($content);
 
         $this->open[$key] = [
             'trace_id' => $traceId,
@@ -270,13 +267,11 @@ class Recorder
     /**
      * End the given span, merging in the call, context and content data known only at its end.
      *
-     * Content given as a closure is built only when the span is open.
-     *
      * @param  array<string, mixed>  $call
      * @param  array<string, mixed>  $context
-     * @param  array<string, mixed>|Closure(): array<string, mixed>  $content
+     * @param  array<string, mixed>  $content
      */
-    public function end(string $key, string $status = 'ok', ?string $message = null, array $call = [], array $context = [], array|Closure $content = []): void
+    public function end(string $key, string $status = 'ok', ?string $message = null, array $call = [], array $context = [], array $content = []): void
     {
         $span = $this->open[$key] ?? null;
 
@@ -285,8 +280,6 @@ class Recorder
 
             return;
         }
-
-        $content = $this->content($content);
 
         unset($this->open[$key]);
 
@@ -311,22 +304,6 @@ class Recorder
                 $callback($key);
             }
         }
-    }
-
-    /**
-     * Get the given content, built now when it is a closure. A closure that fails or gives no array gives none.
-     *
-     * @param  array<string, mixed>|Closure(): array<string, mixed>  $content
-     * @return array<string, mixed>
-     */
-    protected function content(array|Closure $content): array
-    {
-        if (is_array($content)) {
-            return $content;
-        }
-
-        // The return type turns a result that is not an array into a failure.
-        return Guard::run('capture.content', 'to record the content of a span', fn (): array => $content(), []);
     }
 
     /**
