@@ -1,0 +1,13 @@
+/vendor
+/.phpunit.cache
+/.idea
+/.vscode
+.phpunit.result.cache
+composer.lock
+.DS_Store
+/.scratch
+/workbench/.env
+/.claude/worktrees
+/.claude/settings.local.json
+/workbench/otlp-stub/requests.jsonl
+/workbench/otlp-stub/script.json

@@ -1,0 +1,11 @@
+{
+    "permissions": {
+        "allow": [
+            "Bash(vendor/bin/testbench:*)",
+            "Bash(composer build)",
+            "Bash(composer serve)",
+            "Bash(curl -s localhost:8000:*)",
+            "Bash(curl localhost:8000:*)"
+        ]
+    }
+}

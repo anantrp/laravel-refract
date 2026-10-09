@@ -1,0 +1,303 @@
+<?php
+
+namespace Anantrp\Refract\Export\Platforms\Langfuse;
+
+use Anantrp\Refract\Export\GenAiTranslator;
+use Anantrp\Refract\Export\Platform;
+use Anantrp\Refract\Support\Diagnostics;
+use Anantrp\Refract\Support\Settings;
+use Illuminate\Contracts\Auth\Authenticatable;
+
+/**
+ * Langfuse: Basic auth, its ingestion header and its OTLP path.
+ *
+ * @see https://langfuse.com/integrations/native/opentelemetry
+ *
+ * @phpstan-import-type TranslatedSpan from GenAiTranslator
+ */
+class LangfusePlatform implements Platform
+{
+    /**
+     * The Langfuse Cloud URL used when no base URL is set.
+     */
+    public const CLOUD_URL = 'https://cloud.langfuse.com';
+
+    /**
+     * The path Langfuse receives OTLP traces on.
+     */
+    public const OTEL_PATH = '/api/public/otel/v1/traces';
+
+    /**
+     * The Langfuse ingestion version the spans are written for.
+     */
+    public const INGESTION_VERSION = '4';
+
+    /**
+     * The longest environment name Langfuse accepts.
+     */
+    protected const ENVIRONMENT_LENGTH = 40;
+
+    /**
+     * The nanoseconds in the millisecond Langfuse stores times with.
+     */
+    protected const MILLISECOND = 1_000_000;
+
+    /**
+     * Create a new Langfuse platform instance.
+     */
+    public function __construct(
+        protected string $url,
+        protected string $publicKey,
+        protected string $secretKey,
+    ) {}
+
+    /**
+     * Create the platform from the config, or get null and one warning when a key is missing.
+     *
+     * An empty base URL means Langfuse Cloud. An invalid one exports
+     * nothing: it never falls back to Cloud, so the keys never go to a host
+     * the user did not name.
+     */
+    public static function fromConfig(string $key): ?self
+    {
+        $url = Settings::destinationUrl("{$key}.url");
+
+        if ($url === null) {
+            return null;
+        }
+
+        $publicKey = Settings::string("{$key}.public_key");
+        $secretKey = Settings::string("{$key}.secret_key");
+
+        if ($publicKey === '' || $secretKey === '') {
+            Diagnostics::warn('langfuse.keys', 'Langfuse keys missing. Set LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY. Nothing is exported.');
+
+            return null;
+        }
+
+        return new self($url, $publicKey, $secretKey);
+    }
+
+    public function endpoint(): string
+    {
+        return rtrim($this->url === '' ? self::CLOUD_URL : $this->url, '/').self::OTEL_PATH;
+    }
+
+    public function headers(): array
+    {
+        return [
+            'Authorization' => 'Basic '.base64_encode($this->publicKey.':'.$this->secretKey),
+            'x-langfuse-ingestion-version' => self::INGESTION_VERSION,
+        ];
+    }
+
+    /**
+     * Normalize the environment name to what Langfuse accepts: lowercase
+     * letters, digits, "-" and "_", at most 40 characters.
+     */
+    public function resource(array $attributes): array
+    {
+        $environment = $attributes['deployment.environment.name'] ?? null;
+
+        if (is_string($environment)) {
+            $normalized = trim(preg_replace('/[^a-z0-9_-]+/', '-', strtolower($environment)) ?? '', '-');
+
+            $attributes['deployment.environment.name'] = $normalized === '' ? 'default' : substr($normalized, 0, self::ENVIRONMENT_LENGTH);
+        }
+
+        return $attributes;
+    }
+
+    /**
+     * Move siblings that start in the same millisecond to distinct milliseconds,
+     * drop langfuse.* attributes set by a Context mapping, mark abandoned
+     * spans and set user.id on spans with a user participant.
+     *
+     * Langfuse stores times in milliseconds and orders tied siblings at
+     * random. Each trace is walked in start order, and every move shifts all
+     * later times of that trace by the same amount, so a parent still covers
+     * its children, a span that started after another ended still does, and
+     * events stay inside their span.
+     */
+    public function prepare(array $spans): array
+    {
+        $traces = [];
+
+        foreach ($spans as $index => $span) {
+            $traces[$span['trace_id']][] = $index;
+        }
+
+        foreach ($traces as $indexes) {
+            $spans = $this->spread($spans, $indexes);
+        }
+
+        return array_map(fn (array $span) => $this->setUser($this->markAbandoned($this->withoutOwnAttributes($span))), $spans);
+    }
+
+    /**
+     * Drop the langfuse.* attributes a span arrives with. Only a Context
+     * mapping can set them, since the translator never does; the ones
+     * Langfuse reads are set here alone.
+     *
+     * @param  TranslatedSpan  $span
+     * @return TranslatedSpan
+     */
+    protected function withoutOwnAttributes(array $span): array
+    {
+        $span['attributes'] = array_filter(
+            $span['attributes'],
+            fn (int|string $name) => ! str_starts_with((string) $name, 'langfuse.'),
+            ARRAY_FILTER_USE_KEY,
+        );
+
+        return $span;
+    }
+
+    /**
+     * Set user.id to the participant id when the participant type is a user (implements Authenticatable), and only then.
+     *
+     * @param  TranslatedSpan  $span
+     * @return TranslatedSpan
+     */
+    protected function setUser(array $span): array
+    {
+        $type = $span['attributes']['laravel.ai.participant.type'] ?? null;
+        $id = $span['attributes']['laravel.ai.participant.id'] ?? null;
+
+        // user.id comes only from the participant.
+        unset($span['attributes']['user.id']);
+
+        if (is_string($type) && is_string($id) && is_a($type, Authenticatable::class, true)) {
+            $span['attributes']['user.id'] = $id;
+        }
+
+        return $span;
+    }
+
+    /**
+     * Show an abandoned span as a warning, since Langfuse reads only the error status.
+     *
+     * @param  TranslatedSpan  $span
+     * @return TranslatedSpan
+     */
+    protected function markAbandoned(array $span): array
+    {
+        if (($span['attributes']['laravel.ai.abandoned'] ?? false) === true) {
+            $span['attributes']['langfuse.observation.level'] = 'WARNING';
+            $span['attributes']['langfuse.observation.status_message'] = 'abandoned';
+        }
+
+        return $span;
+    }
+
+    /**
+     * Spread the tied siblings of one trace.
+     *
+     * @param  list<TranslatedSpan>  $spans
+     * @param  list<int>  $indexes
+     * @return list<TranslatedSpan>
+     */
+    protected function spread(array $spans, array $indexes): array
+    {
+        $depths = $this->depths($spans, $indexes);
+
+        usort($indexes, fn (int $a, int $b) => [$spans[$a]['start'], $depths[$a]] <=> [$spans[$b]['start'], $depths[$b]]);
+
+        $shift = 0;
+        $shifts = [];
+        $steps = [];
+        $lastMillisecond = [];
+
+        foreach ($indexes as $index) {
+            $original = $spans[$index]['start'];
+            $start = $original + $shift;
+            $millisecond = intdiv($start, self::MILLISECOND);
+            $parent = $spans[$index]['parent_span_id'] ?? '';
+
+            if (isset($lastMillisecond[$parent]) && $millisecond <= $lastMillisecond[$parent]) {
+                $millisecond = $lastMillisecond[$parent] + 1;
+                $start = $millisecond * self::MILLISECOND;
+            }
+
+            $lastMillisecond[$parent] = $millisecond;
+            $shift = $start - $original;
+            $shifts[$index] = $shift;
+            $steps[] = [$original, $shift];
+        }
+
+        foreach ($indexes as $index) {
+            $span = $spans[$index];
+            $start = $span['start'] + $shifts[$index];
+            $end = max($this->move($span['end'], $steps), $start);
+
+            $span['start'] = $start;
+            $span['end'] = $end;
+            $span['events'] = array_map(fn (array $event) => [
+                ...$event,
+                'time' => min(max($this->move($event['time'], $steps), $start), $end),
+            ], $span['events']);
+
+            $spans[$index] = $span;
+        }
+
+        return $spans;
+    }
+
+    /**
+     * Get the depth of each span in its trace, so a parent sorts before a child that starts with it.
+     *
+     * @param  list<TranslatedSpan>  $spans
+     * @param  list<int>  $indexes
+     * @return array<int, int>
+     */
+    protected function depths(array $spans, array $indexes): array
+    {
+        $parents = [];
+
+        foreach ($indexes as $index) {
+            $parents[$spans[$index]['span_id']] = $spans[$index]['parent_span_id'];
+        }
+
+        $depths = [];
+
+        foreach ($indexes as $index) {
+            $depth = 0;
+            $parent = $spans[$index]['parent_span_id'];
+
+            // Bounded by the span count, so a cycle cannot loop forever.
+            while ($parent !== null && isset($parents[$parent]) && $depth < count($indexes)) {
+                $parent = $parents[$parent];
+                $depth++;
+            }
+
+            $depths[$index] = $depth;
+        }
+
+        return $depths;
+    }
+
+    /**
+     * Shift a time by the move of the last span that started at or before it.
+     *
+     * @param  list<array{int, int}>  $steps  The original start and the shift of each span, in start order.
+     */
+    protected function move(int $time, array $steps): int
+    {
+        $low = 0;
+        $high = count($steps) - 1;
+        $shift = 0;
+
+        while ($low <= $high) {
+            $middle = intdiv($low + $high, 2);
+
+            if ($steps[$middle][0] <= $time) {
+                $shift = $steps[$middle][1];
+                $low = $middle + 1;
+            } else {
+                $high = $middle - 1;
+            }
+        }
+
+        return $time + $shift;
+    }
+}

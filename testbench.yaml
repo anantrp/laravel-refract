@@ -1,0 +1,25 @@
+laravel: '@testbench'
+
+providers:
+  - Laravel\Ai\AiServiceProvider
+  - Anantrp\Refract\RefractServiceProvider
+  - Workbench\App\Providers\WorkbenchServiceProvider
+
+migrations:
+  - vendor/orchestra/testbench-core/laravel/migrations
+  - vendor/laravel/ai/database/migrations
+
+workbench:
+  start: '/'
+  install: false
+  health: false
+  discovers:
+    web: true
+    api: false
+    commands: true
+    components: false
+    factories: false
+    views: false
+  build:
+    - create-sqlite-db
+    - migrate:refresh

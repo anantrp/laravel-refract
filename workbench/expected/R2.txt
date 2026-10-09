@@ -1,0 +1,9 @@
+environment: local
+invoke_agent SupervisorAgent  ok
+  chat fake  ok
+  TimeAgent  ok
+    invoke_agent TimeAgent  ok
+      chat fake  ok
+      CurrentTime  ok
+      chat fake  ok
+  chat fake  ok
