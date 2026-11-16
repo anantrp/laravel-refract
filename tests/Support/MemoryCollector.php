@@ -18,6 +18,11 @@ class MemoryCollector implements Collector
     public bool $throws = false;
 
     /**
+     * Whether only push() throws, as a store that refuses a write would.
+     */
+    public bool $throwOnPush = false;
+
+    /**
      * The stored trees by id: the tree, when it may be claimed, and when it was claimed.
      *
      * @var array<int, array{tree: list<array<string, mixed>>, available_at: int, claimed_at: ?int}>
@@ -41,6 +46,10 @@ class MemoryCollector implements Collector
     public function push(array $tree): void
     {
         $this->failIfTold();
+
+        if ($this->throwOnPush) {
+            throw new LogicException('The store refused the write.');
+        }
 
         if (count($this->entries) >= $this->maxTrees) {
             Diagnostics::warn('collect.full', 'The trace store is full: new run trees are dropped.');

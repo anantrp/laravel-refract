@@ -297,6 +297,41 @@ it('an export cut short by the time limit acks the trees done, releases the rest
         ->and($this->collector->size())->toBe(0);
 });
 
+it('an export cut part way through a tree acks that tree and stores only its unsent spans, so the next drain picks up from there', function () {
+    foreach (['one', 'two', 'three'] as $name) {
+        $this->collector->push(drainTree($name));
+    }
+
+    $this->exporter->results = [ExportResult::unfinished(1, drainTree('two, rest'))];
+
+    drainNow();
+
+    expect(drainedNames())->toBe(['one'])
+        ->and($this->collector->releases)->toBe([[[3], 0]])
+        ->and($this->collector->size())->toBe(2)
+        ->and(pushedDrains())->toBe([0]);
+
+    drainNow();
+
+    expect(drainedNames())->toBe(['one', 'three', 'two, rest'])
+        ->and($this->collector->size())->toBe(0);
+});
+
+it('when the unsent spans of a cut tree cannot be stored, the whole tree goes back to be sent again', function () {
+    foreach (['one', 'two'] as $name) {
+        $this->collector->push(drainTree($name));
+    }
+
+    $this->collector->throwOnPush = true;
+    $this->exporter->results = [ExportResult::unfinished(1, drainTree('two, rest'))];
+
+    drainNow();
+
+    expect($this->collector->releases)->toBe([[[2], 0]])
+        ->and($this->collector->size())->toBe(1)
+        ->and($this->log->warnings)->toHaveCount(1);
+});
+
 it('a drain killed by its worker is never failed: it is attempted again, however many times', function () {
     $this->loadMigrationsFrom(dirname(__DIR__, 2).'/vendor/orchestra/testbench-core/laravel/migrations');
     realQueue('database');

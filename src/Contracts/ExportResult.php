@@ -8,17 +8,22 @@ namespace Anantrp\Refract\Contracts;
  * A retryable result may carry the seconds the destination asked to wait
  * (its Retry-After), already capped by the exporter. An unfinished result
  * carries the number of leading trees that were done (taken or refused)
- * before time ran out; the rest were not sent in full.
+ * before time ran out; the rest were not sent in full. When time ran out
+ * inside a tree split over requests, it also carries that tree's spans
+ * that were not sent, so the next try picks up where this one stopped.
  */
 final readonly class ExportResult
 {
     /**
      * Create a new export result instance.
+     *
+     * @param  list<array<string, mixed>>  $rest  The neutral spans of the tree after the done ones that were not sent, when part of it was.
      */
     private function __construct(
         protected string $status,
         public ?int $retryAfter = null,
         public int $done = 0,
+        public array $rest = [],
     ) {}
 
     /**
@@ -47,10 +52,12 @@ final readonly class ExportResult
 
     /**
      * Time ran out before every tree was sent: the given number of leading trees were done, the rest may be sent again.
+     *
+     * @param  list<array<string, mixed>>  $rest  The unsent spans of the next tree, when some of its spans were sent.
      */
-    public static function unfinished(int $done): self
+    public static function unfinished(int $done, array $rest = []): self
     {
-        return new self('unfinished', done: $done);
+        return new self('unfinished', done: $done, rest: $rest);
     }
 
     /**

@@ -68,7 +68,8 @@ class HttpExporter implements Exporter
      * Given a time limit, each request waits at most what is left of it,
      * and a request is not started with less than MIN_REQUEST_SECONDS
      * left: the export is unfinished, with the trees whose every request
-     * was answered.
+     * was answered, and the unsent spans of a split tree that was cut
+     * part way, so a later export sends only those.
      */
     public function export(array $trees, ?float $within = null): ExportResult
     {
@@ -84,15 +85,16 @@ class HttpExporter implements Exporter
 
         $result = ExportResult::ok();
         $done = 0;
+        $answered = [];
 
-        foreach ($requests as [$spans, $treesDone]) {
+        foreach ($requests as [$spans, $treesDone, $parts]) {
             $timeout = $this->timeout;
 
             if ($deadline !== null) {
                 $left = $deadline - $this->seconds();
 
                 if ($left < self::MIN_REQUEST_SECONDS) {
-                    return ExportResult::unfinished($done);
+                    return ExportResult::unfinished($done, $this->unsent($trees[$done] ?? [], $answered[$done] ?? []));
                 }
 
                 $timeout = min($timeout, $left);
@@ -108,10 +110,26 @@ class HttpExporter implements Exporter
                 $result = $sent;
             }
 
+            foreach ($parts as [$position, $indexes]) {
+                $answered[$position] = [...$answered[$position] ?? [], ...$indexes];
+            }
+
             $done = $treesDone;
         }
 
         return $result;
+    }
+
+    /**
+     * Get the spans of a tree that no answered request carried, or none when no request carried any of them.
+     *
+     * @param  list<array<string, mixed>>  $tree
+     * @param  list<int>  $answered  The indexes in the tree of the spans an answered request carried.
+     * @return list<array<string, mixed>>
+     */
+    protected function unsent(array $tree, array $answered): array
+    {
+        return $answered === [] ? [] : array_values(array_diff_key($tree, array_flip($answered)));
     }
 
     /**
@@ -124,10 +142,11 @@ class HttpExporter implements Exporter
      * the platform prepares it, since the platform may add attributes.
      *
      * Each request comes with the number of leading trees whose spans are
-     * all in it or in the requests before it.
+     * all in it or in the requests before it, and with the position of each
+     * tree it carries spans of and the indexes of those spans in the tree.
      *
      * @param  list<list<array<string, mixed>>>  $trees
-     * @return list<array{list<TranslatedSpan>, int}>
+     * @return list<array{list<TranslatedSpan>, int, list<array{int, list<int>}>}>
      */
     protected function requests(array $trees): array
     {
@@ -135,13 +154,15 @@ class HttpExporter implements Exporter
 
         $requests = [];
         $request = [];
+        $parts = [];
         $used = 0;
         $done = 0;
 
-        foreach ($this->units($trees, $budget) as [$spans, $size, $treesDone]) {
+        foreach ($this->units($trees, $budget) as [$spans, $size, $treesDone, $position, $indexes]) {
             if ($request !== [] && $used + 1 + $size > $budget) {
-                $requests[] = [$request, $done];
+                $requests[] = [$request, $done, $parts];
                 $request = [];
+                $parts = [];
             }
 
             if ($size > $budget) {
@@ -152,11 +173,12 @@ class HttpExporter implements Exporter
 
             $used = $request === [] ? $size : $used + 1 + $size;
             $request = [...$request, ...$spans];
+            $parts[] = [$position, $indexes];
             $done = $treesDone;
         }
 
         if ($request !== []) {
-            $requests[] = [$request, $done];
+            $requests[] = [$request, $done, $parts];
         }
 
         return $requests;
@@ -165,10 +187,11 @@ class HttpExporter implements Exporter
     /**
      * Get the units the given trees are packed by, with the bytes each takes in an encoded body: each tree that fits a request, and each span of a tree that does not.
      *
-     * Each unit comes with the number of leading trees done once it is sent.
+     * Each unit comes with the number of leading trees done once it is sent,
+     * the position of its tree, and the indexes of its spans in that tree.
      *
      * @param  list<list<array<string, mixed>>>  $trees
-     * @return list<array{list<TranslatedSpan>, int, int}>
+     * @return list<array{list<TranslatedSpan>, int, int, int, list<int>}>
      */
     protected function units(array $trees, int $budget): array
     {
@@ -180,7 +203,7 @@ class HttpExporter implements Exporter
             $size = array_sum($sizes) + count($sizes) - 1;
 
             if ($size <= $budget) {
-                $units[] = [$spans, $size, $position + 1];
+                $units[] = [$spans, $size, $position + 1, $position, array_keys($spans)];
 
                 continue;
             }
@@ -190,7 +213,7 @@ class HttpExporter implements Exporter
             $last = array_key_last($spans);
 
             foreach ($spans as $index => $span) {
-                $units[] = [[$span], $sizes[$index], $index === $last ? $position + 1 : $position];
+                $units[] = [[$span], $sizes[$index], $index === $last ? $position + 1 : $position, $position, [$index]];
             }
         }
 

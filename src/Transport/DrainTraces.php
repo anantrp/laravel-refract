@@ -242,9 +242,7 @@ class DrainTraces implements ShouldBeUniqueUntilProcessing, ShouldQueue
             }
 
             if ($result->isUnfinished()) {
-                // The done trees are acked; the rest go back, due at once, for the next drain.
-                $collector->ack(array_slice($ids, 0, $result->done));
-                $collector->release(array_slice($ids, $result->done), 0);
+                $this->keepProgress($collector, $ids, $result);
                 $this->next(0);
 
                 return;
@@ -261,6 +259,35 @@ class DrainTraces implements ShouldBeUniqueUntilProcessing, ShouldQueue
         if ($collector->size() > 0) {
             $this->next(0);
         }
+    }
+
+    /**
+     * Ack the trees an unfinished export got through, and give the rest back, due at once, for the next drain.
+     *
+     * A tree cut part way through its requests is acked too, and only its
+     * unsent spans are stored again, as a tree of their own: sending it
+     * whole again would restart from its first request every time, so a
+     * tree too slow to send within one drain would never finish. When that
+     * push fails, the whole tree goes back instead and is sent again.
+     *
+     * @param  list<array-key>  $ids
+     */
+    protected function keepProgress(Collector $collector, array $ids, ExportResult $result): void
+    {
+        $done = array_slice($ids, 0, $result->done);
+        $rest = array_slice($ids, $result->done);
+
+        if ($result->rest !== [] && $rest !== []) {
+            try {
+                $collector->push($result->rest);
+                $done[] = array_shift($rest);
+            } catch (Throwable $e) {
+                Diagnostics::warn('collect.error', 'The unsent spans of a tree could not be stored ('.$e::class.'). The whole tree will be sent again.');
+            }
+        }
+
+        $collector->ack($done);
+        $collector->release($rest, 0);
     }
 
     /**

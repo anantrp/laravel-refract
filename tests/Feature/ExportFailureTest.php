@@ -542,9 +542,57 @@ it('a tree split over requests is done only once its last request is answered', 
 
     $result = app(Exporter::class)->export([$small, $big], 1.5);
 
+    // The first request took the small tree, the big tree's run span and its first two results.
     Http::assertSentCount(1);
     expect($result->isUnfinished())->toBeTrue()
-        ->and($result->done)->toBe(1);
+        ->and($result->done)->toBe(1)
+        ->and($result->rest)->toBe(array_slice($big, 3));
+});
+
+it('a split tree too slow to send in one export finishes over later ones, each span sent once', function () {
+    bootExport();
+    $sent = [];
+    Http::fake(function ($request) use (&$sent) {
+        usleep(600_000);
+
+        foreach (json_decode(gzdecode($request->body()), true)['resourceSpans'][0]['scopeSpans'][0]['spans'] as $span) {
+            $sent[] = $span['spanId'];
+        }
+
+        return Http::response('', 200);
+    });
+
+    // A run and four results of 3 MB: four requests, and time for one per export.
+    $tree = runTree(array_map(fn () => randomText(3_000_000), range(1, 4)));
+    $exports = 0;
+
+    do {
+        $result = app(Exporter::class)->export([$tree], 1.5);
+        $exports++;
+        $tree = $result->rest;
+    } while ($result->isUnfinished() && $exports < 10);
+
+    expect($result->isOk())->toBeTrue()
+        ->and($exports)->toBe(4)
+        ->and($sent)->toHaveCount(5)
+        ->and(array_unique($sent))->toHaveCount(5);
+});
+
+it('a cut between whole trees carries no unsent spans', function () {
+    bootExport();
+    Http::fake(function () {
+        usleep(600_000);
+
+        return Http::response('', 200);
+    });
+
+    $trees = array_map(fn () => runTree([randomText(3_000_000)]), range(1, 2));
+
+    $result = app(Exporter::class)->export($trees, 1.5);
+
+    expect($result->isUnfinished())->toBeTrue()
+        ->and($result->done)->toBe(1)
+        ->and($result->rest)->toBe([]);
 });
 
 it('given a time limit, a request waits at most what is left of it', function () {
