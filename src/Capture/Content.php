@@ -70,14 +70,9 @@ class Content
     protected const MAX_DEPTH = 512;
 
     /**
-     * The default byte cap of one captured value: 128 KB.
+     * The byte cap of one captured value: 128 KB.
      */
     public const MAX_BYTES = 131_072;
-
-    /**
-     * The smallest byte cap: room for the cut marker of any original size.
-     */
-    public const MIN_BYTES = 64;
 
     /**
      * The JSON flags tool arguments and results are encoded with, the same the SDK uses.
@@ -99,7 +94,6 @@ class Content
     public function __construct(
         protected Container $container,
         protected bool $enabled = false,
-        protected int $maxBytes = self::MAX_BYTES,
         protected mixed $maskClass = null,
     ) {}
 
@@ -447,12 +441,12 @@ class Content
     {
         $size = strlen($value);
 
-        if ($size <= $this->maxBytes) {
+        if ($size <= self::MAX_BYTES) {
             return $value;
         }
 
         $marker = "…[cut, original size {$size} bytes]";
 
-        return mb_strcut($value, 0, max(0, $this->maxBytes - strlen($marker)), 'UTF-8').$marker;
+        return mb_strcut($value, 0, self::MAX_BYTES - strlen($marker), 'UTF-8').$marker;
     }
 }

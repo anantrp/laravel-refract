@@ -67,18 +67,6 @@ class Settings
     }
 
     /**
-     * Get the string keys of the given configuration array, or none when it is not an array.
-     *
-     * @return list<string>
-     */
-    public static function keys(string $key): array
-    {
-        $value = config("refract.{$key}");
-
-        return is_array($value) ? array_values(array_filter(array_keys($value), is_string(...))) : [];
-    }
-
-    /**
      * Get the given configuration value as one of the allowed strings.
      *
      * A missing or empty value gives the default with no warning, even when
@@ -104,22 +92,6 @@ class Settings
     }
 
     /**
-     * Get the given configuration value as an http or https URL with a host.
-     */
-    public static function url(string $key, string $default = ''): string
-    {
-        $value = self::string($key, $default);
-
-        if ($value === $default || self::isUrl($value)) {
-            return $value;
-        }
-
-        Diagnostics::warn("config.{$key}", "Refract config [refract.{$key}] must be an http or https URL. Using the default.");
-
-        return $default;
-    }
-
-    /**
      * Get the given configuration value as the URL of a destination that is
      * sent credentials: an empty string when it is not set, or null and one
      * warning when it is invalid. An invalid URL has no fallback host, so
@@ -138,7 +110,7 @@ class Settings
             return $value;
         }
 
-        Diagnostics::warn("config.{$key}", "Refract config [refract.{$key}] must be an http or https URL. Nothing is exported.");
+        Diagnostics::warn("config.{$key}", "Refract config [refract.{$key}] must be an http or https URL. Refract records nothing.");
 
         return null;
     }
@@ -191,30 +163,6 @@ class Settings
         }
 
         return $headers;
-    }
-
-    /**
-     * Get the given configuration value as a whole number of at least the given minimum (above zero).
-     */
-    public static function positiveInt(string $key, int $default, int $min = 1): int
-    {
-        $value = config("refract.{$key}");
-
-        if ($value === null || $value === '') {
-            return $default;
-        }
-
-        $number = is_int($value) || (is_string($value) && preg_match('/^\s*\d+\s*$/', $value) === 1)
-            ? filter_var($value, FILTER_VALIDATE_INT, ['options' => ['min_range' => max(1, $min)]])
-            : false;
-
-        if (! is_int($number)) {
-            Diagnostics::warn("config.{$key}", "Refract config [refract.{$key}] must be a whole number of at least ".max(1, $min).'. Using the default.');
-
-            return $default;
-        }
-
-        return $number;
     }
 
     /**

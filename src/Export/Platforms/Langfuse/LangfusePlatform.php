@@ -4,8 +4,6 @@ namespace Anantrp\Refract\Export\Platforms\Langfuse;
 
 use Anantrp\Refract\Export\GenAiTranslator;
 use Anantrp\Refract\Export\Platform;
-use Anantrp\Refract\Support\Diagnostics;
-use Anantrp\Refract\Support\Settings;
 use Illuminate\Contracts\Auth\Authenticatable;
 
 /**
@@ -51,33 +49,6 @@ class LangfusePlatform implements Platform
         protected string $secretKey,
     ) {}
 
-    /**
-     * Create the platform from the config, or get null and one warning when a key is missing.
-     *
-     * An empty base URL means Langfuse Cloud. An invalid one exports
-     * nothing: it never falls back to Cloud, so the keys never go to a host
-     * the user did not name.
-     */
-    public static function fromConfig(string $key): ?self
-    {
-        $url = Settings::destinationUrl("{$key}.url");
-
-        if ($url === null) {
-            return null;
-        }
-
-        $publicKey = Settings::string("{$key}.public_key");
-        $secretKey = Settings::string("{$key}.secret_key");
-
-        if ($publicKey === '' || $secretKey === '') {
-            Diagnostics::warn('langfuse.keys', 'Langfuse keys missing. Set LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY. Nothing is exported.');
-
-            return null;
-        }
-
-        return new self($url, $publicKey, $secretKey);
-    }
-
     public function endpoint(): string
     {
         return rtrim($this->url === '' ? self::CLOUD_URL : $this->url, '/').self::OTEL_PATH;
@@ -111,7 +82,7 @@ class LangfusePlatform implements Platform
     /**
      * Move siblings that start in the same millisecond to distinct milliseconds,
      * drop langfuse.* attributes set by a Context mapping, mark abandoned
-     * spans and set user.id on spans with a user participant.
+     * spans and set user.id from a user participant.
      *
      * Langfuse stores times in milliseconds and orders tied siblings at
      * random. Each trace is walked in start order, and every move shifts all
@@ -154,7 +125,10 @@ class LangfusePlatform implements Platform
     }
 
     /**
-     * Set user.id to the participant id when the participant type is a user (implements Authenticatable), and only then.
+     * Set user.id to the participant id when the participant type is a user (implements Authenticatable).
+     *
+     * A user participant wins over a user.id from a Context mapping. A run
+     * with no user participant keeps the mapped user.id, if any.
      *
      * @param  TranslatedSpan  $span
      * @return TranslatedSpan
@@ -163,9 +137,6 @@ class LangfusePlatform implements Platform
     {
         $type = $span['attributes']['laravel.ai.participant.type'] ?? null;
         $id = $span['attributes']['laravel.ai.participant.id'] ?? null;
-
-        // user.id comes only from the participant.
-        unset($span['attributes']['user.id']);
 
         if (is_string($type) && is_string($id) && is_a($type, Authenticatable::class, true)) {
             $span['attributes']['user.id'] = $id;

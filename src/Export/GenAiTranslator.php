@@ -20,9 +20,9 @@ use JsonException;
 class GenAiTranslator
 {
     /**
-     * The OTel user attribute. A Context mapping never sets it.
+     * The OTel session attribute: a saved run's conversation id, else a Context mapping's value.
      */
-    public const USER_ID = 'user.id';
+    public const SESSION_ID = 'session.id';
 
     /**
      * The error.type of a failed span whose exception class is not known.
@@ -98,9 +98,9 @@ class GenAiTranslator
             'start' => $this->int($span, 'start'),
             'end' => $this->int($span, 'end'),
             // A mapped value never takes the name of a real attribute, even one that is empty here,
-            // and never sets user.id, which a platform makes only from the participant.
+            // but session.id: a mapping may give one to a run that is not saved.
             'attributes' => array_filter($own, fn (mixed $value) => $value !== null)
-                + array_diff_key($this->mapped($context), $own, [self::USER_ID => true]),
+                + array_diff_key($this->mapped($context), array_diff_key($own, [self::SESSION_ID => true])),
             'events' => $this->events($span['events'] ?? null),
             'status' => [
                 'code' => match (true) {
@@ -266,7 +266,7 @@ class GenAiTranslator
         $participant = is_array($context['participant'] ?? null) ? $context['participant'] : [];
 
         return [
-            'session.id' => $session,
+            self::SESSION_ID => $session,
             'gen_ai.conversation.id' => $session,
             'laravel.ai.participant.type' => $participant['type'] ?? null,
             'laravel.ai.participant.id' => $participant['id'] ?? null,

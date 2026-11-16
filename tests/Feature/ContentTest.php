@@ -343,13 +343,11 @@ it('abandoned and failed spans keep their input and get no output', function () 
 });
 
 it('a value over the byte cap is cut and marked with its original size', function () {
-    $this->environmentConfig = contentConfig(['refract.capture.content' => true, 'refract.capture.max_bytes' => 64]);
+    $this->environmentConfig = contentConfig(['refract.capture.content' => true]);
     $memory = $this->captureNeutralSpans();
 
-    $prompt = str_repeat('a', 1000);
-
     TimeAgent::fake(['Short.']);
-    TimeAgent::make()->prompt($prompt);
+    TimeAgent::make()->prompt(str_repeat('a', 200_000));
 
     app(Recorder::class)->flush();
 
@@ -357,46 +355,46 @@ it('a value over the byte cap is cut and marked with its original size', functio
 
     $cut = $run['content']['input'][0]['parts'][0]['content'];
 
-    expect(strlen($cut))->toBe(64)
-        ->and($cut)->toEndWith('[cut, original size 1000 bytes]')
+    expect(strlen($cut))->toBe(Content::MAX_BYTES)
+        ->and($cut)->toEndWith('[cut, original size 200000 bytes]')
         ->and($cut)->toStartWith(str_repeat('a', 10))
         ->and($run['content']['output'][0]['parts'][0]['content'])->toBe('Short.');
 });
 
 it('a cut never splits a multibyte character', function () {
-    $this->environmentConfig = contentConfig(['refract.capture.content' => true, 'refract.capture.max_bytes' => 64]);
+    $this->environmentConfig = contentConfig(['refract.capture.content' => true]);
     $memory = $this->captureNeutralSpans();
 
     TimeAgent::fake(['Short.']);
-    TimeAgent::make()->prompt(str_repeat('é', 500));
+    TimeAgent::make()->prompt(str_repeat('é', 70_000));
 
     app(Recorder::class)->flush();
 
     $cut = ofKind($memory->spans, 'invoke_agent')[0]['content']['input'][0]['parts'][0]['content'];
 
     expect(mb_check_encoding($cut, 'UTF-8'))->toBeTrue()
-        ->and(strlen($cut))->toBeLessThanOrEqual(64)
-        ->and($cut)->toEndWith('[cut, original size 1000 bytes]')
+        ->and(strlen($cut))->toBeLessThanOrEqual(Content::MAX_BYTES)
+        ->and($cut)->toEndWith('[cut, original size 140000 bytes]')
         ->and($cut)->toStartWith('éé');
 });
 
-it('at the minimum byte cap of 64 a cut value, marker included, never exceeds the cap', function (string $value) {
-    $this->environmentConfig = contentConfig(['refract.capture.content' => true, 'refract.capture.max_bytes' => 64]);
+it('a cut value, marker included, never exceeds the byte cap', function (string $value) {
+    $this->environmentConfig = contentConfig(['refract.capture.content' => true]);
     $this->refreshApplication();
 
     $cut = app(Content::class)->value($value);
 
-    expect(strlen($cut))->toBeLessThanOrEqual(64)
+    expect(strlen($cut))->toBeLessThanOrEqual(Content::MAX_BYTES)
         ->and(mb_check_encoding($cut, 'UTF-8'))->toBeTrue()
         ->and($cut)->toEndWith('[cut, original size '.strlen($value).' bytes]');
 })->with([
-    '65 bytes' => [str_repeat('a', 65)],
-    '1 KB of multibyte text' => [str_repeat('é', 512)],
+    'one byte over' => [str_repeat('a', 131_073)],
+    'multibyte text' => [str_repeat('é', 70_000)],
     '1 MB' => [str_repeat('a', 1_000_000)],
     '10 MB' => [str_repeat('a', 10_000_000)],
 ]);
 
-it('the default byte cap is 128 KB', function () {
+it('the byte cap is 128 KB', function () {
     $this->environmentConfig = contentConfig(['refract.capture.content' => true]);
     $memory = $this->captureNeutralSpans();
 
@@ -418,7 +416,6 @@ it('the mask runs on every captured value before export, and before the cut', fu
     $this->refreshApplicationWithConfig(contentConfig([
         'refract.capture.content' => true,
         'refract.capture.mask' => RecordingMask::class,
-        'refract.capture.max_bytes' => 2000,
     ]));
 
     Http::fake();
@@ -428,7 +425,7 @@ it('the mask runs on every captured value before export, and before the cut', fu
     NotesAgent::make()->prompt('Tell me the secret.', attachments: [Image::fromUrl('https://cdn.test/secret.png')]);
 
     TimeAgent::fake(['Short.']);
-    TimeAgent::make()->prompt(str_repeat('a', 3000).'secret');
+    TimeAgent::make()->prompt(str_repeat('a', Content::MAX_BYTES).'secret');
 
     app(Recorder::class)->flush();
 
@@ -440,7 +437,7 @@ it('the mask runs on every captured value before export, and before the cut', fu
         ->and(RecordingMask::$seen)->toContain('The secret answer.')
         ->and(RecordingMask::$seen)->toContain('{"topic":"secret topic"}')
         ->and(RecordingMask::$seen)->toContain('{"topic":"secret topic","note":"the secret note"}')
-        ->and(RecordingMask::$seen)->toContain(str_repeat('a', 3000).'secret');
+        ->and(RecordingMask::$seen)->toContain(str_repeat('a', Content::MAX_BYTES).'secret');
 
     [$tool] = exportedAttributes('execute_tool');
 

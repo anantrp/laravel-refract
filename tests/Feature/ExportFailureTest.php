@@ -1,15 +1,10 @@
 <?php
 
 use Anantrp\Refract\Contracts\Exporter;
-use Anantrp\Refract\Export\GenAiTranslator;
-use Anantrp\Refract\Export\HttpExporter;
-use Anantrp\Refract\Export\OtlpJson;
-use Anantrp\Refract\Export\PlatformFactory;
 use Anantrp\Refract\Support\Diagnostics;
 use Anantrp\Refract\Tests\Support\Otlp;
 use Anantrp\Refract\Tests\Support\WarningLog;
 use Anantrp\Refract\Transport\Drain;
-use Illuminate\Http\Client\Request;
 use Illuminate\Http\Client\RequestException;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
@@ -307,65 +302,22 @@ it('a redirect is not followed and counts as rejected, so the headers never go t
         ->and($log->warnings[0])->toContain("HTTP {$status}");
 })->with([301, 302, 303, 307, 308]);
 
-/**
- * Send one span to the given destination with the given compression, and get the request it made.
- */
-function sendCompressed(string $destination, ?string $compression): Request
-{
-    bootExport(['refract.destination' => $destination, 'refract.compression' => $compression]);
+it('the body is always gzipped and sent with Content-Encoding: gzip, to both destinations', function (string $destination) {
+    bootExport(['refract.destination' => $destination]);
     fakeDestination(200);
 
     sendSpan();
 
     Http::assertSentCount(1);
 
-    return Http::recorded()[0][0];
-}
-
-it('by default the body is gzipped and sent with Content-Encoding: gzip, to both destinations', function (string $destination, ?string $compression) {
-    $request = sendCompressed($destination, $compression);
-
+    $request = Http::recorded()[0][0];
     $json = gzdecode($request->body());
 
     expect($request->header('Content-Encoding'))->toBe(['gzip'])
         ->and($json)->toBeString()
         ->and(strlen($request->body()))->toBeLessThan(strlen((string) $json))
         ->and(Otlp::spans())->toHaveCount(1);
-})->with(['otlp', 'langfuse'])->with([
-    'not set' => null,
-    'empty' => '',
-    'gzip' => 'gzip',
-    'GZIP' => 'GZIP',
-]);
-
-it('when gzip fails the body is sent plain, with no Content-Encoding', function () {
-    $log = bootExport();
-    fakeDestination(200);
-
-    app()->instance(Exporter::class, new class(PlatformFactory::fromConfig(), new GenAiTranslator([]), new OtlpJson, 'testing', 'Refract', Drain::TIMEOUT) extends HttpExporter
-    {
-        protected function gzip(string $body): string|false
-        {
-            return false;
-        }
-    });
-
-    sendSpan();
-
-    $request = Http::recorded()[0][0];
-
-    expect($request->header('Content-Encoding'))->toBe([])
-        ->and(json_decode($request->body(), true))->toHaveKey('resourceSpans')
-        ->and($log->warnings)->toBe([]);
-});
-
-it('with none the body is not gzipped and has no Content-Encoding, for both destinations', function (string $destination, string $compression) {
-    $request = sendCompressed($destination, $compression);
-
-    expect($request->header('Content-Encoding'))->toBe([])
-        ->and(json_decode($request->body(), true))->toHaveKey('resourceSpans')
-        ->and(Otlp::spans())->toHaveCount(1);
-})->with(['otlp', 'langfuse'])->with(['none', 'NONE']);
+})->with(['otlp', 'langfuse']);
 
 /*
  * Whole run trees are packed into requests of 4 MB of OTLP JSON or less

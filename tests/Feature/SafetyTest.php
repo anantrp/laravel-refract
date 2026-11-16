@@ -536,11 +536,6 @@ it('the exporter guards translating, preparing and encoding, not only the HTTP c
 
     $platform = new class implements Platform
     {
-        public static function fromConfig(string $key): ?static
-        {
-            return null;
-        }
-
         public function endpoint(): string
         {
             return 'https://otlp.test/v1/traces';

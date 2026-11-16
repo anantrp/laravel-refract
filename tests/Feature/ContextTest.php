@@ -2,7 +2,6 @@
 
 use Anantrp\Refract\Capture\Recorder;
 use Anantrp\Refract\Tests\Support\Otlp;
-use Illuminate\Database\Eloquent\Relations\Relation;
 use Illuminate\Support\Facades\Context;
 use Illuminate\Support\Facades\Http;
 use Workbench\App\Ai\Agents\ChatAgent;
@@ -21,10 +20,6 @@ beforeEach(function () {
     $this->loadMigrationsFrom(dirname(__DIR__, 2).'/vendor/laravel/ai/database/migrations');
 
     Http::fake();
-});
-
-afterEach(function () {
-    Relation::morphMap([], merge: false);
 });
 
 /**
@@ -56,9 +51,6 @@ it('a saved run with a User participant records the full class, the id and Langf
 });
 
 it('a saved run of an agent that only uses the conversation trait records its participant', function () {
-    Context::add('refract.participant_type', Team::class);
-    Context::add('refract.participant_id', '99');
-
     TraitChatAgent::fake(['Hello.']);
 
     TraitChatAgent::make()->forUser((new User)->forceFill(['id' => 42]))->prompt('Hello');
@@ -85,61 +77,7 @@ it('a saved run with a Team participant records the participant but no user.id',
     ])->and($run)->not->toHaveKey('user.id');
 });
 
-it('a saved run ignores the participant Context keys', function () {
-    Context::add('refract.participant_type', Team::class);
-    Context::add('refract.participant_id', '99');
-
-    ChatAgent::fake(['Hello.']);
-
-    ChatAgent::make()->forUser((new User)->forceFill(['id' => 42]))->prompt('Hello');
-
-    [$run] = runAttributes();
-
-    expect($run)->toMatchArray([
-        'laravel.ai.participant.type' => User::class,
-        'laravel.ai.participant.id' => '42',
-        'user.id' => '42',
-    ]);
-});
-
-it('a run not saved takes the participant from both Context keys and turns a morph alias into the class', function () {
-    Relation::morphMap(['user' => User::class]);
-
-    Context::add('refract.participant_type', 'user');
-    Context::add('refract.participant_id', 5);
-
-    TimeAgent::fakeTwoSteps();
-
-    TimeAgent::make()->prompt('What time is it?');
-
-    [$run] = runAttributes();
-
-    expect($run)->toMatchArray([
-        'laravel.ai.participant.type' => User::class,
-        'laravel.ai.participant.id' => '5',
-        'user.id' => '5',
-    ]);
-});
-
-it('a Context type that is already a class name is kept', function () {
-    Context::add('refract.participant_type', Team::class);
-    Context::add('refract.participant_id', 'team-1');
-
-    TimeAgent::fakeTwoSteps();
-
-    TimeAgent::make()->prompt('What time is it?');
-
-    [$run] = runAttributes();
-
-    expect($run)->toMatchArray([
-        'laravel.ai.participant.type' => Team::class,
-        'laravel.ai.participant.id' => 'team-1',
-    ])->and($run)->not->toHaveKey('user.id');
-});
-
-it('a run not saved with only one Context key set records no participant', function (string $key) {
-    Context::add($key, $key === 'refract.participant_type' ? User::class : '5');
-
+it('a run not saved records no participant and no user.id', function () {
     TimeAgent::fakeTwoSteps();
 
     TimeAgent::make()->prompt('What time is it?');
@@ -148,24 +86,21 @@ it('a run not saved with only one Context key set records no participant', funct
 
     expect($run)->not->toHaveKey('laravel.ai.participant.type')
         ->and($run)->not->toHaveKey('laravel.ai.participant.id')
-        ->and($run)->not->toHaveKey('user.id');
-})->with(['refract.participant_type', 'refract.participant_id']);
+        ->and($run)->not->toHaveKey('user.id')
+        ->and($run)->not->toHaveKey('session.id');
+});
 
 it('a participant id 0 is recorded as "0"', function () {
     ChatAgent::fake(['Hello.']);
-    TimeAgent::fakeTwoSteps();
 
     ChatAgent::make()->forUser((new User)->forceFill(['id' => 0]))->prompt('Hello');
 
-    Context::add('refract.participant_type', User::class);
-    Context::add('refract.participant_id', 0);
+    [$run] = runAttributes();
 
-    TimeAgent::make()->prompt('What time is it?');
-
-    $runs = runAttributes();
-
-    expect(array_column($runs, 'laravel.ai.participant.id'))->toBe(['0', '0'])
-        ->and(array_column($runs, 'user.id'))->toBe(['0', '0']);
+    expect($run)->toMatchArray([
+        'laravel.ai.participant.id' => '0',
+        'user.id' => '0',
+    ]);
 });
 
 it('a sub-agent run uses its parent run\'s participant and session', function () {
@@ -215,13 +150,13 @@ it('a mapped Context key named like a GenAI attribute loses to the real value', 
     ]);
 });
 
-it('a mapped Context key never fills a real attribute that is empty, so it cannot make a participant or user.id', function () {
+it('a mapped Context key never fills a real attribute that is empty, so it cannot make a participant', function () {
     $this->refreshApplicationWithConfig([
         ...$this->environmentConfig,
         'refract.context.attributes' => [
             'owner_type' => 'laravel.ai.participant.type',
             'owner_id' => 'laravel.ai.participant.id',
-            'thread' => 'session.id',
+            'conversation' => 'gen_ai.conversation.id',
             'tenant' => 'app.tenant',
         ],
     ]);
@@ -230,7 +165,7 @@ it('a mapped Context key never fills a real attribute that is empty, so it canno
 
     Context::add('owner_type', User::class);
     Context::add('owner_id', '42');
-    Context::add('thread', 'thread-1');
+    Context::add('conversation', 'thread-1');
     Context::add('tenant', 'acme');
 
     TimeAgent::fakeTwoSteps();
@@ -241,34 +176,50 @@ it('a mapped Context key never fills a real attribute that is empty, so it canno
 
     expect($run)->not->toHaveKey('laravel.ai.participant.type')
         ->and($run)->not->toHaveKey('laravel.ai.participant.id')
-        ->and($run)->not->toHaveKey('user.id')
-        ->and($run)->not->toHaveKey('session.id')
+        ->and($run)->not->toHaveKey('gen_ai.conversation.id')
         ->and($run)->toHaveKey('app.tenant', 'acme');
 });
 
-it('a Context key mapped to user.id never sets user.id; only a user participant does', function () {
+it('a run not saved takes user.id and session.id from Context keys mapped to them', function () {
     $this->refreshApplicationWithConfig([
         ...$this->environmentConfig,
-        'refract.context.attributes' => ['uid' => 'user.id', 'tenant' => 'app.tenant'],
+        'refract.context.attributes' => ['uid' => 'user.id', 'thread' => 'session.id'],
     ]);
 
     Http::fake();
 
     Context::add('uid', '77');
-    Context::add('tenant', 'acme');
-
-    ChatAgent::fake(['Hello.', 'Hello again.']);
+    Context::add('thread', 'thread-1');
 
     TimeAgent::fakeTwoSteps();
     TimeAgent::make()->prompt('What time is it?');
-    ChatAgent::make()->forParticipant((new Team)->forceFill(['id' => 7]))->prompt('Hello');
 
-    [$unsaved, $team] = runAttributes();
+    [$run] = runAttributes();
 
-    expect($unsaved)->not->toHaveKey('user.id')
-        ->and($unsaved)->toHaveKey('app.tenant', 'acme')
-        ->and($team)->not->toHaveKey('user.id')
-        ->and($team)->toHaveKey('laravel.ai.participant.id', '7');
+    expect($run)->toMatchArray(['user.id' => '77', 'session.id' => 'thread-1'])
+        ->and($run)->not->toHaveKey('laravel.ai.participant.id');
+});
+
+it('a saved run keeps its own session.id and user participant over the mapped ones, and a Team participant keeps the mapped user.id', function () {
+    $this->refreshApplicationWithConfig([
+        ...$this->environmentConfig,
+        'refract.context.attributes' => ['uid' => 'user.id', 'thread' => 'session.id'],
+    ]);
+
+    Http::fake();
+
+    Context::add('uid', '77');
+    Context::add('thread', 'thread-1');
+
+    ChatAgent::fake(['Hello.', 'Hello again.']);
+
+    $user = ChatAgent::make()->forUser((new User)->forceFill(['id' => 42]))->prompt('Hello');
+    $team = ChatAgent::make()->forParticipant((new Team)->forceFill(['id' => 7]))->prompt('Hello');
+
+    [$userRun, $teamRun] = runAttributes();
+
+    expect($userRun)->toMatchArray(['user.id' => '42', 'session.id' => $user->conversationId])
+        ->and($teamRun)->toMatchArray(['user.id' => '77', 'session.id' => $team->conversationId, 'laravel.ai.participant.id' => '7']);
 });
 
 it('APP_ENV "Staging EU 1" is sent to Langfuse as staging-eu-1', function () {
@@ -289,28 +240,10 @@ it('APP_ENV "Staging EU 1" is sent to Langfuse as staging-eu-1', function () {
         ->and(Otlp::resource())->toHaveKey('deployment.environment.name', 'staging-eu-1');
 });
 
-it('REFRACT_ENVIRONMENT wins over APP_ENV', function () {
-    $this->refreshApplicationWithConfig([
-        ...$this->environmentConfig,
-        'refract.environment' => 'Production',
-    ]);
-
-    Http::fake();
-
-    TimeAgent::fakeTwoSteps();
-
-    TimeAgent::make()->prompt('What time is it?');
-
-    app(Recorder::class)->flush();
-
-    expect(Otlp::resource())->toHaveKey('deployment.environment.name', 'production');
-});
-
-it('service.name is OTEL_SERVICE_NAME when set, else the app name', function (?string $serviceName, string $expected) {
+it('service.name is the app name', function () {
     $this->refreshApplicationWithConfig([
         ...$this->environmentConfig,
         'app.name' => 'Shop',
-        'refract.service_name' => $serviceName,
     ]);
 
     Http::fake();
@@ -321,11 +254,8 @@ it('service.name is OTEL_SERVICE_NAME when set, else the app name', function (?s
 
     app(Recorder::class)->flush();
 
-    expect(Otlp::resource())->toHaveKey('service.name', $expected);
-})->with([
-    'set' => ['checkout-api', 'checkout-api'],
-    'not set' => [null, 'Shop'],
-]);
+    expect(Otlp::resource())->toHaveKey('service.name', 'Shop');
+});
 
 it('the OTLP destination gets the participant attributes and no user.id', function () {
     $this->refreshApplicationWithConfig([

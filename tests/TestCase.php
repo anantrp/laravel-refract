@@ -99,6 +99,9 @@ abstract class TestCase extends Orchestra
             // Never touch the workbench database file that the live scenarios use.
             'database.default' => 'testing',
             'database.connections.testing' => ['driver' => 'sqlite', 'database' => self::sqliteFile(), 'prefix' => ''],
+            // A destination that can send, so Refract registers, whatever the local .env says. No request reaches it unless faked.
+            'refract.destination' => 'otlp',
+            'refract.destinations.otlp.endpoint' => 'https://otlp.test/v1/traces',
         ]);
 
         $app['config']->set($this->environmentConfig);

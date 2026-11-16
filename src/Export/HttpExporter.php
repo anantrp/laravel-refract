@@ -55,7 +55,6 @@ class HttpExporter implements Exporter
         protected string $environment,
         protected string $serviceName,
         protected int $timeout,
-        protected bool $compress = true,
     ) {}
 
     /**
@@ -173,7 +172,8 @@ class HttpExporter implements Exporter
             $body = $this->encoder->encode($this->platform->prepare($spans), $this->resource());
 
             $headers = $this->platform->headers();
-            $compressed = $this->compress ? $this->gzip($body) : false;
+            // Always gzipped; on the rare failure the body goes plain.
+            $compressed = gzencode($body);
 
             if ($compressed !== false) {
                 $body = $compressed;
@@ -241,18 +241,6 @@ class HttpExporter implements Exporter
         Diagnostics::warn('export.rejected', "Spans were rejected by the destination with HTTP {$status}: {$excerpt}. The batch was dropped.");
 
         return ExportResult::rejected();
-    }
-
-    /**
-     * Gzip the given body, or get false when it cannot be gzipped.
-     */
-    protected function gzip(string $body): string|false
-    {
-        try {
-            return gzencode($body);
-        } catch (Throwable) {
-            return false;
-        }
     }
 
     /**

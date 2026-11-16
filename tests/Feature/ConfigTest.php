@@ -3,20 +3,20 @@
 use Anantrp\Refract\Capture\Content;
 use Anantrp\Refract\Capture\FlushPoints;
 use Anantrp\Refract\Capture\RecordAgentRuns;
-use Anantrp\Refract\Capture\RunContext;
+use Anantrp\Refract\Contracts\Collector;
 use Anantrp\Refract\Contracts\Exporter;
-use Anantrp\Refract\Export\Platforms\Langfuse\LangfusePlatform;
-use Anantrp\Refract\Export\Platforms\Otlp\OtlpPlatform;
 use Anantrp\Refract\RefractServiceProvider;
 use Anantrp\Refract\Support\Diagnostics;
 use Anantrp\Refract\Tests\Support\Env;
 use Anantrp\Refract\Tests\Support\Otlp;
 use Anantrp\Refract\Tests\Support\WarningLog;
+use Anantrp\Refract\Transport\Collectors\RedisCollector;
 use Anantrp\Refract\Transport\Drain;
 use Illuminate\Config\Repository;
+use Illuminate\Contracts\Redis\Factory as RedisFactory;
 use Illuminate\Events\Dispatcher;
 use Illuminate\Http\Client\Request;
-use Illuminate\Support\Facades\Context;
+use Illuminate\Redis\Connections\Connection as RedisConnection;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Laravel\Ai\Events\PromptingAgent;
@@ -33,23 +33,15 @@ use Workbench\App\Ai\Agents\TimeAgent;
  */
 const BASE_ENV = [
     'REFRACT_ENABLED' => null,
-    'OTEL_SERVICE_NAME' => null,
-    'REFRACT_ENVIRONMENT' => null,
     'REFRACT_DESTINATION' => 'otlp',
     'REFRACT_OTLP_ENDPOINT' => 'https://otlp.test/v1/traces',
     'REFRACT_OTLP_HEADERS' => null,
-    'OTEL_EXPORTER_OTLP_ENDPOINT' => null,
-    'OTEL_EXPORTER_OTLP_HEADERS' => null,
-    'OTEL_EXPORTER_OTLP_COMPRESSION' => null,
     'LANGFUSE_BASE_URL' => null,
     'LANGFUSE_PUBLIC_KEY' => null,
     'LANGFUSE_SECRET_KEY' => null,
-    'REFRACT_CONTEXT_PARTICIPANT_TYPE' => null,
-    'REFRACT_CONTEXT_PARTICIPANT_ID' => null,
-    'OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT' => null,
-    'REFRACT_CAPTURE_MAX_BYTES' => null,
     'REFRACT_DRAIN' => null,
     'REFRACT_COLLECTOR' => null,
+    'OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT' => null,
 ];
 
 /**
@@ -71,23 +63,15 @@ const LANGFUSE_CLOUD = 'https://cloud.langfuse.com/api/public/otel/v1/traces';
  */
 const CHANGED_ENV = [
     'REFRACT_ENABLED' => 'false',
-    'OTEL_SERVICE_NAME' => 'changed',
-    'REFRACT_ENVIRONMENT' => 'changed',
     'REFRACT_DESTINATION' => 'langfuse',
     'REFRACT_OTLP_ENDPOINT' => 'https://changed.test/v1/traces',
     'REFRACT_OTLP_HEADERS' => 'x-changed=1',
-    'OTEL_EXPORTER_OTLP_ENDPOINT' => 'https://changed.test',
-    'OTEL_EXPORTER_OTLP_HEADERS' => 'x-changed=1',
-    'OTEL_EXPORTER_OTLP_COMPRESSION' => 'none',
     'LANGFUSE_BASE_URL' => 'https://changed.test',
     'LANGFUSE_PUBLIC_KEY' => 'pk-changed',
     'LANGFUSE_SECRET_KEY' => 'sk-changed',
-    'REFRACT_CONTEXT_PARTICIPANT_TYPE' => 'changed_type',
-    'REFRACT_CONTEXT_PARTICIPANT_ID' => 'changed_id',
-    'OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT' => 'true',
-    'REFRACT_CAPTURE_MAX_BYTES' => '1000',
     'REFRACT_DRAIN' => 'queue',
     'REFRACT_COLLECTOR' => 'database',
+    'OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT' => 'true',
 ];
 
 /**
@@ -124,12 +108,16 @@ function loadRefract(bool $cached = false): WarningLog
 }
 
 /**
- * Send one run span through the drain and get the request it made, or null.
+ * Send one run span through the drain and get the request it made, or null when Refract registered nothing.
  *
  * @return array{url: string, headers: array<string, string>, encoding: string|null, resource: array<string, mixed>}|null
  */
 function exported(): ?array
 {
+    if (! listening()) {
+        return null;
+    }
+
     app(Drain::class)->send([[[
         'v' => 1, 'trace_id' => str_repeat('a', 32), 'span_id' => str_repeat('b', 16), 'parent_span_id' => null,
         'kind' => 'invoke_agent', 'start' => 1, 'end' => 2, 'status' => 'ok', 'status_message' => null,
@@ -185,50 +173,23 @@ function envCases(): array
 {
     $url = fn () => exported()['url'] ?? null;
     $headers = fn () => exported()['headers'] ?? null;
-    $collector = ['REFRACT_OTLP_ENDPOINT' => null, 'OTEL_EXPORTER_OTLP_ENDPOINT' => 'https://collector.test:4318'];
-
-    $resource = fn (string $name) => fn () => exported()['resource'][$name] ?? null;
-    $participant = fn () => participantFromKeys(app(RunContext::class), 'refract.participant_type', 'refract.participant_id');
     $captures = fn () => app(Content::class)->toolArguments(['topic' => 'release']) !== [];
-    $cap = fn () => strlen(app(Content::class)->value(str_repeat('a', 200_000)));
 
     return [
         'REFRACT_ENABLED' => [
             'env' => [], 'invalid' => 'maybe', 'read' => fn () => listening(), 'default' => true, 'warnings' => 0,
         ],
-        'OTEL_SERVICE_NAME' => [
-            'env' => [], 'invalid' => 'true', 'read' => $resource('service.name'), 'default' => 'Refract Test App', 'warnings' => 0,
-        ],
-        'REFRACT_ENVIRONMENT' => [
-            'env' => [], 'invalid' => 'true', 'read' => $resource('deployment.environment.name'), 'default' => 'testing', 'warnings' => 0,
-        ],
         'REFRACT_DESTINATION' => [
             'env' => [], 'invalid' => 'datadog', 'read' => $url, 'default' => 'https://otlp.test/v1/traces', 'warnings' => 0,
         ],
-        'REFRACT_CONTEXT_PARTICIPANT_TYPE' => [
-            'env' => [], 'invalid' => 'true', 'read' => $participant, 'default' => ['type' => 'App\Models\User', 'id' => '42'], 'warnings' => 0,
-        ],
-        'REFRACT_CONTEXT_PARTICIPANT_ID' => [
-            'env' => [], 'invalid' => 'true', 'read' => $participant, 'default' => ['type' => 'App\Models\User', 'id' => '42'], 'warnings' => 0,
-        ],
         'REFRACT_OTLP_ENDPOINT' => [
-            'env' => ['OTEL_EXPORTER_OTLP_ENDPOINT' => 'https://collector.test:4318'],
-            'invalid' => 'not a url', 'read' => $url, 'default' => 'https://collector.test:4318/v1/traces', 'warnings' => 0,
-            // No fallback to the OTEL endpoint: REFRACT_OTLP_HEADERS never go to a host the user did not name.
+            // No endpoint: one warning, and Refract registers nothing.
+            'env' => [], 'invalid' => 'not a url', 'read' => $url, 'default' => null, 'warnings' => 1,
+            // No fallback host: REFRACT_OTLP_HEADERS never go to a host the user did not name.
             'on_invalid' => null, 'invalid_warnings' => 1,
         ],
         'REFRACT_OTLP_HEADERS' => [
             'env' => [], 'invalid' => 'x-team', 'read' => $headers, 'default' => [], 'warnings' => 0,
-        ],
-        'OTEL_EXPORTER_OTLP_ENDPOINT' => [
-            'env' => ['REFRACT_OTLP_ENDPOINT' => null],
-            'invalid' => 'not a url', 'read' => fn () => exported(), 'default' => null, 'warnings' => 1,
-        ],
-        'OTEL_EXPORTER_OTLP_HEADERS' => [
-            'env' => $collector, 'invalid' => 'x-team', 'read' => $headers, 'default' => [], 'warnings' => 0,
-        ],
-        'OTEL_EXPORTER_OTLP_COMPRESSION' => [
-            'env' => [], 'invalid' => 'brotli', 'read' => fn () => exported()['encoding'] ?? null, 'default' => 'gzip', 'warnings' => 0,
         ],
         'LANGFUSE_BASE_URL' => [
             'env' => LANGFUSE_ENV, 'invalid' => 'not a url', 'read' => $url, 'default' => LANGFUSE_CLOUD, 'warnings' => 0,
@@ -241,16 +202,32 @@ function envCases(): array
         'LANGFUSE_SECRET_KEY' => [
             'env' => LANGFUSE_ENV, 'invalid' => 'true', 'read' => fn () => exported(), 'default' => null, 'warnings' => 1,
         ],
-        'OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT' => [
-            'env' => [], 'invalid' => 'maybe', 'read' => $captures, 'default' => false, 'warnings' => 0,
-        ],
-        'REFRACT_CAPTURE_MAX_BYTES' => [
-            'env' => [], 'invalid' => 'lots', 'read' => $cap, 'default' => 131_072, 'warnings' => 0,
-        ],
         'REFRACT_DRAIN' => [
             'env' => [], 'invalid' => 'later', 'read' => fn () => (fn () => $this->drain)->call(app(Drain::class)), 'default' => 'sync', 'warnings' => 0,
         ],
+        'REFRACT_COLLECTOR' => [
+            'env' => [], 'invalid' => 'file', 'read' => fn () => collectorClass(), 'default' => RedisCollector::class, 'warnings' => 0,
+        ],
+        'OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT' => [
+            'env' => [], 'invalid' => 'maybe', 'read' => $captures, 'default' => false, 'warnings' => 0,
+        ],
     ];
+}
+
+/**
+ * Get the class of the collector Refract builds, with no Redis server needed.
+ */
+function collectorClass(): string
+{
+    app()->instance(RedisFactory::class, new class implements RedisFactory
+    {
+        public function connection($name = null)
+        {
+            return Mockery::mock(RedisConnection::class);
+        }
+    });
+
+    return app(Collector::class)::class;
 }
 
 /**
@@ -314,71 +291,25 @@ it('an invalid env var gives the default and one warning', function (string $var
         ->and($about)->toHaveCount(1);
 })->with('env vars');
 
-it('an invalid LANGFUSE_BASE_URL or REFRACT_OTLP_ENDPOINT exports nothing, with one warning, to no fallback host', function (array $env, string $var, string $value) {
+it('an invalid LANGFUSE_BASE_URL or REFRACT_OTLP_ENDPOINT registers nothing, with one warning, and goes to no fallback host', function (array $env, string $var, string $value) {
     Env::set([...BASE_ENV, ...$env, $var => $value]);
 
     $log = loadRefract();
 
-    expect(exported())->toBeNull()
+    expect(listening())->toBeFalse()
         ->and($log->warnings)->toHaveCount(1)
         ->and($log->warnings[0])->toContain($var === 'LANGFUSE_BASE_URL' ? 'refract.destinations.langfuse.url' : 'refract.destinations.otlp.endpoint')
-        ->and($log->warnings[0])->toContain('Nothing is exported');
+        ->and($log->warnings[0])->toContain('Refract records nothing');
     Http::assertNothingSent();
 })->with([
     'LANGFUSE_BASE_URL' => [LANGFUSE_ENV, 'LANGFUSE_BASE_URL'],
-    'REFRACT_OTLP_ENDPOINT' => [['OTEL_EXPORTER_OTLP_ENDPOINT' => 'https://collector.test:4318', 'REFRACT_OTLP_HEADERS' => 'x-secret=1'], 'REFRACT_OTLP_ENDPOINT'],
+    'REFRACT_OTLP_ENDPOINT' => [['REFRACT_OTLP_HEADERS' => 'x-secret=1'], 'REFRACT_OTLP_ENDPOINT'],
 ])->with([
     // env() turns "true" and "(false)" into booleans, which are not URLs either.
     'text' => 'not a url',
     'true' => 'true',
     '(false)' => '(false)',
 ]);
-
-it('a destination whose platform is not a Platform class exports nothing, with one warning', function (mixed $platform) {
-    Env::set(BASE_ENV);
-
-    $log = loadRefract();
-    config(['refract.destinations.otlp.platform' => $platform]);
-
-    expect(exported())->toBeNull()
-        ->and(exported())->toBeNull()
-        ->and($log->warnings)->toHaveCount(1)
-        ->and($log->warnings[0])->toContain('refract.destinations.otlp.platform');
-    Http::assertNothingSent();
-})->with([
-    'missing class' => ['App\\Platforms\\Missing'],
-    'not a platform' => [stdClass::class],
-    'not a string' => [['App\\Platforms\\Missing']],
-    'empty' => [null],
-]);
-
-it('with no otlp destination in the config and REFRACT_DESTINATION missing or empty, one warning names the missing default destination and nothing is exported', function (?string $destination) {
-    Env::set([...BASE_ENV, 'REFRACT_DESTINATION' => $destination]);
-
-    $log = loadRefract();
-    config(['refract.destinations' => ['langfuse' => config('refract.destinations.langfuse')]]);
-
-    expect(exported())->toBeNull()
-        ->and(exported())->toBeNull()
-        ->and($log->warnings)->toHaveCount(1)
-        ->and($log->warnings[0])->toContain('refract.destinations.otlp')
-        ->and($log->warnings[0])->toContain('REFRACT_DESTINATION is not set')
-        ->and($log->warnings[0])->toContain('Nothing is exported')
-        ->and($log->warnings[0])->not->toContain('[refract.destination]');
-    Http::assertNothingSent();
-})->with([
-    'missing' => [null],
-    'empty' => [''],
-]);
-
-it('each destination names its platform class in the config', function () {
-    Env::set(BASE_ENV);
-
-    loadRefract();
-
-    expect(config('refract.destinations.otlp.platform'))->toBe(OtlpPlatform::class)
-        ->and(config('refract.destinations.langfuse.platform'))->toBe(LangfusePlatform::class);
-});
 
 /**
  * The URL env vars, the env each is tested in, a value with an underscore or
@@ -390,7 +321,6 @@ function urlHostCases(): array
 {
     return [
         'REFRACT_OTLP_ENDPOINT underscore' => [[], 'REFRACT_OTLP_ENDPOINT', 'http://otel_collector:4318/v1/traces', 'http://otel_collector:4318/v1/traces'],
-        'OTEL_EXPORTER_OTLP_ENDPOINT underscore' => [['REFRACT_OTLP_ENDPOINT' => null], 'OTEL_EXPORTER_OTLP_ENDPOINT', 'http://otel_collector:4318', 'http://otel_collector:4318/v1/traces'],
         'LANGFUSE_BASE_URL underscore' => [LANGFUSE_ENV, 'LANGFUSE_BASE_URL', 'http://langfuse_web:3000', 'http://langfuse_web:3000/api/public/otel/v1/traces'],
         'LANGFUSE_BASE_URL non-ASCII' => [LANGFUSE_ENV, 'LANGFUSE_BASE_URL', 'https://langfuse.bücher.test', 'https://langfuse.bücher.test/api/public/otel/v1/traces'],
     ];
@@ -424,112 +354,73 @@ it('a URL with a scheme other than http or https, or with no host, is invalid', 
     }
 })->with(urlHostCases());
 
-it('a byte cap under 64, 0, negative, a fraction or text gives 128 KB and one warning', function (string $value) {
-    [$result, $warnings] = runEnvCase('REFRACT_CAPTURE_MAX_BYTES', $value);
-
-    expect($result)->toBe(131_072)
-        ->and($warnings)->toHaveCount(1)
-        ->and($warnings[0])->toContain('refract.capture.max_bytes');
-})->with(['63', '1', '0', '-5', '1.5', '1e3', '128KB']);
-
-it('a byte cap of 64, the minimum, is used', function () {
-    [$result, $warnings] = runEnvCase('REFRACT_CAPTURE_MAX_BYTES', '64');
-
-    expect($result)->toBe(64)
-        ->and($warnings)->toBe([]);
-});
-
-it('capture turned on and a byte cap set are used', function () {
-    Env::set([...BASE_ENV, 'OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT' => 'true', 'REFRACT_CAPTURE_MAX_BYTES' => '1000']);
+it('a destination that cannot send warns once at boot, and Refract registers nothing, as if disabled', function (array $env, string $warning) {
+    Env::set([...BASE_ENV, ...$env]);
 
     $log = loadRefract();
 
-    expect(app(Content::class)->toolArguments(['topic' => 'release']))->toBe(['arguments' => '{"topic":"release"}'])
-        ->and(strlen(app(Content::class)->value(str_repeat('a', 200_000))))->toBe(1000)
-        ->and($log->warnings)->toBe([]);
-});
+    expect(listening())->toBeFalse()
+        ->and(listening())->toBeFalse()
+        ->and($log->warnings)->toHaveCount(1)
+        ->and($log->warnings[0])->toContain($warning);
+    Http::assertNothingSent();
+})->with([
+    'no OTLP endpoint' => [['REFRACT_OTLP_ENDPOINT' => null], 'No OTLP endpoint'],
+    'invalid OTLP endpoint' => [['REFRACT_OTLP_ENDPOINT' => 'otlp.test'], 'refract.destinations.otlp.endpoint'],
+    'Langfuse keys missing' => [[...LANGFUSE_ENV, 'LANGFUSE_SECRET_KEY' => null], 'Langfuse keys missing'],
+    'invalid Langfuse URL' => [[...LANGFUSE_ENV, 'LANGFUSE_BASE_URL' => 'langfuse.test'], 'refract.destinations.langfuse.url'],
+]);
 
-it('OTEL headers are not sent to the REFRACT_OTLP_ENDPOINT', function () {
-    Env::set([
-        ...BASE_ENV,
-        'REFRACT_OTLP_ENDPOINT' => 'https://otlp.test/v1/traces',
-        'REFRACT_OTLP_HEADERS' => 'x-refract=1',
-        'OTEL_EXPORTER_OTLP_ENDPOINT' => 'https://collector.test:4318',
-        'OTEL_EXPORTER_OTLP_HEADERS' => 'authorization=Bearer%20secret,x-otel=1',
-    ]);
-
-    $log = loadRefract();
-
-    expect(exported())->toMatchArray([
-        'url' => 'https://otlp.test/v1/traces',
-        'headers' => ['x-refract' => '1'],
-    ])->and($log->warnings)->toBe([]);
-});
-
-it('OTEL_EXPORTER_OTLP_ENDPOINT gets the traces path and the URL-decoded OTEL headers', function (string $endpoint) {
-    Env::set([
-        ...BASE_ENV,
-        'REFRACT_OTLP_ENDPOINT' => null,
-        'OTEL_EXPORTER_OTLP_ENDPOINT' => $endpoint,
-        'OTEL_EXPORTER_OTLP_HEADERS' => ' Authorization = Bearer%20secret , x-otel=a%3Db ',
-    ]);
-
-    $log = loadRefract();
-
-    expect(exported())->toMatchArray([
-        'url' => 'https://collector.test:4318/base/v1/traces',
-        'headers' => ['authorization' => 'Bearer secret', 'x-otel' => 'a=b'],
-    ])->and($log->warnings)->toBe([]);
-})->with(['https://collector.test:4318/base', 'https://collector.test:4318/base/']);
-
-it('REFRACT_OTLP_HEADERS win over OTEL headers on the OTEL endpoint', function () {
-    Env::set([
-        ...BASE_ENV,
-        'REFRACT_OTLP_ENDPOINT' => null,
-        'REFRACT_OTLP_HEADERS' => 'x-team=refract',
-        'OTEL_EXPORTER_OTLP_ENDPOINT' => 'https://collector.test:4318',
-        'OTEL_EXPORTER_OTLP_HEADERS' => 'x-team=otel,x-otel=1',
-    ]);
-
-    loadRefract();
-
-    expect(exported()['headers'] ?? null)->toBe(['x-otel' => '1', 'x-team' => 'refract']);
-});
-
-it('no OTLP endpoint at all exports nothing and warns once', function () {
-    Env::set([...BASE_ENV, 'REFRACT_OTLP_ENDPOINT' => null, 'OTEL_EXPORTER_OTLP_ENDPOINT' => null]);
-
-    $log = loadRefract();
-
-    expect(exported())->toBeNull()
-        ->and(exported())->toBeNull()
-        ->and($log->warnings)->toHaveCount(1);
-});
-
-it('the drain and exporter are built on the first send, so no endpoint warns only once spans are sent', function () {
-    $this->refreshApplicationWithConfig(['refract.destination' => 'otlp']);
+it('with a destination that can send, the drain and exporter are built on the first send, not at boot', function () {
+    $this->refreshApplicationWithConfig(['refract.destination' => 'otlp', 'refract.destinations.otlp.endpoint' => 'https://otlp.test/v1/traces']);
 
     expect(app()->resolved(Drain::class))->toBeFalse()
         ->and(app()->resolved(Exporter::class))->toBeFalse();
 
-    Diagnostics::reset();
-    Log::swap($log = new WarningLog);
     Http::fake();
 
     // A flush point with nothing recorded, as in a request or command that runs no agent.
     app(FlushPoints::class)->flush();
 
-    expect($log->warnings)->toBe([])
-        ->and(app()->resolved(Drain::class))->toBeFalse();
+    expect(app()->resolved(Drain::class))->toBeFalse();
 
     TimeAgent::fakeTwoSteps();
     TimeAgent::make()->prompt('What time is it?');
     app(FlushPoints::class)->flush();
 
-    expect($log->warnings)->toHaveCount(1)
-        ->and($log->warnings[0])->toContain('No OTLP endpoint')
-        ->and(app()->resolved(Exporter::class))->toBeTrue();
-    Http::assertNothingSent();
+    expect(app()->resolved(Exporter::class))->toBeTrue();
+    Http::assertSentCount(1);
+});
+
+it('service.name is the app name, "Laravel" when it is empty, and the environment is the app environment', function (?string $name, string $expected) {
+    Env::set(BASE_ENV);
+
+    loadRefract();
+    config(['app.name' => $name]);
+
+    expect(exported()['resource'] ?? null)->toMatchArray([
+        'service.name' => $expected,
+        'deployment.environment.name' => 'testing',
+    ]);
+})->with([
+    'app name' => ['Refract Test App', 'Refract Test App'],
+    'empty' => ['', 'Laravel'],
+    'missing' => [null, 'Laravel'],
+]);
+
+it('every export is gzipped', function () {
+    Env::set(BASE_ENV);
+
+    loadRefract();
+
+    expect(exported()['encoding'] ?? null)->toBe('gzip');
+});
+
+it('config/refract.php reads exactly the ten env vars', function () {
+    preg_match_all("/env\\('([A-Z_]+)'\\)/", (string) file_get_contents(dirname(__DIR__, 2).'/config/refract.php'), $matches);
+
+    expect($matches[1])->toEqualCanonicalizing(array_keys(BASE_ENV))
+        ->and($matches[1])->toHaveCount(10);
 });
 
 it('LANGFUSE_BASE_URL empty sends to Langfuse Cloud', function () {
@@ -549,7 +440,7 @@ it('LANGFUSE_BASE_URL set sends to that Langfuse', function () {
     expect(exported()['url'] ?? null)->toBe('https://langfuse.example.test/api/public/otel/v1/traces');
 });
 
-it('Langfuse keys missing export nothing and warn once', function (array $keys) {
+it('Langfuse keys missing register nothing and warn once', function (array $keys) {
     Env::set([...BASE_ENV, ...LANGFUSE_ENV, ...$keys]);
 
     $log = loadRefract();
@@ -564,25 +455,6 @@ it('Langfuse keys missing export nothing and warn once', function (array $keys) 
 ]);
 
 /**
- * Get the participant a run not saved records under the given key names.
- */
-function participantFromKeys(RunContext $context, string $typeKey, string $idKey): mixed
-{
-    Context::add($typeKey, 'App\Models\User');
-    Context::add($idKey, '42');
-
-    return $context->of(new TimeAgent)['participant'] ?? null;
-}
-
-it('reads the participant from the Context keys named in config', function () {
-    Env::set([...BASE_ENV, 'REFRACT_CONTEXT_PARTICIPANT_TYPE' => 'owner_type', 'REFRACT_CONTEXT_PARTICIPANT_ID' => 'owner_id']);
-
-    loadRefract();
-
-    expect(participantFromKeys(app(RunContext::class), 'owner_type', 'owner_id'))->toBe(['type' => 'App\Models\User', 'id' => '42']);
-});
-
-/**
  * The destination cases: the env, how to read the result, the result and the warnings it gives.
  *
  * @return array<string, array{env: array<string, string|null>, read: Closure(): mixed, expected: mixed, warnings: int}>
@@ -592,21 +464,9 @@ function destinationCases(): array
     $sent = fn () => ($request = exported()) === null ? null : ['url' => $request['url'], 'headers' => $request['headers']];
 
     return [
-        'OTEL headers not sent to the Refract endpoint' => [
-            'env' => [
-                'REFRACT_OTLP_HEADERS' => 'x-refract=1',
-                'OTEL_EXPORTER_OTLP_ENDPOINT' => 'https://collector.test:4318',
-                'OTEL_EXPORTER_OTLP_HEADERS' => 'x-otel=1',
-            ],
-            'read' => $sent, 'expected' => ['url' => 'https://otlp.test/v1/traces', 'headers' => ['x-refract' => '1']], 'warnings' => 0,
-        ],
-        'OTEL endpoint with its headers' => [
-            'env' => [
-                'REFRACT_OTLP_ENDPOINT' => null,
-                'OTEL_EXPORTER_OTLP_ENDPOINT' => 'https://collector.test:4318',
-                'OTEL_EXPORTER_OTLP_HEADERS' => 'x-otel=a%3Db',
-            ],
-            'read' => $sent, 'expected' => ['url' => 'https://collector.test:4318/v1/traces', 'headers' => ['x-otel' => 'a=b']], 'warnings' => 0,
+        'REFRACT_OTLP_HEADERS sent to the endpoint' => [
+            'env' => ['REFRACT_OTLP_HEADERS' => 'x-refract=a%3Db'],
+            'read' => $sent, 'expected' => ['url' => 'https://otlp.test/v1/traces', 'headers' => ['x-refract' => 'a=b']], 'warnings' => 0,
         ],
         'no OTLP endpoint' => [
             'env' => ['REFRACT_OTLP_ENDPOINT' => null], 'read' => $sent, 'expected' => null, 'warnings' => 1,

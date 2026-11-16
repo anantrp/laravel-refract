@@ -3,7 +3,6 @@
 namespace Anantrp\Refract\Capture;
 
 use Anantrp\Refract\Support\Guard;
-use Illuminate\Database\Eloquent\Relations\Relation;
 use Illuminate\Support\Facades\Context;
 use Laravel\Ai\Contracts\Agent;
 use Laravel\Ai\Middleware\RememberConversation;
@@ -13,24 +12,18 @@ use Throwable;
 /**
  * Reads the context bucket of a run: its session, its participant and the mapped Laravel Context values.
  *
- * A saved run takes its participant from the conversation and ignores
- * Context. A run that is not saved takes it from the two Context keys,
- * only when both are set. The type is always the full class name.
+ * Only a saved run has a participant: the conversation's, with the full
+ * class name as its type. A run that is not saved can carry who it is for
+ * in the mapped Context values, as user.id or session.id.
  */
 class RunContext
 {
     /**
      * Create a new run context reader.
      *
-     * @param  string  $typeKey  The Context key holding the participant type.
-     * @param  string  $idKey  The Context key holding the participant id.
      * @param  list<string>  $keys  The Context keys copied onto the run span.
      */
-    public function __construct(
-        protected string $typeKey,
-        protected string $idKey,
-        protected array $keys,
-    ) {}
+    public function __construct(protected array $keys) {}
 
     /**
      * Get the context bucket for a run of the given agent.
@@ -83,7 +76,7 @@ class RunContext
             }
         }
 
-        return $this->fromContext();
+        return null;
     }
 
     /**
@@ -98,21 +91,6 @@ class RunContext
         }
 
         return $id === null ? null : ['type' => $participant::class, 'id' => $id];
-    }
-
-    /**
-     * @return array{type: string, id: string}|null
-     */
-    protected function fromContext(): ?array
-    {
-        $type = Context::get($this->typeKey);
-        $id = $this->id(Context::get($this->idKey));
-
-        if (! is_string($type) || $type === '' || $id === null) {
-            return null;
-        }
-
-        return ['type' => Relation::getMorphedModel($type) ?? $type, 'id' => $id];
     }
 
     /**

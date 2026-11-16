@@ -1,8 +1,5 @@
 <?php
 
-use Anantrp\Refract\Export\Platforms\Langfuse\LangfusePlatform;
-use Anantrp\Refract\Export\Platforms\Otlp\OtlpPlatform;
-
 return [
 
     /*
@@ -19,35 +16,11 @@ return [
 
     /*
     |--------------------------------------------------------------------------
-    | Service Name
-    |--------------------------------------------------------------------------
-    |
-    | The name your application is reported under in every trace. When it is
-    | not set, your application's name is used.
-    |
-    */
-
-    'service_name' => env('OTEL_SERVICE_NAME'),
-
-    /*
-    |--------------------------------------------------------------------------
-    | Environment
-    |--------------------------------------------------------------------------
-    |
-    | The deployment environment every trace is reported under. When it is
-    | not set, your application's environment is used.
-    |
-    */
-
-    'environment' => env('REFRACT_ENVIRONMENT'),
-
-    /*
-    |--------------------------------------------------------------------------
     | Destination
     |--------------------------------------------------------------------------
     |
-    | The backend that receives the exported traces: one of the keys under
-    | "destinations" below.
+    | The backend that receives the exported traces, configured under
+    | "destinations" below. It is "otlp" when not set.
     |
     | Supported: "otlp", "langfuse"
     |
@@ -66,7 +39,7 @@ return [
     | collector and exports them from your queue workers, on the "refract"
     | queue of your default queue connection, retrying with a backoff.
     |
-    | Supported: "sync", "queue"
+    | Supported: "sync" (the default), "queue"
     |
     */
 
@@ -102,37 +75,17 @@ return [
 
     /*
     |--------------------------------------------------------------------------
-    | Compression
-    |--------------------------------------------------------------------------
-    |
-    | How each export is compressed, for both destinations: "gzip" sends the
-    | body gzipped with "Content-Encoding: gzip", "none" sends it plain. It is
-    | the only OTEL_EXPORTER_OTLP_* variable that also applies to "langfuse".
-    |
-    | Supported: "gzip", "none"
-    |
-    */
-
-    'compression' => env('OTEL_EXPORTER_OTLP_COMPRESSION'),
-
-    /*
-    |--------------------------------------------------------------------------
     | Context
     |--------------------------------------------------------------------------
     |
-    | A saved run records its conversation participant. A run that is not
-    | saved records the participant from the two Laravel Context keys named
-    | under "participant", and only when both are set. The "attributes" map
-    | copies Laravel Context keys onto each run span, keyed by Context key.
+    | The "attributes" map copies Laravel Context keys onto each run span,
+    | keyed by Context key. A key mapped to "user.id" or "session.id" tells
+    | your backend who a run is for when the run is not a saved
+    | conversation; a saved conversation's own values win.
     |
     */
 
     'context' => [
-        'participant' => [
-            'type' => env('REFRACT_CONTEXT_PARTICIPANT_TYPE'),
-            'id' => env('REFRACT_CONTEXT_PARTICIPANT_ID'),
-        ],
-
         'attributes' => [
             // 'tenant_id' => 'tenant.id',
         ],
@@ -145,9 +98,8 @@ return [
     |
     | When "content" is on, prompts, step messages, outputs, tool arguments
     | and tool results are recorded. It is off by default. Each value is cut
-    | at "max_bytes" (default 131072, 128 KB, at least 64) and marked with
-    | its original size. Attachments and files are never recorded: a file
-    | in a value becomes "[file]".
+    | at 128 KB and marked with its original size. Attachments and files are
+    | never recorded: a file in a value becomes "[file]".
     |
     | "mask" is the class name of an invokable class, made from the
     | container, that is given every captured string and returns it masked.
@@ -157,7 +109,6 @@ return [
 
     'capture' => [
         'content' => env('OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT'),
-        'max_bytes' => env('REFRACT_CAPTURE_MAX_BYTES'),
         'mask' => null,
     ],
 
@@ -166,37 +117,28 @@ return [
     | Destinations
     |--------------------------------------------------------------------------
     |
-    | Where each destination sends its traces. "platform" is the class that
-    | builds the destination's requests from the rest of its config.
+    | Where each destination sends its traces.
     |
     | "otlp": REFRACT_OTLP_ENDPOINT is the full URL traces are posted to,
-    | sent with REFRACT_OTLP_HEADERS only. When it is not set, the standard
-    | OTEL_EXPORTER_OTLP_ENDPOINT is used with "/v1/traces" appended, sent
-    | with OTEL_EXPORTER_OTLP_HEADERS and REFRACT_OTLP_HEADERS. Headers use
-    | the OpenTelemetry format: "key1=value1,key2=value2", URL-encoded values.
+    | sent with REFRACT_OTLP_HEADERS. Headers use the OpenTelemetry format:
+    | "key1=value1,key2=value2", with URL-encoded values.
     |
     | "langfuse": LANGFUSE_BASE_URL defaults to Langfuse Cloud.
     |
-    | An invalid REFRACT_OTLP_ENDPOINT or LANGFUSE_BASE_URL exports nothing,
-    | with one warning: there is no fallback host for your keys and headers.
+    | A destination that cannot send (no endpoint, a missing key, an invalid
+    | URL) logs one warning and Refract records nothing, as if disabled. An
+    | invalid URL never falls back to another host.
     |
     */
 
     'destinations' => [
 
         'otlp' => [
-            'platform' => OtlpPlatform::class,
             'endpoint' => env('REFRACT_OTLP_ENDPOINT'),
             'headers' => env('REFRACT_OTLP_HEADERS'),
-
-            'otel' => [
-                'endpoint' => env('OTEL_EXPORTER_OTLP_ENDPOINT'),
-                'headers' => env('OTEL_EXPORTER_OTLP_HEADERS'),
-            ],
         ],
 
         'langfuse' => [
-            'platform' => LangfusePlatform::class,
             'url' => env('LANGFUSE_BASE_URL'),
             'public_key' => env('LANGFUSE_PUBLIC_KEY'),
             'secret_key' => env('LANGFUSE_SECRET_KEY'),
