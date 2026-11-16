@@ -5,7 +5,6 @@ use Anantrp\Refract\Capture\FlushPoints;
 use Anantrp\Refract\Capture\RecordAgentRuns;
 use Anantrp\Refract\Capture\RunContext;
 use Anantrp\Refract\Contracts\Exporter;
-use Anantrp\Refract\Contracts\Transport;
 use Anantrp\Refract\Export\Platforms\Langfuse\LangfusePlatform;
 use Anantrp\Refract\Export\Platforms\Otlp\OtlpPlatform;
 use Anantrp\Refract\RefractServiceProvider;
@@ -13,6 +12,7 @@ use Anantrp\Refract\Support\Diagnostics;
 use Anantrp\Refract\Tests\Support\Env;
 use Anantrp\Refract\Tests\Support\Otlp;
 use Anantrp\Refract\Tests\Support\WarningLog;
+use Anantrp\Refract\Transport\Drain;
 use Illuminate\Config\Repository;
 use Illuminate\Events\Dispatcher;
 use Illuminate\Http\Client\Request;
@@ -35,7 +35,6 @@ const BASE_ENV = [
     'REFRACT_ENABLED' => null,
     'OTEL_SERVICE_NAME' => null,
     'REFRACT_ENVIRONMENT' => null,
-    'REFRACT_TRANSPORT' => 'sync',
     'REFRACT_DESTINATION' => 'otlp',
     'REFRACT_OTLP_ENDPOINT' => 'https://otlp.test/v1/traces',
     'REFRACT_OTLP_HEADERS' => null,
@@ -72,7 +71,6 @@ const CHANGED_ENV = [
     'REFRACT_ENABLED' => 'false',
     'OTEL_SERVICE_NAME' => 'changed',
     'REFRACT_ENVIRONMENT' => 'changed',
-    'REFRACT_TRANSPORT' => 'queue',
     'REFRACT_DESTINATION' => 'langfuse',
     'REFRACT_OTLP_ENDPOINT' => 'https://changed.test/v1/traces',
     'REFRACT_OTLP_HEADERS' => 'x-changed=1',
@@ -122,17 +120,17 @@ function loadRefract(bool $cached = false): WarningLog
 }
 
 /**
- * Send one run span through the configured transport and get the request it made, or null.
+ * Send one run span through the drain and get the request it made, or null.
  *
  * @return array{url: string, headers: array<string, string>, encoding: string|null, resource: array<string, mixed>}|null
  */
 function exported(): ?array
 {
-    app(Transport::class)->send([[
+    app(Drain::class)->send([[[
         'v' => 1, 'trace_id' => str_repeat('a', 32), 'span_id' => str_repeat('b', 16), 'parent_span_id' => null,
         'kind' => 'invoke_agent', 'start' => 1, 'end' => 2, 'status' => 'ok', 'status_message' => null,
         'call' => [], 'content' => [], 'context' => [], 'events' => [],
-    ]]);
+    ]]]);
 
     $recorded = Http::recorded();
 
@@ -199,9 +197,6 @@ function envCases(): array
         ],
         'REFRACT_ENVIRONMENT' => [
             'env' => [], 'invalid' => 'true', 'read' => $resource('deployment.environment.name'), 'default' => 'testing', 'warnings' => 0,
-        ],
-        'REFRACT_TRANSPORT' => [
-            'env' => [], 'invalid' => 'log', 'read' => fn () => exported() !== null, 'default' => true, 'warnings' => 0,
         ],
         'REFRACT_DESTINATION' => [
             'env' => [], 'invalid' => 'datadog', 'read' => $url, 'default' => 'https://otlp.test/v1/traces', 'warnings' => 0,
@@ -504,10 +499,10 @@ it('no OTLP endpoint at all exports nothing and warns once', function () {
         ->and($log->warnings)->toHaveCount(1);
 });
 
-it('the transport and exporter are built on the first send, so no endpoint warns only once spans are sent', function () {
-    $this->refreshApplicationWithConfig(['refract.transport' => 'sync', 'refract.destination' => 'otlp']);
+it('the drain and exporter are built on the first send, so no endpoint warns only once spans are sent', function () {
+    $this->refreshApplicationWithConfig(['refract.destination' => 'otlp']);
 
-    expect(app()->resolved(Transport::class))->toBeFalse()
+    expect(app()->resolved(Drain::class))->toBeFalse()
         ->and(app()->resolved(Exporter::class))->toBeFalse();
 
     Diagnostics::reset();
@@ -518,7 +513,7 @@ it('the transport and exporter are built on the first send, so no endpoint warns
     app(FlushPoints::class)->flush();
 
     expect($log->warnings)->toBe([])
-        ->and(app()->resolved(Transport::class))->toBeFalse();
+        ->and(app()->resolved(Drain::class))->toBeFalse();
 
     TimeAgent::fakeTwoSteps();
     TimeAgent::make()->prompt('What time is it?');

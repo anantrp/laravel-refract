@@ -39,8 +39,8 @@ class Scenarios
      */
     public function config(string $name): array
     {
+        // L2 exported through the queue transport; with sync export only, it runs as L1 does.
         return match ($name) {
-            'L2' => ['refract.transport' => 'queue'],
             default => [],
         };
     }

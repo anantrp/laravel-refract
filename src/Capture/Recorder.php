@@ -2,23 +2,25 @@
 
 namespace Anantrp\Refract\Capture;
 
-use Anantrp\Refract\Contracts\SendNow;
-use Anantrp\Refract\Contracts\Transport;
 use Anantrp\Refract\Support\Diagnostics;
 use Anantrp\Refract\Support\Guard;
+use Anantrp\Refract\Transport\Drain;
 use Closure;
 use Illuminate\Contracts\Container\Container;
+use Illuminate\Contracts\Foundation\Application;
 use OpenTelemetry\API\Trace\Span;
 
 /**
- * Builds neutral spans and holds them until a flush point.
+ * Builds neutral spans and hands each finished run tree on.
+ *
+ * A run tree is a top-level span and every span under it, sub-agent runs
+ * included. Each span records the span id of its tree's top-level span
+ * when it starts, so the tree is finished when that span ends. A console
+ * process hands the tree on then; a web request holds it until the flush
+ * point, after the response is sent.
  *
  * Times are read from the monotonic clock while recording and turned into
- * wall clock times at each flush.
- *
- * Spans a send gave back while the process runs (the destination could
- * not take them now) are kept as neutral spans, with the wall clock times
- * of that send, and go first in the next send. They count toward the cap.
+ * wall clock times when a tree is handed on.
  *
  * @phpstan-type SpanEvent array{kind: string, time: int, call: array<string, mixed>}
  * @phpstan-type OpenSpan array{trace_id: string, span_id: string, parent_span_id: ?string, root: string, kind: string, start: int, call: array<string, mixed>, content: array<string, mixed>, context: array<string, mixed>, context_from: ?string, events: list<SpanEvent>}
@@ -32,34 +34,9 @@ class Recorder
     public const VERSION = 1;
 
     /**
-     * The most spans the buffer holds between two flushes.
-     */
-    public const MAX_SPANS = 1_000;
-
-    /**
      * The most spans one run tree records: its top-level span and every span under it.
      */
     public const MAX_RUN_SPANS = 1_000;
-
-    /**
-     * The finished spans that start a partial flush.
-     */
-    public const PARTIAL_SPANS = 500;
-
-    /**
-     * The time since the last send, in nanoseconds, that starts a partial flush.
-     */
-    public const PARTIAL_INTERVAL = 5_000_000_000;
-
-    /**
-     * The least seconds to wait after a send gave spans back, before the next send while the process runs.
-     */
-    public const KEPT_WAIT = 5;
-
-    /**
-     * The most seconds to wait after a send gave spans back, whatever the destination asked.
-     */
-    public const KEPT_MAX_WAIT = 300;
 
     /**
      * The spans started but not ended yet, keyed by their capture key.
@@ -69,21 +46,14 @@ class Recorder
     protected array $open = [];
 
     /**
-     * The spans ended since the last flush.
+     * The ended spans of the trees not handed on yet.
      *
      * @var list<FinishedSpan>
      */
     protected array $finished = [];
 
     /**
-     * The neutral spans a send gave back, to go first in the next send.
-     *
-     * @var list<array<string, mixed>>
-     */
-    protected array $kept = [];
-
-    /**
-     * The keys of the spans dropped at the cap and not ended yet, so their children are dropped too.
+     * The keys of the spans dropped at the per-run cap and not ended yet, so their children are dropped too.
      *
      * @var array<string, true>
      */
@@ -104,11 +74,6 @@ class Recorder
     protected array $truncated = [];
 
     /**
-     * The monotonic time before which the run-end send waits, after a send gave spans back.
-     */
-    protected ?int $waitUntil = null;
-
-    /**
      * The callbacks that reset other capture state at each flush.
      *
      * @var list<Closure(): mixed>
@@ -116,54 +81,25 @@ class Recorder
     protected array $resets = [];
 
     /**
-     * The callbacks run when a top-level run ends.
-     *
-     * @var list<Closure(): mixed>
+     * Whether a flush is closing the open spans, so the trees they finish leave together with the rest.
      */
-    protected array $runEnds = [];
+    protected bool $flushing = false;
 
     /**
-     * The callbacks run when the buffer is full, before a new span is dropped.
-     *
-     * @var list<Closure(): mixed>
+     * Create a new recorder instance. The drain is made from the container on the first send, not before.
      */
-    protected array $fulls = [];
-
-    /**
-     * Whether a span tree may have finished since the full callbacks last ran.
-     *
-     * Set when a span ends whose parent is not open, and at each flush. A
-     * tree can finish only then, so a full buffer does not run the callbacks
-     * again on every dropped span. A full buffer also runs them when the
-     * wait after a failed send is over (see retryDue()).
-     */
-    protected bool $treeEnded = true;
-
-    /**
-     * The monotonic time of the last send, or of the recorder's start before the first one.
-     */
-    protected int $lastSend;
-
-    /**
-     * Create a new recorder instance. The transport is made from the container on the first send, not before.
-     */
-    public function __construct(protected Container $container)
-    {
-        $this->lastSend = $this->monotonic();
-    }
+    public function __construct(protected Container $container) {}
 
     /**
      * Start a span under the given parent, or under the app's active trace.
      *
      * A span still open under the same key is closed as abandoned first.
-     * A span started with a context source takes that span's context at
-     * flush, in place of its own. A run tree that holds MAX_RUN_SPANS spans
-     * drops the span and is marked truncated, so one huge run never crowds
-     * out the others. A full buffer drops the span too, and marks the tree
-     * it would have joined. A span whose parent was dropped at either cap
-     * is dropped too, even once room frees, so it never becomes a new trace
-     * without its run. A parent that is not open for any other reason still
-     * falls back to the active trace.
+     * A span started with a context source takes that span's context when
+     * its tree is handed on, in place of its own. A run tree that holds
+     * MAX_RUN_SPANS spans drops the span and is marked truncated, so one huge
+     * run never crowds out the others. A span whose parent was dropped is
+     * dropped too, so it never becomes a new trace without its run. A parent
+     * that is not open for any other reason falls back to the active trace.
      *
      * @param  array<string, mixed>  $call
      * @param  array<string, mixed>  $context
@@ -174,14 +110,6 @@ class Recorder
     {
         if (isset($this->open[$key])) {
             $this->abandon($key);
-        }
-
-        if ($this->full() && ($this->treeEnded || $this->retryDue())) {
-            $this->treeEnded = false;
-
-            foreach ($this->fulls as $callback) {
-                $callback();
-            }
         }
 
         if ($parentKey !== null && isset($this->dropped[$parentKey])) {
@@ -196,18 +124,6 @@ class Recorder
             Diagnostics::warn('run.truncated', 'A run reached '.self::MAX_RUN_SPANS.' spans, the most one run records. Its new spans are dropped and the run is marked laravel.ai.truncated.');
 
             $this->truncated[$parent['root']] = true;
-            $this->dropped[$key] = true;
-
-            return;
-        }
-
-        if ($this->full()) {
-            Diagnostics::warn('buffer.full', 'The buffer holds '.self::MAX_SPANS.' spans, the most it can between two flushes. New spans are dropped until a send frees room.');
-
-            if ($parent !== null) {
-                $this->truncated[$parent['root']] = true;
-            }
-
             $this->dropped[$key] = true;
 
             return;
@@ -305,6 +221,7 @@ class Recorder
      * End the given span, merging in the call, context and content data known only at its end.
      *
      * A top-level span whose tree reached the per-run cap is marked truncated.
+     * A top-level span ending finishes its tree.
      *
      * @param  array<string, mixed>  $call
      * @param  array<string, mixed>  $context
@@ -338,53 +255,9 @@ class Recorder
             'status_message' => $message,
         ];
 
-        if (! $this->treeEnded && ! $this->parentOpen($span)) {
-            $this->treeEnded = true;
+        if ($span['root'] === $span['span_id']) {
+            $this->treeEnded($span['root']);
         }
-
-        if ($span['kind'] === 'invoke_agent' && $status !== 'abandoned' && ! $this->hasParent($span)) {
-            foreach ($this->runEnds as $callback) {
-                $callback();
-            }
-        }
-    }
-
-    /**
-     * Check whether the given span's parent is an open span.
-     *
-     * @param  OpenSpan  $span
-     */
-    protected function parentOpen(array $span): bool
-    {
-        foreach ($this->open as $open) {
-            if ($open['span_id'] === $span['parent_span_id']) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    /**
-     * Check whether the given span's parent is a span in the buffer, open or finished.
-     *
-     * @param  OpenSpan|FinishedSpan  $span
-     */
-    protected function hasParent(array $span): bool
-    {
-        $parent = $span['parent_span_id'];
-
-        if ($parent === null) {
-            return false;
-        }
-
-        foreach ([...array_values($this->open), ...$this->finished] as $other) {
-            if ($other['span_id'] === $parent) {
-                return true;
-            }
-        }
-
-        return false;
     }
 
     /**
@@ -454,233 +327,90 @@ class Recorder
     }
 
     /**
-     * Run the given callback when a top-level run ends.
+     * Hand the tree with the given top-level span id on now, in a console process.
      *
-     * A run closed as abandoned does not count.
-     *
-     * @param  Closure(): mixed  $callback
+     * A console process (command, queue worker, tinker) may run for long, so
+     * each run tree leaves when it ends. A web request keeps its trees until
+     * it terminates, so nothing touches the network before the response.
      */
-    public function whenRunEnds(Closure $callback): void
+    protected function treeEnded(string $root): void
     {
-        $this->runEnds[] = $callback;
-    }
-
-    /**
-     * Run the given callback when the buffer is full, before a new span is dropped.
-     *
-     * @param  Closure(): mixed  $callback
-     */
-    public function whenFull(Closure $callback): void
-    {
-        $this->fulls[] = $callback;
-    }
-
-    /**
-     * Determine if the buffer holds the most spans it can.
-     */
-    protected function full(): bool
-    {
-        return count($this->open) + count($this->finished) + count($this->kept) >= self::MAX_SPANS;
-    }
-
-    /**
-     * Hand every finished span tree to the transport now, leaving every open span and the state kept between flushes alone.
-     *
-     * Used when the buffer is full. It sends even while waiting after a
-     * send that gave spans back: else new spans are dropped. A failed try
-     * leaves the buffer full of kept spans: the next try comes at the first
-     * new span after an open top-level run ends or after the wait is over.
-     */
-    public function flushAllFinished(): void
-    {
-        $this->send($this->sendablePositions());
-    }
-
-    /**
-     * Hand the finished span trees to the transport, leaving every open span and the state kept between flushes alone.
-     *
-     * A span tree is a top-level span and every span under it, sub-agent
-     * runs included. It is finished when none of its spans is open. The
-     * flush runs only when the finished trees hold PARTIAL_SPANS spans, or
-     * PARTIAL_INTERVAL passed since the last send. Nothing is sent while
-     * waiting after a send that gave spans back (a full buffer still sends,
-     * see flushAllFinished()).
-     */
-    public function flushFinished(): void
-    {
-        if ($this->waiting()) {
+        if ($this->flushing || ! $this->runningInConsole()) {
             return;
         }
 
-        $due = $this->monotonic() - $this->lastSend >= self::PARTIAL_INTERVAL;
+        $tree = [];
+        $rest = [];
 
-        if (! $due && count($this->finished) < self::PARTIAL_SPANS) {
-            return;
-        }
-
-        $positions = $this->sendablePositions();
-
-        if (! $due && count($positions) < self::PARTIAL_SPANS) {
-            return;
-        }
-
-        $this->send($positions);
-    }
-
-    /**
-     * Determine if the kept spans may be tried again: the wait after the send that gave them back is over.
-     *
-     * A failed try starts a new wait, so while the destination stays down a
-     * full buffer tries at most once per wait, however many spans it drops.
-     */
-    protected function retryDue(): bool
-    {
-        return $this->kept !== [] && ! $this->waiting();
-    }
-
-    /**
-     * Determine if the run-end send waits, after a send gave spans back.
-     */
-    protected function waiting(): bool
-    {
-        return $this->waitUntil !== null && $this->monotonic() < $this->waitUntil;
-    }
-
-    /**
-     * Hand the kept spans and the finished spans at the given positions to the transport and forget them.
-     *
-     * A transport that sends now may give spans back: they are kept for
-     * the next send. The run-end send then waits KEPT_WAIT seconds, or the
-     * seconds the destination asked for, at most KEPT_MAX_WAIT. A send that
-     * gives nothing back ends the wait.
-     *
-     * @param  list<int>  $positions
-     */
-    protected function send(array $positions): void
-    {
-        if ($positions === [] && $this->kept === []) {
-            return;
-        }
-
-        try {
-            $batch = [...$this->kept, ...$this->batch(array_values(array_intersect_key($this->finished, array_flip($positions))))];
-        } finally {
-            $this->kept = [];
-            $this->finished = array_values(array_diff_key($this->finished, array_flip($positions)));
-            $this->lastSend = $this->monotonic();
-        }
-
-        if ($batch === []) {
-            return;
-        }
-
-        /** @var Transport $transport Any transport the app binds, not only the ones Refract ships. */
-        $transport = $this->container->make(Transport::class);
-
-        if (! $transport instanceof SendNow) {
-            $transport->send($batch);
-
-            return;
-        }
-
-        $this->kept = $transport->sendNow($batch);
-
-        if ($this->kept === []) {
-            $this->waitUntil = null;
-
-            return;
-        }
-
-        $wait = min(self::KEPT_MAX_WAIT, max(self::KEPT_WAIT, $transport->retryAfter() ?? 0));
-        $this->waitUntil = $this->monotonic() + $wait * 1_000_000_000;
-    }
-
-    /**
-     * Get the positions in the finished spans of every finished span tree.
-     *
-     * @return list<int>
-     */
-    protected function sendablePositions(): array
-    {
-        $parents = [];
-
-        foreach ([...array_values($this->open), ...$this->finished] as $span) {
-            $parents[$span['span_id']] = $span['parent_span_id'];
-        }
-
-        $roots = [];
-
-        $root = function (string $id) use ($parents, &$roots): string {
-            $chain = [];
-
-            // Bounded by the span count, so a cycle cannot loop forever.
-            while (! isset($roots[$id]) && isset($parents[$id]) && array_key_exists($parents[$id], $parents) && count($chain) <= count($parents)) {
-                $chain[] = $id;
-                $id = $parents[$id];
-            }
-
-            $top = $roots[$id] ?? $id;
-
-            foreach ([$id, ...$chain] as $link) {
-                $roots[$link] = $top;
-            }
-
-            return $top;
-        };
-
-        $held = [];
-
-        foreach ($this->open as $span) {
-            $held[$root($span['span_id'])] = true;
-        }
-
-        $positions = [];
-
-        foreach ($this->finished as $position => $span) {
-            if (! isset($held[$root($span['span_id'])])) {
-                $positions[] = $position;
+        foreach ($this->finished as $span) {
+            if ($span['root'] === $root) {
+                $tree[] = $span;
+            } else {
+                $rest[] = $span;
             }
         }
 
-        return $positions;
+        $this->finished = $rest;
+
+        $this->send([$tree]);
     }
 
     /**
-     * Close every open span as abandoned, children before their parent, then hand the kept spans and the finished spans to the transport as one batch.
+     * Close every open span as abandoned, children before their parent, then hand every finished tree on.
      *
      * The buffer and the state kept between flushes are cleared even when
-     * building the batch fails or a reset throws. The kept spans leave
-     * with this batch and are never kept again (send() keeps nothing), so
-     * the wait after a send that gave spans back ends too.
+     * building the trees fails or a reset throws.
      */
     public function flush(): void
     {
+        $this->flushing = true;
+        $trees = [];
+
         try {
             // Latest start first: a span starts after its parent, so children close first.
             foreach (array_reverse(array_keys($this->open)) as $key) {
                 $this->end($key, 'abandoned');
             }
 
-            $batch = [...$this->kept, ...$this->batch($this->finished)];
+            foreach ($this->finished as $span) {
+                $trees[$span['root']][] = $span;
+            }
         } finally {
-            $this->kept = [];
-            $this->waitUntil = null;
             $this->open = [];
             $this->finished = [];
             $this->dropped = [];
             $this->sizes = [];
             $this->truncated = [];
-            $this->treeEnded = true;
+            $this->flushing = false;
 
             foreach ($this->resets as $reset) {
                 Guard::run('capture.reset', 'to reset its state at a flush', $reset);
             }
         }
 
-        if ($batch !== []) {
-            $this->lastSend = $this->monotonic();
-            $this->container->make(Transport::class)->send($batch);
+        $this->send(array_values($trees));
+    }
+
+    /**
+     * Hand the given finished trees on, as neutral spans with wall clock times.
+     *
+     * @param  list<list<FinishedSpan>>  $trees
+     */
+    protected function send(array $trees): void
+    {
+        if ($trees === []) {
+            return;
         }
+
+        $this->container->make(Drain::class)->send(array_map($this->batch(...), $trees));
+    }
+
+    /**
+     * Determine if the process runs in the console, where each run tree leaves when it ends.
+     */
+    protected function runningInConsole(): bool
+    {
+        return $this->container instanceof Application && $this->container->runningInConsole();
     }
 
     /**
@@ -754,7 +484,7 @@ class Recorder
     }
 
     /**
-     * Get the wall clock in nanoseconds since the Unix epoch, read at each flush.
+     * Get the wall clock in nanoseconds since the Unix epoch, read each time trees are handed on.
      */
     protected function wall(): int
     {

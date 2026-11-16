@@ -19,12 +19,9 @@ use Illuminate\Queue\Jobs\SyncJob;
  * console command (flushed when it finishes). A job run by a sync-like
  * driver (sync, deferred, background) or a command called from inside a
  * request or another command never owns the buffer: its spans leave with
- * its caller. A flush closes every open span, so a flush from a process
- * that does not own the buffer would cut a live run short.
- *
- * A console process (command, queue worker, tinker) also sends its
- * finished runs while it keeps going, checked when a top-level run ends.
- * That partial flush leaves open spans alone, so any process may run it.
+ * its caller. A flush closes every open span as abandoned and hands every
+ * tree left on, so a flush from a process that does not own the buffer
+ * would cut a live run short.
  */
 class FlushPoints
 {
@@ -52,9 +49,6 @@ class FlushPoints
         $events->listen(JobAttempted::class, fn (JobAttempted $event) => $this->guard(fn () => $this->jobAttempted($event)));
         $events->listen(CommandStarting::class, fn (CommandStarting $event) => $this->guard(fn () => $this->commandStarting($event)));
         $events->listen(CommandFinished::class, fn (CommandFinished $event) => $this->guard(fn () => $this->commandFinished($event)));
-
-        $this->recorder->whenRunEnds(fn () => $this->guard($this->runEnded(...)));
-        $this->recorder->whenFull(fn () => $this->guard($this->bufferFull(...)));
     }
 
     /**
@@ -77,30 +71,6 @@ class FlushPoints
         }
     }
 
-    /**
-     * Send the finished runs while a console process keeps going.
-     *
-     * A web request sends once, after the response.
-     */
-    public function runEnded(): void
-    {
-        if ($this->app->runningInConsole()) {
-            $this->recorder->flushFinished();
-        }
-    }
-
-    /**
-     * Send every finished run when the buffer is full in a console process, so only one run over the cap loses spans.
-     *
-     * A web request keeps its one send, after the response.
-     */
-    public function bufferFull(): void
-    {
-        if ($this->app->runningInConsole()) {
-            $this->recorder->flushAllFinished();
-        }
-    }
-
     public function commandStarting(CommandStarting $event): void
     {
         $this->commands++;
@@ -119,7 +89,7 @@ class FlushPoints
     }
 
     /**
-     * Hand the buffer to the transport. The buffer is cleared even when the flush fails.
+     * Hand the buffer on. The buffer is cleared even when the flush fails.
      */
     public function flush(): void
     {

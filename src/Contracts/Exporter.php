@@ -5,9 +5,9 @@ namespace Anantrp\Refract\Contracts;
 interface Exporter
 {
     /**
-     * Export the given neutral spans to the destination.
+     * Export the given finished run trees, each a list of neutral spans, to the destination.
      *
-     * @param  list<array<string, mixed>>  $spans
+     * @param  list<list<array<string, mixed>>>  $trees
      */
-    public function export(array $spans): ExportResult;
+    public function export(array $trees): ExportResult;
 }

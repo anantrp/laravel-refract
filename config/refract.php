@@ -43,21 +43,6 @@ return [
 
     /*
     |--------------------------------------------------------------------------
-    | Transport
-    |--------------------------------------------------------------------------
-    |
-    | The transport decides when and where recorded spans are exported:
-    | "sync" exports after the response is sent, "queue" exports from a
-    | queue worker, and "null" discards the spans.
-    |
-    | Supported: "sync", "queue", "null"
-    |
-    */
-
-    'transport' => env('REFRACT_TRANSPORT'),
-
-    /*
-    |--------------------------------------------------------------------------
     | Destination
     |--------------------------------------------------------------------------
     |

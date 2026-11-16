@@ -39,6 +39,7 @@ use Laravel\Ai\Files\Audio;
 use Laravel\Ai\Files\Document;
 use Laravel\Ai\Files\Image;
 use Laravel\Ai\Files\S3Document;
+use Laravel\Ai\Gateway\ParentInvocation;
 use Laravel\Ai\Messages\AssistantMessage;
 use Laravel\Ai\Messages\Message;
 use Laravel\Ai\Messages\ToolResultMessage;
@@ -78,7 +79,6 @@ enum Lab: string
 function contentConfig(array $capture = []): array
 {
     return [
-        'refract.transport' => 'sync',
         'refract.destination' => 'langfuse',
         'refract.destinations.langfuse.public_key' => 'pk-test',
         'refract.destinations.langfuse.secret_key' => 'sk-test',
@@ -177,7 +177,8 @@ it('with capture off no span or event holds a prompt, output, tool argument, too
 
     $body = sentBodies();
 
-    expect(Http::recorded())->toHaveCount(1)
+    // A console process sends each top-level run when it ends.
+    expect(Http::recorded())->toHaveCount(count(array_filter(Otlp::spans(), fn (array $span) => ! isset($span['parentSpanId']))))
         ->and(count(Otlp::spans()))->toBeGreaterThan(20)
         ->and(array_merge(...array_column(Otlp::spans(), 'events')))->not->toBeEmpty()
         ->and($body)->not->toContain('SECRET')
@@ -946,9 +947,9 @@ it('a tool call response in messages exported as JSON text still gets its fixed 
 });
 
 /**
- * Fill the buffer with the given number of spans: one open run and its tools.
+ * Open a run of the given number of spans, its tools ended, and one more open tool under it that calls a sub-agent.
  */
-function fillBuffer(string $run, int $spans): void
+function openRunWithTool(string $run, int $spans): void
 {
     $recorder = app(Recorder::class);
     $recorder->start("run:{$run}", 'invoke_agent', null, ['agent' => 'Filler']);
@@ -957,6 +958,8 @@ function fillBuffer(string $run, int $spans): void
         $recorder->start("tool:{$run}:{$i}", 'execute_tool', "run:{$run}", ['tool' => 'Filler']);
         $recorder->end("tool:{$run}:{$i}");
     }
+
+    $recorder->start("tool:{$run}", 'execute_tool', "run:{$run}", ['tool' => 'Notes']);
 }
 
 it('with capture on the end content of a span dropped at the cap, or under a dropped parent, is never built, so the mask is not called for its output or result', function (int $filler, array $seen) {
@@ -969,31 +972,32 @@ it('with capture on the end content of a span dropped at the cap, or under a dro
     Diagnostics::reset();
     Log::swap($log = new WarningLog);
 
-    // An open run holds the buffer, so a full-buffer send frees no room.
-    fillBuffer('long', $filler);
+    // A sub-agent counts toward the cap of the run that called it.
+    openRunWithTool('long', $filler);
 
     NotesAgent::fakeTwoSteps();
-    $response = NotesAgent::make()->prompt('What is new?');
+    $response = ParentInvocation::within('long', 'long', fn () => NotesAgent::make()->prompt('What is new?'));
 
-    app(Recorder::class)->flush();
+    app(Recorder::class)->end('tool:long');
+    app(Recorder::class)->end('run:long');
 
-    $recorded = array_values(array_filter($memory->spans, fn (array $span) => ($span['call']['agent'] ?? null) === 'NotesAgent'));
+    $recorded = array_values(array_filter($memory->spans, fn (array $span) => ($span['call']['agent_class'] ?? null) === NotesAgent::class));
 
     expect($response->text)->toBe('The release is on Friday.')
         ->and(array_count_values(RecordingMask::$seen))->toBe($seen)
         ->and($log->warnings)->toHaveCount(1)
         ->and($memory->spans)->toHaveCount(1_000)
-        ->and(array_column($recorded, 'content'))->toBe($filler === 1_000 ? [] : [[
+        ->and(array_column($recorded, 'content'))->toBe($filler === 999 ? [] : [[
             'input' => [['role' => 'user', 'parts' => [['type' => 'text', 'content' => 'What is new?']]]],
             'output' => [['role' => 'assistant', 'parts' => [['type' => 'text', 'content' => 'The release is on Friday.']]]],
         ]]);
 })->with([
     // The start values are still masked (backlog): the prompt, each step's input, the tool's arguments.
-    'the run dropped at the cap, its steps and tool under it' => [1_000, [
+    'the run dropped at the cap, its steps and tool under it' => [999, [
         'What is new?' => 3,
         '{"topic":"release"}' => 2,
     ]],
-    'the run kept, its steps and tool dropped at the cap' => [999, [
+    'the run kept, its steps and tool dropped at the cap' => [998, [
         'What is new?' => 3,
         '{"topic":"release"}' => 2,
         'The release is on Friday.' => 1,

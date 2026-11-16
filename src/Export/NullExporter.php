@@ -10,7 +10,7 @@ use Anantrp\Refract\Contracts\ExportResult;
  */
 class NullExporter implements Exporter
 {
-    public function export(array $spans): ExportResult
+    public function export(array $trees): ExportResult
     {
         return ExportResult::Ok;
     }

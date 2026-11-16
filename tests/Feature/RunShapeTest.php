@@ -31,7 +31,6 @@ use Workbench\App\Ai\Agents\TraitChatAgent;
 
 beforeEach(function () {
     $this->refreshApplicationWithConfig([
-        'refract.transport' => 'sync',
         'refract.destination' => 'langfuse',
         'refract.destinations.langfuse.public_key' => 'pk-test',
         'refract.destinations.langfuse.secret_key' => 'sk-test',
@@ -228,7 +227,7 @@ it('a flush closes open children before their parent, so no abandoned child ends
             return $this->monotonicNow += 1_000;
         }
     });
-    $transport = $this->captureNeutralSpans();
+    $exporter = $this->captureNeutralSpans();
     $recorder = app(Recorder::class);
 
     $recorder->start('run', 'invoke_agent', null, []);
@@ -239,7 +238,7 @@ it('a flush closes open children before their parent, so no abandoned child ends
 
     $recorder->flush();
 
-    $spans = array_column($transport->spans, null, 'span_id');
+    $spans = array_column($exporter->spans, null, 'span_id');
 
     expect($spans)->toHaveCount(5)
         ->and(array_unique(array_column($spans, 'status')))->toBe(['abandoned']);
@@ -511,7 +510,7 @@ it('a failed run closes its open children deepest first, a re-started key too, s
             return $this->monotonicNow += 1_000;
         }
     });
-    $transport = $this->captureNeutralSpans();
+    $exporter = $this->captureNeutralSpans();
     $recorder = app(Recorder::class);
 
     $recorder->start('other', 'invoke_agent', null, []);
@@ -532,7 +531,7 @@ it('a failed run closes its open children deepest first, a re-started key too, s
 
     $recorder->flush();
 
-    $spans = array_column($transport->spans, null, 'span_id');
+    $spans = array_column($exporter->spans, null, 'span_id');
     $run = array_values(array_filter($spans, fn (array $span) => $span['status'] === 'error'))[0];
 
     expect($spans)->toHaveCount(9)

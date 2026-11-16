@@ -51,9 +51,9 @@ function packageFiles(array $folders): array
     return $files;
 }
 
-arch('Capture uses nothing from Transport or Export')
+arch('Capture uses nothing from Export: it hands finished trees to the Transport drain')
     ->expect('Anantrp\Refract\Capture')
-    ->not->toUse(['Anantrp\Refract\Transport', 'Anantrp\Refract\Export']);
+    ->not->toUse('Anantrp\Refract\Export');
 
 arch('Transport uses only Contracts and Support from Refract (the Exporter contract is in Contracts)')
     ->expect('Anantrp\Refract\Transport')
