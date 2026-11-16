@@ -3,9 +3,12 @@
 namespace Workbench\App;
 
 use InvalidArgumentException;
+use Laravel\Ai\Approvals\Decision;
+use Laravel\Ai\Approvals\Decisions;
 use OpenTelemetry\API\Trace\Span;
 use OpenTelemetry\API\Trace\SpanContext;
 use OpenTelemetry\API\Trace\TraceFlags;
+use Workbench\App\Ai\Agents\AlarmAgent;
 use Workbench\App\Ai\Agents\BrokenClockAgent;
 use Workbench\App\Ai\Agents\ChatAgent;
 use Workbench\App\Ai\Agents\SupervisorAgent;
@@ -59,6 +62,8 @@ class Scenarios
             'L6' => $this->l6(...),
             'E10' => $this->e10(...),
             'L12' => $this->l12(...),
+            'A1' => $this->a1(...),
+            'A2' => $this->a2(...),
             default => throw new InvalidArgumentException("No scenario [{$name}] yet."),
         };
 
@@ -115,6 +120,33 @@ class Scenarios
         fwrite(STDERR, 'sleeping 30 s, trace '.Span::getCurrent()->getContext()->getTraceId().PHP_EOL);
 
         sleep(30);
+    }
+
+    /**
+     * A run that pauses for approval of a tool call. The request is an
+     * event on the run span, which the tree does not show. The history is
+     * the app's own (no saved conversation), as the SDK requires to resume.
+     */
+    protected function a1(): void
+    {
+        AlarmAgent::fakeWithApproval();
+
+        AlarmAgent::make()->withMessages([])->prompt('Wake me at 7.');
+    }
+
+    /**
+     * A run that pauses for approval, then a run resumed with the decision.
+     * The resumed run runs the approved tool, then takes its next step.
+     */
+    protected function a2(): void
+    {
+        AlarmAgent::fakeWithApproval();
+
+        $asked = AlarmAgent::make()->withMessages([])->prompt('Wake me at 7.');
+
+        AlarmAgent::make()
+            ->withMessages($asked->messages->all())
+            ->prompt(Decisions::from(['call_1' => Decision::approve()]));
     }
 
     /**

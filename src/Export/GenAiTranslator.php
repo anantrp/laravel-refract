@@ -326,6 +326,7 @@ class GenAiTranslator
                 'approval_resolved' => ['laravel.ai.tool_approval.resolved', [
                     'gen_ai.tool.name' => $call['tool'] ?? null,
                     'gen_ai.tool.call.id' => $call['tool_call_id'] ?? null,
+                    'laravel.ai.tool_approval.action' => $call['action'] ?? null,
                     'laravel.ai.tool_approval.approved' => $call['approved'] ?? null,
                 ]],
                 default => [$this->string($event, 'kind'), []],

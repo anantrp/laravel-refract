@@ -1,0 +1,6 @@
+environment: local
+invoke_agent AlarmAgent  ok
+  chat fake  ok
+invoke_agent AlarmAgent  ok
+  SetAlarm  ok
+  chat fake  ok

@@ -71,13 +71,6 @@ class Recorder
     protected array $finished = [];
 
     /**
-     * The index in the finished spans of each span ended since the last flush, keyed by its capture key.
-     *
-     * @var array<string, int>
-     */
-    protected array $ended = [];
-
-    /**
      * The neutral spans a send gave back, to go first in the next send.
      *
      * @var list<array<string, mixed>>
@@ -104,9 +97,9 @@ class Recorder
     protected array $resets = [];
 
     /**
-     * The callbacks run when a top-level run ends, given the run's capture key.
+     * The callbacks run when a top-level run ends.
      *
-     * @var list<Closure(string): mixed>
+     * @var list<Closure(): mixed>
      */
     protected array $runEnds = [];
 
@@ -293,15 +286,13 @@ class Recorder
             'status_message' => $message,
         ];
 
-        $this->ended[$key] = array_key_last($this->finished);
-
         if (! $this->treeEnded && ! $this->parentOpen($span)) {
             $this->treeEnded = true;
         }
 
         if ($span['kind'] === 'invoke_agent' && $status !== 'abandoned' && ! $this->hasParent($span)) {
             foreach ($this->runEnds as $callback) {
-                $callback($key);
+                $callback();
             }
         }
     }
@@ -345,32 +336,15 @@ class Recorder
     }
 
     /**
-     * Add an event to the given span.
-     *
-     * A span that already ended keeps the event at its end, so the event
-     * stays inside the span's time.
+     * Add an event to the given open span. A span that is not open takes no events.
      *
      * @param  array<string, mixed>  $call
      */
     public function event(string $key, string $kind, array $call = []): void
     {
-        $time = $this->monotonic();
-
         if (isset($this->open[$key])) {
-            $this->open[$key]['events'][] = ['kind' => $kind, 'time' => $time, 'call' => $call];
-
-            return;
+            $this->open[$key]['events'][] = ['kind' => $kind, 'time' => $this->monotonic(), 'call' => $call];
         }
-
-        $index = $this->ended[$key] ?? null;
-
-        if ($index === null) {
-            return;
-        }
-
-        $span = $this->finished[$index];
-        $span['events'][] = ['kind' => $kind, 'time' => min($time, $span['end']), 'call' => $call];
-        $this->finished[$index] = $span;
     }
 
     /**
@@ -428,11 +402,11 @@ class Recorder
     }
 
     /**
-     * Run the given callback when a top-level run ends, with the run's capture key.
+     * Run the given callback when a top-level run ends.
      *
      * A run closed as abandoned does not count.
      *
-     * @param  Closure(string): mixed  $callback
+     * @param  Closure(): mixed  $callback
      */
     public function whenRunEnds(Closure $callback): void
     {
@@ -458,18 +432,16 @@ class Recorder
     }
 
     /**
-     * Hand every finished span tree to the transport now, the held run's too, leaving every open span and the state kept between flushes alone.
+     * Hand every finished span tree to the transport now, leaving every open span and the state kept between flushes alone.
      *
-     * Used when the buffer is full: by then the SDK has added its events to
-     * the run that ended last, since a new span is starting. It sends even
-     * while waiting after a send that gave spans back: else new spans are
-     * dropped. A failed try leaves the buffer full of kept spans: the next
-     * try comes at the first new span after an open top-level run ends or
-     * after the wait is over.
+     * Used when the buffer is full. It sends even while waiting after a
+     * send that gave spans back: else new spans are dropped. A failed try
+     * leaves the buffer full of kept spans: the next try comes at the first
+     * new span after an open top-level run ends or after the wait is over.
      */
     public function flushAllFinished(): void
     {
-        $this->send($this->sendablePositions(null));
+        $this->send($this->sendablePositions());
     }
 
     /**
@@ -478,12 +450,11 @@ class Recorder
      * A span tree is a top-level span and every span under it, sub-agent
      * runs included. It is finished when none of its spans is open. The
      * flush runs only when the finished trees hold PARTIAL_SPANS spans, or
-     * PARTIAL_INTERVAL passed since the last send. The tree of the given
-     * span is held for the next send, as the SDK adds events to a run right
-     * after it ends. Nothing is sent while waiting after a send that gave
-     * spans back (a full buffer still sends, see flushAllFinished()).
+     * PARTIAL_INTERVAL passed since the last send. Nothing is sent while
+     * waiting after a send that gave spans back (a full buffer still sends,
+     * see flushAllFinished()).
      */
-    public function flushFinished(string $heldKey): void
+    public function flushFinished(): void
     {
         if ($this->waiting()) {
             return;
@@ -495,7 +466,7 @@ class Recorder
             return;
         }
 
-        $positions = $this->sendablePositions($heldKey);
+        $positions = $this->sendablePositions();
 
         if (! $due && count($positions) < self::PARTIAL_SPANS) {
             return;
@@ -543,7 +514,7 @@ class Recorder
             $batch = [...$this->kept, ...$this->batch(array_values(array_intersect_key($this->finished, array_flip($positions))))];
         } finally {
             $this->kept = [];
-            $this->forget($positions);
+            $this->finished = array_values(array_diff_key($this->finished, array_flip($positions)));
             $this->lastSend = $this->monotonic();
         }
 
@@ -573,11 +544,11 @@ class Recorder
     }
 
     /**
-     * Get the positions in the finished spans of every finished span tree, except the tree of the given span.
+     * Get the positions in the finished spans of every finished span tree.
      *
      * @return list<int>
      */
-    protected function sendablePositions(?string $heldKey): array
+    protected function sendablePositions(): array
     {
         $parents = [];
 
@@ -611,12 +582,6 @@ class Recorder
             $held[$root($span['span_id'])] = true;
         }
 
-        $index = $heldKey === null ? null : ($this->ended[$heldKey] ?? null);
-
-        if ($index !== null) {
-            $held[$root($this->finished[$index]['span_id'])] = true;
-        }
-
         $positions = [];
 
         foreach ($this->finished as $position => $span) {
@@ -626,29 +591,6 @@ class Recorder
         }
 
         return $positions;
-    }
-
-    /**
-     * Remove the finished spans at the given positions, keeping the index of the others.
-     *
-     * @param  list<int>  $positions
-     */
-    protected function forget(array $positions): void
-    {
-        $kept = array_diff_key($this->finished, array_flip($positions));
-        $moved = array_flip(array_keys($kept));
-
-        $this->finished = array_values($kept);
-
-        $ended = [];
-
-        foreach ($this->ended as $key => $position) {
-            if (isset($moved[$position])) {
-                $ended[$key] = $moved[$position];
-            }
-        }
-
-        $this->ended = $ended;
     }
 
     /**
@@ -673,7 +615,6 @@ class Recorder
             $this->waitUntil = null;
             $this->open = [];
             $this->finished = [];
-            $this->ended = [];
             $this->dropped = [];
             $this->treeEnded = true;
 

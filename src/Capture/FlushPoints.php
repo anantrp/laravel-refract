@@ -53,7 +53,7 @@ class FlushPoints
         $events->listen(CommandStarting::class, fn (CommandStarting $event) => $this->guard(fn () => $this->commandStarting($event)));
         $events->listen(CommandFinished::class, fn (CommandFinished $event) => $this->guard(fn () => $this->commandFinished($event)));
 
-        $this->recorder->whenRunEnds(fn (string $key) => $this->guard(fn () => $this->runEnded($key)));
+        $this->recorder->whenRunEnds(fn () => $this->guard($this->runEnded(...)));
         $this->recorder->whenFull(fn () => $this->guard($this->bufferFull(...)));
     }
 
@@ -82,10 +82,10 @@ class FlushPoints
      *
      * A web request sends once, after the response.
      */
-    public function runEnded(string $key): void
+    public function runEnded(): void
     {
         if ($this->app->runningInConsole()) {
-            $this->recorder->flushFinished($key);
+            $this->recorder->flushFinished();
         }
     }
 

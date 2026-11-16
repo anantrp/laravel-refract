@@ -640,25 +640,34 @@ it('while one open run holds the full buffer, dropped spans do not rescan the bu
         $fulls++;
     });
 
+    // Two open runs share the buffer, so neither reaches the per-run cap.
+    $recorder->start('run:other', 'invoke_agent', null, []);
+
+    for ($i = 0; $i < 299; $i++) {
+        $recorder->start("tool:other:{$i}", 'execute_tool', 'run:other', []);
+        $recorder->end("tool:other:{$i}");
+    }
+
     $recorder->start('run:long', 'invoke_agent', null, []);
 
-    for ($i = 0; $i < 2_999; $i++) {
+    for ($i = 0; $i < 2_699; $i++) {
         $recorder->start("tool:{$i}", 'execute_tool', 'run:long', []);
         $recorder->end("tool:{$i}");
     }
 
-    // 2,000 dropped starts, and no tree could finish while the run stays open.
+    // 2,000 dropped starts, and no tree could finish while the runs stay open.
     expect($fulls)->toBe(1)
         ->and($transport->spans)->toBe([]);
 
     // A run ending can free the buffer, so the next full start tries again.
-    $recorder->end('run:long');
+    $recorder->end('run:other');
     $recorder->start('run:next', 'invoke_agent', null, []);
     $recorder->end('run:next');
 
     expect($fulls)->toBe(2)
-        ->and($transport->spans)->toHaveCount(1_000);
+        ->and($transport->spans)->toHaveCount(300);
 
+    $recorder->end('run:long');
     $recorder->flush();
 
     expect($transport->spans)->toHaveCount(1_001);
@@ -798,9 +807,9 @@ it('a finished run is sent at the end of the next top-level run once 5 s passed 
     $recorder->monotonicNow += $second;
     runTimeAgent();
 
-    // The run that just ended stays for the next send, so events the SDK adds right after it are kept.
+    // The run that just ended goes with the runs before it.
     expect(batches())->toHaveCount(1)
-        ->and(batches()[0])->toHaveCount(8);
+        ->and(batches()[0])->toHaveCount(12);
 
     $recorder->monotonicNow += 4 * $second;
     runTimeAgent();
@@ -810,7 +819,7 @@ it('a finished run is sent at the end of the next top-level run once 5 s passed 
     $recorder->flush();
 
     expect(batches())->toHaveCount(2)
-        ->and(batches()[1])->toHaveCount(8);
+        ->and(batches()[1])->toHaveCount(4);
 });
 
 it('a web request does not send while it runs, it sends once after the response', function () {
@@ -858,9 +867,9 @@ it('a sub-agent run ending does not send its own tree away from its parent run',
 it('only a top-level run ending fires the run-end send check, a sub-agent run ending does not', function () {
     $this->captureNeutralSpans();
     $recorder = app(Recorder::class);
-    $ended = [];
-    $recorder->whenRunEnds(function (string $key) use (&$ended) {
-        $ended[] = $key;
+    $ended = 0;
+    $recorder->whenRunEnds(function () use (&$ended) {
+        $ended++;
     });
 
     $recorder->start('run:parent', 'invoke_agent', null, []);
@@ -868,15 +877,15 @@ it('only a top-level run ending fires the run-end send check, a sub-agent run en
     $recorder->start('run:sub', 'invoke_agent', 'tool:sub', []);
     $recorder->end('run:sub');
 
-    expect($ended)->toBe([]);
+    expect($ended)->toBe(0);
 
     $recorder->end('tool:sub');
     $recorder->end('run:parent');
 
-    expect($ended)->toBe(['run:parent']);
+    expect($ended)->toBe(1);
 });
 
-it('runs under 1,000 spans each never hit the cap in a console process, the held run is sent when the buffer is full', function (int $runs, int $size) {
+it('runs under 1,000 spans each never hit the cap in a console process', function (int $runs, int $size) {
     $transport = $this->captureNeutralSpans();
     Diagnostics::reset();
     Log::swap($log = new WarningLog);
@@ -1170,7 +1179,7 @@ it('a send while a command runs that the destination cannot take now keeps the s
     $sent = [];
 
     Artisan::command('refract-test:many', function () use ($recorder, $second, &$sent) {
-        // One run a second: the run at 5 s sends the 4 runs before it, and the destination answers 503.
+        // One run a second: the run at 5 s sends itself and the 4 runs before it, and the destination answers 503.
         for ($i = 0; $i < 5; $i++) {
             $recorder->monotonicNow += $second;
             runTimeAgent();
@@ -1199,7 +1208,7 @@ it('a send while a command runs that the destination cannot take now keeps the s
     $spans = deliveredSpans();
 
     expect($sent)->toBe([1, 1, 2])
-        ->and(Http::recorded())->toHaveCount(3)
+        ->and(Http::recorded())->toHaveCount(2)
         ->and($spans)->toHaveCount(4 * 137)
         ->and(array_unique(array_column($spans, 'spanId')))->toHaveCount(4 * 137)
         ->and(array_map(fn (array $span) => Otlp::attributes($span)['laravel.ai.abandoned'] ?? false, $spans))->not->toContain(true)
@@ -1275,8 +1284,8 @@ it('a send while a command runs that the destination rejects is dropped with its
 
     $spans = deliveredSpans();
 
-    expect($spans)->toHaveCount(40 - 16)
-        ->and(array_unique(array_column($spans, 'spanId')))->toHaveCount(40 - 16)
+    expect($spans)->toHaveCount(40 - 20)
+        ->and(array_unique(array_column($spans, 'spanId')))->toHaveCount(40 - 20)
         ->and($log->warnings)->toHaveCount(1)
         ->and($log->warnings[0])->toContain('HTTP 400');
 });
@@ -1296,13 +1305,13 @@ it('when one part of a send gets through and the next cannot, only the second pa
     };
 
     $run('A');
-    $run('B');
     $recorder->monotonicNow += 5 * $second;
-    $run('C');
+    $run('B');
 
     expect(Http::recorded())->toHaveCount(2);
 
     $recorder->monotonicNow += 5 * $second;
+    $run('C');
     $run('D');
     $recorder->flush();
 
@@ -1335,14 +1344,14 @@ it('when the parts of one send fail with and without Retry-After, the next send 
 
     // At 5 s, A and B are sent in two parts: one gets 429 Retry-After 60, the other 503.
     $run('A');
-    $run('B');
     $recorder->monotonicNow = 5 * $sec;
-    $run('C');
+    $run('B');
 
     expect(Http::recorded())->toHaveCount(2);
 
     // Past the 5 s rule, but inside the 60 s the destination asked for: no send.
     $recorder->monotonicNow = 10 * $sec;
+    $run('C');
     $run('D');
     $recorder->monotonicNow = 65 * $sec - 1;
     $run('E');
@@ -1388,17 +1397,18 @@ it('when a part of a send cannot reach the destination, the later parts of that 
 
     // At 5 s, A and B are due in two parts. The first part cannot connect, so B is not tried.
     $run('A');
-    $run('B');
     $recorder->monotonicNow = 5 * $sec;
-    $run('C');
+    $run('B');
 
     expect($tries)->toBe(1);
 
     // After the wait, A, B and C go out, one part each.
     $recorder->monotonicNow = 10 * $sec;
-    $run('D');
+    $run('C');
 
     expect($tries)->toBe(4);
+
+    $run('D');
 
     $recorder->flush();
 
@@ -1428,9 +1438,8 @@ it('a part that reached the destination but timed out does not stop the later pa
     };
 
     $run('A');
-    $run('B');
     $recorder->monotonicNow = 5 * $sec;
-    $run('C');
+    $run('B');
 
     expect($calls)->toBe($tries);
 })->with([
@@ -1460,7 +1469,7 @@ it('a full flush that delivers the kept spans ends the wait, the next job sends 
     expect(Http::recorded())->toHaveCount(2)
         ->and(Http::recorded()[1][1]->successful())->toBeTrue();
 
-    // Job 2 on the same worker: runs 6 s apart send at their run end again (each run end holds its own run).
+    // Job 2 on the same worker: runs 6 s apart send at their run end again, each its own run.
     $counts = [];
 
     foreach ([11, 17, 23] as $t) {
@@ -1473,7 +1482,7 @@ it('a full flush that delivers the kept spans ends the wait, the next job sends 
 
     $spans = deliveredSpans();
 
-    expect($counts)->toBe([2, 3, 4])
+    expect($counts)->toBe([3, 4, 5])
         ->and($spans)->toHaveCount(32)
         ->and(array_unique(array_column($spans, 'spanId')))->toHaveCount(32)
         ->and($log->warnings)->toHaveCount(1)

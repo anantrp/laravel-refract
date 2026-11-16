@@ -121,7 +121,7 @@ invoke_agent SupportAgent
 
 - **Sub-agents.** An agent called from a tool nests under that tool's span, in the same trace. Its run is named after that tool. It uses the session and participant of its parent run.
 - **Failover.** When a provider fails and the next one answers, there is still one run span. It shows the provider and model that answered. The failed attempt is a `laravel.ai.failover` event with its provider, model and exception class.
-- **Tool approvals.** Requests and decisions are `laravel.ai.tool_approval.requested` and `laravel.ai.tool_approval.resolved` events on the run span. A run resumed from approvals records no prompt, since none was sent.
+- **Tool approvals.** A run that pauses for approval has a `laravel.ai.tool_approval.requested` event per tool call, with the tool name and call id. A run resumed from approvals has a `laravel.ai.tool_approval.resolved` event per decision, with the call id, `laravel.ai.tool_approval.action` (`approve`, `reject` or `edit`) and `laravel.ai.tool_approval.approved`. The tool name is there when the call is in the messages the resumed prompt was given; a conversation the SDK loads from its store is not read. A decision for every other call has the call id `*`. A run resumed from approvals records no prompt, since none was sent.
 - **Streams.** A stream read to the end gives the same tree as `prompt()`. A stream read again after it stopped is a separate run.
 - **Abandoned spans.** A span still open when Refract exports (for example, a stream the app stopped reading) is closed as abandoned. It has no OTel status and the attribute `laravel.ai.abandoned=true`. Langfuse shows it as a warning with the message `abandoned`.
 - **Errors.** A run, model call or tool that throws gets status `error` and the attribute `error.type`, both the exception class. Your app gets the same exception. The exception message is never recorded.
@@ -426,7 +426,6 @@ Context::add('trigger', 'schedule');
 - Spans not yet sent are lost when the worker kills a job at its `timeout`. They are also lost when a command ends by a signal, `exit()` or `dd()`.
 - On `beanstalkd`, Refract cannot push a job over the server's size limit (64 KB by default). It exports that job with `sync` instead, with no retry.
 - When a queue push throws after the job reached the queue, the batch is also exported with `sync`, so it can arrive twice.
-- An app listener on `AgentPrompted` can run another agent while the buffer is full. Then Refract can send a run before the SDK adds its tool approval events. Those events are then lost.
 
 ## Contributing
 
