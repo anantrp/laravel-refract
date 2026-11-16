@@ -91,8 +91,7 @@ class Drain
 
         foreach ($trees as $tree) {
             try {
-                $collector->push($tree);
-                $stored++;
+                $stored += $collector->push($tree) ? 1 : 0;
             } catch (Throwable $e) {
                 Diagnostics::warn('collect.error', 'Run trees could not be stored for the queue drain ('.$e::class.'). They were dropped.');
             }

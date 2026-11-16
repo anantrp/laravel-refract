@@ -217,19 +217,23 @@ class RedisCollector implements Collector
         protected int $maxBytes = self::MAX_BYTES,
     ) {}
 
-    public function push(array $tree): void
+    public function push(array $tree): bool
     {
         $payload = TreePayload::encode($tree);
 
         if ($payload === null) {
             Diagnostics::warn('collect.encode', 'A run tree could not be encoded for the store and was dropped.');
 
-            return;
+            return false;
         }
 
         if ($this->run(self::PUSH, $payload, $this->maxBytes) === 0) {
             Diagnostics::warn('collect.full', "The trace store is full ({$this->maxBytes} bytes): new run trees are dropped until the queue drain catches up.");
+
+            return false;
         }
+
+        return true;
     }
 
     public function claim(int $maxBytes, int $lease): array

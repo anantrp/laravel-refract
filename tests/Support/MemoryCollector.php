@@ -43,7 +43,7 @@ class MemoryCollector implements Collector
 
     public function __construct(public int $maxTrees = PHP_INT_MAX) {}
 
-    public function push(array $tree): void
+    public function push(array $tree): bool
     {
         $this->failIfTold();
 
@@ -54,10 +54,12 @@ class MemoryCollector implements Collector
         if (count($this->entries) >= $this->maxTrees) {
             Diagnostics::warn('collect.full', 'The trace store is full: new run trees are dropped.');
 
-            return;
+            return false;
         }
 
         $this->entries[$this->next++] = ['tree' => $tree, 'available_at' => 0, 'claimed_at' => null];
+
+        return true;
     }
 
     public function claim(int $maxBytes, int $lease): array

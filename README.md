@@ -171,7 +171,7 @@ Refract packs whole run trees (a run and every span under it, sub-agent runs inc
 
 Every request is gzipped and sent with `Content-Encoding: gzip`.
 
-On Langfuse, spans that start in the same millisecond are moved apart within each request. Siblings of a run tree that was split over two requests can still share a millisecond.
+On Langfuse, spans that start in the same millisecond are moved apart. A run tree split over several requests is moved apart as a whole before it is split, so its siblings stay in order across requests and later drains. Two top-level runs of one trace sent in different requests can still share a millisecond.
 
 ## Sending
 

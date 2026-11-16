@@ -267,8 +267,10 @@ class DrainTraces implements ShouldBeUniqueUntilProcessing, ShouldQueue
      * A tree cut part way through its requests is acked too, and only its
      * unsent spans are stored again, as a tree of their own: sending it
      * whole again would restart from its first request every time, so a
-     * tree too slow to send within one drain would never finish. When that
-     * push fails, the whole tree goes back instead and is sent again.
+     * tree too slow to send within one drain would never finish. The tree
+     * is acked only once its unsent spans are stored: when the store
+     * drops them (it is full) or fails, the whole tree goes back instead
+     * and is sent again, so no span is lost.
      *
      * @param  list<array-key>  $ids
      */
@@ -279,8 +281,9 @@ class DrainTraces implements ShouldBeUniqueUntilProcessing, ShouldQueue
 
         if ($result->rest !== [] && $rest !== []) {
             try {
-                $collector->push($result->rest);
-                $done[] = array_shift($rest);
+                if ($collector->push($result->rest)) {
+                    $done[] = array_shift($rest);
+                }
             } catch (Throwable $e) {
                 Diagnostics::warn('collect.error', 'The unsent spans of a tree could not be stored ('.$e::class.'). The whole tree will be sent again.');
             }

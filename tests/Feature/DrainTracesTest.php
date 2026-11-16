@@ -332,6 +332,23 @@ it('when the unsent spans of a cut tree cannot be stored, the whole tree goes ba
         ->and($this->log->warnings)->toHaveCount(1);
 });
 
+it('when a full store drops the unsent spans of a cut tree, the whole tree goes back to be sent again', function () {
+    $this->collector = new MemoryCollector(maxTrees: 2);
+    app()->instance(Collector::class, $this->collector);
+
+    foreach (['one', 'two'] as $name) {
+        $this->collector->push(drainTree($name));
+    }
+
+    $this->exporter->results = [ExportResult::unfinished(1, drainTree('two, rest'))];
+
+    drainNow();
+
+    expect($this->collector->releases)->toBe([[[2], 0]])
+        ->and($this->collector->size())->toBe(1)
+        ->and($this->collector->entries[2]['tree'][0]['call']['agent'])->toBe('two');
+});
+
 it('a drain killed by its worker is never failed: it is attempted again, however many times', function () {
     $this->loadMigrationsFrom(dirname(__DIR__, 2).'/vendor/orchestra/testbench-core/laravel/migrations');
     realQueue('database');
@@ -419,13 +436,13 @@ it('a store that fails on push drops the trees with one warning and dispatches n
 it('a push that fails drops only its tree: the rest are stored and the drain is dispatched, with one warning', function () {
     $collector = new class extends MemoryCollector
     {
-        public function push(array $tree): void
+        public function push(array $tree): bool
         {
             if ($tree[0]['call']['agent'] !== 'kept') {
                 throw new LogicException('Refract bug in the collector, SECRET');
             }
 
-            parent::push($tree);
+            return parent::push($tree);
         }
     };
     app()->instance(Collector::class, $collector);

@@ -546,7 +546,7 @@ it('a tree split over requests is done only once its last request is answered', 
     Http::assertSentCount(1);
     expect($result->isUnfinished())->toBeTrue()
         ->and($result->done)->toBe(1)
-        ->and($result->rest)->toBe(array_slice($big, 3));
+        ->and(array_column($result->rest, 'span_id'))->toBe(array_column(array_slice($big, 3), 'span_id'));
 });
 
 it('a split tree too slow to send in one export finishes over later ones, each span sent once', function () {
@@ -576,6 +576,48 @@ it('a split tree too slow to send in one export finishes over later ones, each s
         ->and($exports)->toBe(4)
         ->and($sent)->toHaveCount(5)
         ->and(array_unique($sent))->toHaveCount(5);
+});
+
+it('a split tree keeps tied siblings in order, in distinct milliseconds, inside their parent on Langfuse, across requests and later exports', function () {
+    bootExport();
+    $sent = [];
+    Http::fake(function ($request) use (&$sent) {
+        usleep(600_000);
+
+        foreach (json_decode(gzdecode($request->body()), true)['resourceSpans'][0]['scopeSpans'][0]['spans'] as $span) {
+            $sent[$span['spanId']] = $span;
+        }
+
+        return Http::response('', 200);
+    });
+
+    // Ten tool spans that start in the same nanosecond, too big for one request, with time for one request per export.
+    $tree = runTree(array_map(fn () => randomText(600_000), range(0, 9)));
+    $original = $tree;
+    $exports = 0;
+
+    do {
+        $result = app(Exporter::class)->export([$tree], 1.5);
+        $exports++;
+        $tree = $result->rest;
+    } while ($result->isUnfinished() && $exports < 10);
+
+    $run = $sent[$original[0]['span_id']];
+    $tools = array_map(fn (array $span) => $sent[$span['span_id']], array_slice($original, 1));
+    $milliseconds = array_map(fn (array $span) => intdiv((int) $span['startTimeUnixNano'], 1_000_000), $tools);
+    $sorted = $milliseconds;
+    sort($sorted);
+
+    expect($result->isOk())->toBeTrue()
+        ->and($exports)->toBeGreaterThanOrEqual(2)
+        ->and($sent)->toHaveCount(11)
+        ->and(array_unique($milliseconds))->toHaveCount(10)
+        ->and($milliseconds)->toBe($sorted);
+
+    foreach ($tools as $tool) {
+        expect((int) $tool['startTimeUnixNano'])->toBeGreaterThanOrEqual((int) $run['startTimeUnixNano'])
+            ->and((int) $tool['endTimeUnixNano'])->toBeLessThanOrEqual((int) $run['endTimeUnixNano']);
+    }
 });
 
 it('a cut between whole trees carries no unsent spans', function () {

@@ -80,12 +80,12 @@ class DatabaseCollector implements Collector
         protected int $maxBytes = self::MAX_BYTES,
     ) {}
 
-    public function push(array $tree): void
+    public function push(array $tree): bool
     {
         if ($this->database->transactionLevel() > 0) {
             Diagnostics::warn('collect.transaction', "A run tree ended inside an open database transaction on the trace store's connection [{$this->database->getName()}], and was dropped so it cannot affect that transaction. Give the database collector a connection of its own.");
 
-            return;
+            return false;
         }
 
         $payload = TreePayload::encode($tree);
@@ -93,7 +93,7 @@ class DatabaseCollector implements Collector
         if ($payload === null) {
             Diagnostics::warn('collect.encode', 'A run tree could not be encoded for the store and was dropped.');
 
-            return;
+            return false;
         }
 
         // Two pushes at once may both pass the check: the cap is exact to within one tree per process.
@@ -102,7 +102,7 @@ class DatabaseCollector implements Collector
 
             Diagnostics::warn('collect.full', "The trace store is full ({$this->maxBytes} bytes): new run trees are dropped until the queue drain catches up.");
 
-            return;
+            return false;
         }
 
         $this->table()->insert([
@@ -111,6 +111,8 @@ class DatabaseCollector implements Collector
             'available_at' => $this->currentTime(),
             'reserved_at' => null,
         ]);
+
+        return true;
     }
 
     public function claim(int $maxBytes, int $lease): array

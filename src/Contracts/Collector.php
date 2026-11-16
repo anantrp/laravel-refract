@@ -16,11 +16,13 @@ interface Collector
      * Add the given finished run tree, a list of neutral spans.
      *
      * A tree that would take the store over its cap is dropped and counted,
-     * with one warning, so the store never grows without bound.
+     * with one warning, so the store never grows without bound. Returns
+     * whether the tree was stored, so a caller replacing a stored tree
+     * keeps the old one when the new one was dropped.
      *
      * @param  list<array<string, mixed>>  $tree
      */
-    public function push(array $tree): void;
+    public function push(array $tree): bool;
 
     /**
      * Claim the trees that are due, in the order they became due, keyed by their id.

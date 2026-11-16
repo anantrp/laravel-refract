@@ -76,7 +76,7 @@ class HttpExporter implements Exporter
         $deadline = $within === null ? null : $this->seconds() + $within;
 
         try {
-            $requests = $this->requests($trees);
+            [$requests, $trees] = $this->requests($trees);
         } catch (Throwable $e) {
             Diagnostics::warn('export.error', 'Spans could not be exported ('.$e::class.'). The batch was dropped.');
 
@@ -144,13 +144,17 @@ class HttpExporter implements Exporter
      * Each request comes with the number of leading trees whose spans are
      * all in it or in the requests before it, and with the position of each
      * tree it carries spans of and the indexes of those spans in the tree.
+     * The trees come back too, a split tree with the times the platform
+     * prepared for it whole.
      *
      * @param  list<list<array<string, mixed>>>  $trees
-     * @return list<array{list<TranslatedSpan>, int, list<array{int, list<int>}>}>
+     * @return array{list<array{list<TranslatedSpan>, int, list<array{int, list<int>}>}>, list<list<array<string, mixed>>>}
      */
     protected function requests(array $trees): array
     {
         $budget = self::PART_LIMIT - strlen($this->encoder->encode([], $this->resource()));
+
+        [$units, $trees] = $this->units($trees, $budget);
 
         $requests = [];
         $request = [];
@@ -158,7 +162,7 @@ class HttpExporter implements Exporter
         $used = 0;
         $done = 0;
 
-        foreach ($this->units($trees, $budget) as [$spans, $size, $treesDone, $position, $indexes]) {
+        foreach ($units as [$spans, $size, $treesDone, $position, $indexes]) {
             if ($request !== [] && $used + 1 + $size > $budget) {
                 $requests[] = [$request, $done, $parts];
                 $request = [];
@@ -181,7 +185,7 @@ class HttpExporter implements Exporter
             $requests[] = [$request, $done, $parts];
         }
 
-        return $requests;
+        return [$requests, $trees];
     }
 
     /**
@@ -190,8 +194,14 @@ class HttpExporter implements Exporter
      * Each unit comes with the number of leading trees done once it is sent,
      * the position of its tree, and the indexes of its spans in that tree.
      *
+     * A split tree takes the times the platform prepared for it whole (a
+     * platform may move tied siblings apart), since each request is
+     * prepared on its own and would move its part alone. The
+     * neutral tree takes them too, so its unsent spans keep them in a
+     * later export.
+     *
      * @param  list<list<array<string, mixed>>>  $trees
-     * @return list<array{list<TranslatedSpan>, int, int, int, list<int>}>
+     * @return array{list<array{list<TranslatedSpan>, int, int, int, list<int>}>, list<list<array<string, mixed>>>}
      */
     protected function units(array $trees, int $budget): array
     {
@@ -199,7 +209,8 @@ class HttpExporter implements Exporter
 
         foreach ($trees as $position => $tree) {
             $spans = array_map($this->translator->translate(...), $tree);
-            $sizes = array_map($this->encoder->size(...), $this->platform->prepare($spans));
+            $prepared = $this->platform->prepare($spans);
+            $sizes = array_map($this->encoder->size(...), $prepared);
             $size = array_sum($sizes) + count($sizes) - 1;
 
             if ($size <= $budget) {
@@ -210,6 +221,8 @@ class HttpExporter implements Exporter
 
             Diagnostics::warn('export.split', 'A run tree is over the '.self::PART_LIMIT.' byte limit of one request. Its spans were sent in more than one request.');
 
+            $trees[$position] = $tree = array_map($this->withPreparedTimes(...), $tree, $prepared);
+            $spans = array_map($this->translator->translate(...), $tree);
             $last = array_key_last($spans);
 
             foreach ($spans as $index => $span) {
@@ -217,7 +230,34 @@ class HttpExporter implements Exporter
             }
         }
 
-        return $units;
+        return [$units, $trees];
+    }
+
+    /**
+     * Copy the start, end and event times the platform prepared onto the neutral span.
+     *
+     * @param  array<string, mixed>  $span
+     * @param  TranslatedSpan  $prepared
+     * @return array<string, mixed>
+     */
+    protected function withPreparedTimes(array $span, array $prepared): array
+    {
+        $span['start'] = $prepared['start'];
+        $span['end'] = $prepared['end'];
+
+        $events = is_array($span['events'] ?? null) ? array_values($span['events']) : [];
+
+        if (count($events) === count($prepared['events'])) {
+            foreach ($prepared['events'] as $index => $event) {
+                if (is_array($events[$index])) {
+                    $events[$index]['time'] = $event['time'];
+                }
+            }
+
+            $span['events'] = $events;
+        }
+
+        return $span;
     }
 
     /**
