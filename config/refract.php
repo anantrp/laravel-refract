@@ -78,11 +78,13 @@ return [
     |--------------------------------------------------------------------------
     |
     | Where the queue drain stores finished runs until a worker exports
-    | them. "redis" uses the Redis connection named under "collectors"
-    | (your default connection when it is null): use one that never evicts
-    | keys.
+    | them, on the connection named under "collectors" (your default one
+    | when it is null). "redis" needs a connection that never evicts keys.
+    | "database" needs the published migration, and a connection of its
+    | own: a run stored inside your DB::transaction() on the same
+    | connection is rolled back with it.
     |
-    | Supported: "redis"
+    | Supported: "redis", "database"
     |
     */
 
@@ -90,6 +92,10 @@ return [
 
     'collectors' => [
         'redis' => [
+            'connection' => null,
+        ],
+
+        'database' => [
             'connection' => null,
         ],
     ],

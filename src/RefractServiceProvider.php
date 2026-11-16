@@ -15,12 +15,14 @@ use Anantrp\Refract\Export\NullExporter;
 use Anantrp\Refract\Export\OtlpJson;
 use Anantrp\Refract\Export\PlatformFactory;
 use Anantrp\Refract\Support\Settings;
+use Anantrp\Refract\Transport\Collectors\DatabaseCollector;
 use Anantrp\Refract\Transport\Collectors\RedisCollector;
 use Anantrp\Refract\Transport\Drain;
 use Anantrp\Refract\Transport\DrainTraces;
 use Illuminate\Contracts\Events\Dispatcher;
 use Illuminate\Contracts\Foundation\Application;
 use Illuminate\Contracts\Redis\Factory as Redis;
+use Illuminate\Database\DatabaseManager as Database;
 use Illuminate\Support\ServiceProvider;
 
 class RefractServiceProvider extends ServiceProvider
@@ -61,7 +63,8 @@ class RefractServiceProvider extends ServiceProvider
             );
         });
 
-        $this->app->singleton(Collector::class, fn (Application $app) => match (Settings::choice('collector', ['redis'], 'redis')) {
+        $this->app->singleton(Collector::class, fn (Application $app) => match (Settings::choice('collector', ['redis', 'database'], 'redis')) {
+            'database' => new DatabaseCollector($app->make(Database::class)->connection(Settings::string('collectors.database.connection') ?: null)),
             default => new RedisCollector($app->make(Redis::class)->connection(Settings::string('collectors.redis.connection') ?: null)),
         });
 
@@ -90,6 +93,8 @@ class RefractServiceProvider extends ServiceProvider
     {
         if ($this->app->runningInConsole()) {
             $this->publishes([__DIR__.'/../config/refract.php' => config_path('refract.php')], 'refract-config');
+
+            $this->publishesMigrations([__DIR__.'/../database/migrations' => database_path('migrations')], 'refract-migrations');
         }
 
         if (! Settings::bool('enabled', true)) {
