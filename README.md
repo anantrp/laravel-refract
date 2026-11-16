@@ -447,6 +447,8 @@ vendor/bin/testbench refract:check R1
 
 `refract:check` runs the named scenario (one per file in `workbench/expected`), reads the trace from Langfuse, and compares it to `workbench/expected/{scenario}.txt`. It prints `PASS` or `FAIL`.
 
+`L2` runs with `REFRACT_DRAIN=queue`, so it needs Redis and the workbench's database queue: `refract:check L2` waits until the drain job is due, then runs `queue:work --queue=refract --stop-when-empty` before it reads Langfuse.
+
 ## License
 
 Refract is open-sourced software licensed under the [MIT license](LICENSE).

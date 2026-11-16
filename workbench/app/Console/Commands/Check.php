@@ -2,8 +2,11 @@
 
 namespace Workbench\App\Console\Commands;
 
+use Anantrp\Refract\Transport\DrainTraces;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Process;
+use Illuminate\Support\Sleep;
+use RuntimeException;
 use SebastianBergmann\Diff\Differ;
 use SebastianBergmann\Diff\Output\UnifiedDiffOutputBuilder;
 use Throwable;
@@ -42,6 +45,10 @@ class Check extends Command
                 return $this->failWith("scenario {$name} failed:\n".trim($scenario->output()."\n".$scenario->errorOutput()));
             }
 
+            if ($scenarios->drainsThroughQueue($name)) {
+                $this->drain($name, $scenarios);
+            }
+
             $lines = preg_split('/\R/', trim($scenario->output())) ?: [];
             $traceId = trim((string) end($lines));
 
@@ -66,6 +73,23 @@ class Check extends Command
         $this->line($differ->diff($expected."\n", $actual."\n"));
 
         return $this->failWith('tree does not match');
+    }
+
+    /**
+     * Run a worker on the refract queue until it is empty, once the drain job the scenario dispatched is due.
+     */
+    protected function drain(string $name, Scenarios $scenarios): void
+    {
+        Sleep::for(DrainTraces::DELAY + 1)->seconds();
+
+        $worker = Process::path(package_path())
+            ->env($scenarios->environment($name))
+            ->timeout(120)
+            ->run([PHP_BINARY, 'vendor/bin/testbench', 'queue:work', '--queue='.DrainTraces::QUEUE, '--stop-when-empty']);
+
+        if ($worker->failed()) {
+            throw new RuntimeException("the queue worker for {$name} failed:\n".trim($worker->output()."\n".$worker->errorOutput()));
+        }
     }
 
     protected function failWith(string $reason): int

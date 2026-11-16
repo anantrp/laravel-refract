@@ -28,8 +28,17 @@ class Scenarios
         return match ($name) {
             'X9' => ['APP_ENV' => 'Staging EU 1'],
             'E10' => ['OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT' => 'true'],
+            'L2' => ['REFRACT_DRAIN' => 'queue'],
             default => [],
         };
+    }
+
+    /**
+     * Determine if the scenario's runs leave through the queue drain, so a worker must export them.
+     */
+    public function drainsThroughQueue(string $name): bool
+    {
+        return ($this->environment($name)['REFRACT_DRAIN'] ?? null) === 'queue';
     }
 
     /**
@@ -41,6 +50,7 @@ class Scenarios
     {
         // L2 drains through the queue: the run is stored in Redis and exported by a worker
         // (vendor/bin/testbench queue:work --queue=refract). Its tree is the same as L1's.
+        // refract:check runs scenarios as console processes, where environment() sets it.
         return match ($name) {
             'L2' => ['refract.drain' => 'queue'],
             default => [],
