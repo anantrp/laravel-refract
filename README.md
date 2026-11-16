@@ -124,6 +124,7 @@ invoke_agent SupportAgent
 - **Tool approvals.** A run that pauses for approval has a `laravel.ai.tool_approval.requested` event per tool call, with the tool name and call id. A run resumed from approvals has a `laravel.ai.tool_approval.resolved` event per decision, with the call id, `laravel.ai.tool_approval.action` (`approve`, `reject` or `edit`) and `laravel.ai.tool_approval.approved`. The tool name is there when the call is in the messages the resumed prompt was given; a conversation the SDK loads from its store is not read. A decision for every other call has the call id `*`. A run resumed from approvals records no prompt, since none was sent.
 - **Streams.** A stream read to the end gives the same tree as `prompt()`. A stream read again after it stopped is a separate run.
 - **Abandoned spans.** A span still open when Refract exports (for example, a stream the app stopped reading) is closed as abandoned. It has no OTel status and the attribute `laravel.ai.abandoned=true`. Langfuse shows it as a warning with the message `abandoned`.
+- **Truncated runs.** One run records at most 1,000 spans, sub-agent runs included. Past that, its new spans are dropped with one warning, and the top-level run span gets `laravel.ai.truncated=true`. Other runs are not affected.
 - **Errors.** A run, model call or tool that throws gets status `error` and the attribute `error.type`, both the exception class. Your app gets the same exception. The exception message is never recorded.
 
 ### Attributes
@@ -141,6 +142,8 @@ invoke_agent SupportAgent
 | `session.id`, `gen_ai.conversation.id` | `invoke_agent`, from the SDK conversation id |
 | `laravel.ai.participant.type`, `laravel.ai.participant.id` | `invoke_agent`. See [Participant](#participant) |
 | `error.type` | any span that failed: the exception class |
+| `laravel.ai.abandoned` | any span closed as abandoned |
+| `laravel.ai.truncated` | a top-level span whose run lost spans to a cap |
 | your mapped `Context` keys | `invoke_agent`. See [Context Attributes](#context-attributes) |
 
 Every trace also carries the resource attributes `service.name` and `deployment.environment.name`.
@@ -408,7 +411,7 @@ Context::add('trigger', 'schedule');
 - The buffer holds at most 1,000 spans per request, job or command. Past that, Refract drops new spans and logs one warning.
 - A web request sends once, after the response.
 - A command, queue worker or tinker sends finished runs while the process keeps going. It sends when the finished runs hold 500 spans, or 5 seconds after the last send. Refract checks this when a top-level run ends. It also sends every time the buffer is full.
-- So in a console process, a run that ends loses no spans, unless that run alone has more than 1,000 spans.
+- So in a console process, a run that ends loses no spans, unless that run alone has more than 1,000 spans. Such a run is marked `laravel.ai.truncated=true`, as is a run that loses spans to a full buffer.
 - Refract sends a run only after the run ends. There is no background timer. A finished run waits for the end of the next run, a full buffer, or the end of the process.
 - Spans kept after a failed send count toward the cap. When the buffer is full of kept spans and the destination fails again, Refract drops new spans. It drops them until a later try works (see [Sends While a Console Process Runs](#sends-while-a-console-process-runs)).
 - A run dropped at the cap stays dropped. Its steps, tools and sub-agent runs are dropped too, even when room frees. So they never show up as traces of their own.

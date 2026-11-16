@@ -626,10 +626,78 @@ it('one run that makes 2,000 spans keeps 1,000, logs one warning, and memory sta
 
     expect($transport->spans)->toHaveCount(1_000)
         ->and(array_column(array_column(array_slice($transport->spans, 0, 999), 'call'), 'call'))->toBe(range(0, 998))
+        ->and(end($transport->spans)['call'])->toHaveKey('truncated', true)
         ->and($log->warnings)->toHaveCount(1)
         ->and($log->warnings[0])->toContain('1000 spans')
         // 1,000 more spans of over 2 KB each would add over 2 MB.
         ->and($grown)->toBeLessThan(100_000);
+});
+
+it('a run over the per-run cap is truncated and marked, the next run in the same process is complete', function () {
+    $this->refreshApplicationWithConfig(lifecycleConfig('sync'));
+    Http::fake();
+    Diagnostics::reset();
+    Log::swap($log = new WarningLog);
+    $recorder = app(Recorder::class);
+
+    $recorder->start('run:big', 'invoke_agent', null, ['agent' => 'Big']);
+
+    for ($i = 0; $i < 1_199; $i++) {
+        $recorder->start("tool:{$i}", 'execute_tool', 'run:big', ['tool' => 'Big']);
+        $recorder->end("tool:{$i}");
+    }
+
+    // Past the cap, a sub-agent run is dropped with the tool that called it, not made a trace of its own.
+    $recorder->start('tool:sub', 'execute_tool', 'run:big', ['tool' => 'Big']);
+    $recorder->start('run:sub', 'invoke_agent', 'tool:sub', ['agent' => 'Big']);
+
+    expect($recorder->isDropped('tool:sub'))->toBeTrue()
+        ->and($recorder->isDropped('run:sub'))->toBeTrue();
+
+    $recorder->end('run:sub');
+    $recorder->end('tool:sub');
+    $recorder->end('run:big');
+
+    runTimeAgent();
+    $recorder->flush();
+
+    $spans = deliveredSpans();
+    $big = array_values(array_filter($spans, fn (array $span) => str_contains($span['name'], 'Big')));
+    $next = array_values(array_filter($spans, fn (array $span) => ! str_contains($span['name'], 'Big')));
+    $runs = array_values(array_filter($spans, fn (array $span) => str_starts_with($span['name'], 'invoke_agent')));
+
+    expect($big)->toHaveCount(1_000)
+        ->and(array_column($runs, 'name'))->toBe(['invoke_agent Big', 'invoke_agent TimeAgent'])
+        ->and(Otlp::attributes($runs[0]))->toHaveKey('laravel.ai.truncated', true)
+        ->and(array_filter($big, fn (array $span) => isset(Otlp::attributes($span)['laravel.ai.truncated'])))->toHaveCount(1)
+        ->and($next)->toHaveCount(4)
+        ->and(array_filter($next, fn (array $span) => isset(Otlp::attributes($span)['laravel.ai.truncated'])))->toBe([])
+        ->and($log->warnings)->toHaveCount(1)
+        ->and($log->warnings[0])->toContain('laravel.ai.truncated');
+});
+
+it('a sub-agent run counts toward the cap of the run that called it', function () {
+    $transport = $this->captureNeutralSpans();
+    $recorder = app(Recorder::class);
+
+    $recorder->start('run:top', 'invoke_agent', null, ['agent' => 'Top']);
+    $recorder->start('tool:sub', 'execute_tool', 'run:top', ['agent' => 'Top']);
+    $recorder->start('run:sub', 'invoke_agent', 'tool:sub', ['agent' => 'Sub']);
+
+    for ($i = 0; $i < 1_100; $i++) {
+        $recorder->start("step:{$i}", 'chat', 'run:sub', ['agent' => 'Sub']);
+        $recorder->end("step:{$i}");
+    }
+
+    $recorder->end('run:sub');
+    $recorder->end('tool:sub');
+    $recorder->end('run:top');
+    $recorder->flush();
+
+    $truncated = array_values(array_filter($transport->spans, fn (array $span) => isset($span['call']['truncated'])));
+
+    expect($transport->spans)->toHaveCount(1_000)
+        ->and(array_column(array_column($truncated, 'call'), 'agent'))->toBe(['Top']);
 });
 
 it('while one open run holds the full buffer, dropped spans do not rescan the buffer', function () {
@@ -670,7 +738,11 @@ it('while one open run holds the full buffer, dropped spans do not rescan the bu
     $recorder->end('run:long');
     $recorder->flush();
 
-    expect($transport->spans)->toHaveCount(1_001);
+    // The run that lost spans to the full buffer is marked, the other is not.
+    $runs = array_values(array_filter($transport->spans, fn (array $span) => $span['kind'] === 'invoke_agent'));
+
+    expect($transport->spans)->toHaveCount(1_001)
+        ->and(array_map(fn (array $run) => $run['call']['truncated'] ?? false, $runs))->toBe([false, false, true]);
 });
 
 it('after a flush the buffer takes spans again', function () {

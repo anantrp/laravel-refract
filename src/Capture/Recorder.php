@@ -21,8 +21,8 @@ use OpenTelemetry\API\Trace\Span;
  * of that send, and go first in the next send. They count toward the cap.
  *
  * @phpstan-type SpanEvent array{kind: string, time: int, call: array<string, mixed>}
- * @phpstan-type OpenSpan array{trace_id: string, span_id: string, parent_span_id: ?string, kind: string, start: int, call: array<string, mixed>, content: array<string, mixed>, context: array<string, mixed>, context_from: ?string, events: list<SpanEvent>}
- * @phpstan-type FinishedSpan array{trace_id: string, span_id: string, parent_span_id: ?string, kind: string, start: int, end: int, status: string, status_message: ?string, call: array<string, mixed>, content: array<string, mixed>, context: array<string, mixed>, context_from: ?string, events: list<SpanEvent>}
+ * @phpstan-type OpenSpan array{trace_id: string, span_id: string, parent_span_id: ?string, root: string, kind: string, start: int, call: array<string, mixed>, content: array<string, mixed>, context: array<string, mixed>, context_from: ?string, events: list<SpanEvent>}
+ * @phpstan-type FinishedSpan array{trace_id: string, span_id: string, parent_span_id: ?string, root: string, kind: string, start: int, end: int, status: string, status_message: ?string, call: array<string, mixed>, content: array<string, mixed>, context: array<string, mixed>, context_from: ?string, events: list<SpanEvent>}
  */
 class Recorder
 {
@@ -35,6 +35,11 @@ class Recorder
      * The most spans the buffer holds between two flushes.
      */
     public const MAX_SPANS = 1_000;
+
+    /**
+     * The most spans one run tree records: its top-level span and every span under it.
+     */
+    public const MAX_RUN_SPANS = 1_000;
 
     /**
      * The finished spans that start a partial flush.
@@ -83,6 +88,20 @@ class Recorder
      * @var array<string, true>
      */
     protected array $dropped = [];
+
+    /**
+     * The spans recorded in each run tree still open, keyed by the span id of its top-level span.
+     *
+     * @var array<string, int>
+     */
+    protected array $sizes = [];
+
+    /**
+     * The span ids of the top-level spans whose trees reached the per-run cap, marked truncated when they end.
+     *
+     * @var array<string, true>
+     */
+    protected array $truncated = [];
 
     /**
      * The monotonic time before which the run-end send waits, after a send gave spans back.
@@ -138,10 +157,13 @@ class Recorder
      *
      * A span still open under the same key is closed as abandoned first.
      * A span started with a context source takes that span's context at
-     * flush, in place of its own. A full buffer drops the span. A span
-     * whose parent was dropped at the cap is dropped too, even once room
-     * frees, so it never becomes a new trace without its run. A parent that
-     * is not open for any other reason still falls back to the active trace.
+     * flush, in place of its own. A run tree that holds MAX_RUN_SPANS spans
+     * drops the span and is marked truncated, so one huge run never crowds
+     * out the others. A full buffer drops the span too, and marks the tree
+     * it would have joined. A span whose parent was dropped at either cap
+     * is dropped too, even once room frees, so it never becomes a new trace
+     * without its run. A parent that is not open for any other reason still
+     * falls back to the active trace.
      *
      * @param  array<string, mixed>  $call
      * @param  array<string, mixed>  $context
@@ -162,11 +184,28 @@ class Recorder
             }
         }
 
-        $full = $this->full();
+        if ($parentKey !== null && isset($this->dropped[$parentKey])) {
+            $this->dropped[$key] = true;
 
-        if ($full || ($parentKey !== null && isset($this->dropped[$parentKey]))) {
-            if ($full) {
-                Diagnostics::warn('buffer.full', 'The buffer holds '.self::MAX_SPANS.' spans, the most it can between two flushes. New spans are dropped until a send frees room.');
+            return;
+        }
+
+        $parent = $parentKey === null ? null : ($this->open[$parentKey] ?? null);
+
+        if ($parent !== null && ($this->sizes[$parent['root']] ?? 0) >= self::MAX_RUN_SPANS) {
+            Diagnostics::warn('run.truncated', 'A run reached '.self::MAX_RUN_SPANS.' spans, the most one run records. Its new spans are dropped and the run is marked laravel.ai.truncated.');
+
+            $this->truncated[$parent['root']] = true;
+            $this->dropped[$key] = true;
+
+            return;
+        }
+
+        if ($this->full()) {
+            Diagnostics::warn('buffer.full', 'The buffer holds '.self::MAX_SPANS.' spans, the most it can between two flushes. New spans are dropped until a send frees room.');
+
+            if ($parent !== null) {
+                $this->truncated[$parent['root']] = true;
             }
 
             $this->dropped[$key] = true;
@@ -176,19 +215,24 @@ class Recorder
 
         unset($this->dropped[$key]);
 
-        $parent = $parentKey === null ? null : ($this->open[$parentKey] ?? null);
+        $spanId = bin2hex(random_bytes(8));
 
         if ($parent !== null) {
             $traceId = $parent['trace_id'];
             $parentSpanId = $parent['span_id'];
+            $root = $parent['root'];
         } else {
             [$traceId, $parentSpanId] = $this->activeTrace();
+            $root = $spanId;
         }
+
+        $this->sizes[$root] = ($this->sizes[$root] ?? 0) + 1;
 
         $this->open[$key] = [
             'trace_id' => $traceId,
-            'span_id' => bin2hex(random_bytes(8)),
+            'span_id' => $spanId,
             'parent_span_id' => $parentSpanId,
+            'root' => $root,
             'kind' => $kind,
             'start' => $this->monotonic(),
             'call' => $call,
@@ -260,6 +304,8 @@ class Recorder
     /**
      * End the given span, merging in the call, context and content data known only at its end.
      *
+     * A top-level span whose tree reached the per-run cap is marked truncated.
+     *
      * @param  array<string, mixed>  $call
      * @param  array<string, mixed>  $context
      * @param  array<string, mixed>  $content
@@ -275,6 +321,12 @@ class Recorder
         }
 
         unset($this->open[$key]);
+
+        if ($span['root'] === $span['span_id']) {
+            $call = [...$call, ...(isset($this->truncated[$span['root']]) ? ['truncated' => true] : [])];
+
+            unset($this->sizes[$span['root']], $this->truncated[$span['root']]);
+        }
 
         $this->finished[] = [
             ...$span,
@@ -616,6 +668,8 @@ class Recorder
             $this->open = [];
             $this->finished = [];
             $this->dropped = [];
+            $this->sizes = [];
+            $this->truncated = [];
             $this->treeEnded = true;
 
             foreach ($this->resets as $reset) {
