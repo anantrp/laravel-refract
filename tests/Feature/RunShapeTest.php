@@ -14,6 +14,7 @@ use Laravel\Ai\Events\ToolApprovalResolved;
 use Laravel\Ai\Exceptions\RateLimitedException;
 use Laravel\Ai\Responses\Data\Meta;
 use Laravel\Ai\Responses\Data\TextUsage;
+use Laravel\Ai\Responses\Data\ToolCall;
 use Laravel\Ai\Responses\Data\ToolResult;
 use Laravel\Ai\Responses\TextResponse;
 use OpenTelemetry\API\Trace\Span;
@@ -481,20 +482,72 @@ it('a failed run and its failed step have error.type set to the exception class'
         ->and(Otlp::attributes($step))->toHaveKey('error.type', RuntimeException::class);
 });
 
-it('a failed tool has error.type set to the exception class', function () {
+it('a failed tool has error.type set to the exception class, and the run it recovered in has none', function () {
     BrokenToolAgent::fakeSteps();
 
-    rescue(fn () => BrokenToolAgent::make()->prompt('Use the tool.'), report: false);
+    BrokenToolAgent::make()->prompt('Use the tool.');
 
     app(Recorder::class)->flush();
 
     $spans = collect(Otlp::spans())->keyBy('name');
     $tool = $spans['execute_tool BrokenTool'];
+    $run = $spans['invoke_agent BrokenToolAgent'];
 
     expect($tool['status'])->toBe(['code' => 2, 'message' => LogicException::class])
         ->and(Otlp::attributes($tool))->toHaveKey('error.type', LogicException::class)
-        ->and(Otlp::attributes($spans['invoke_agent BrokenToolAgent']))->toHaveKey('error.type', LogicException::class)
+        ->and($run['status']['code'])->toBe(1)
+        ->and(Otlp::attributes($run))->not->toHaveKey('error.type')
         ->and(Otlp::body(Http::recorded()[0][0]))->not->toContain('secret detail');
+});
+
+it('a tool that throws is a failed tool span, and the run goes on to its next step and ends ok', function () {
+    BrokenToolAgent::fakeSteps();
+
+    $response = BrokenToolAgent::make()->prompt('Use the tool.');
+
+    app(Recorder::class)->flush();
+
+    $spans = Otlp::spans();
+
+    expect($response->text)->toBe('The tool failed.')
+        ->and(array_column($spans, 'name'))->toBe([
+            'invoke_agent BrokenToolAgent',
+            'chat fake',
+            'execute_tool BrokenTool',
+            'chat fake',
+        ]);
+
+    [$run, $first, $tool, $second] = $spans;
+
+    expect($tool['status']['code'])->toBe(2)
+        ->and($tool['parentSpanId'])->toBe($run['spanId'])
+        ->and($second['parentSpanId'])->toBe($run['spanId'])
+        ->and($second['startTimeUnixNano'] >= $tool['endTimeUnixNano'])->toBeTrue()
+        ->and($second['status']['code'])->toBe(1)
+        ->and($run['status']['code'])->toBe(1);
+});
+
+it('a sub-agent that throws is a failed run under its tool span, and the run that called it ends ok', function () {
+    SupervisorAgent::fake([
+        new ToolCall('call_1', 'TimeAgent', ['task' => 'What time is it?']),
+        'TimeAgent could not tell.',
+    ]);
+
+    TimeAgent::fake(fn () => throw new RuntimeException('down'));
+
+    SupervisorAgent::make()->prompt('Ask for the time.');
+
+    app(Recorder::class)->flush();
+
+    $spans = collect(Otlp::spans())->keyBy('name');
+    $run = $spans['invoke_agent SupervisorAgent'];
+    $tool = $spans['execute_tool TimeAgent'];
+    $subRun = $spans['invoke_agent TimeAgent'];
+
+    expect($subRun['parentSpanId'])->toBe($tool['spanId'])
+        ->and($subRun['status'])->toBe(['code' => 2, 'message' => RuntimeException::class])
+        ->and($run['status']['code'])->toBe(1)
+        ->and(Otlp::attributes($run))->not->toHaveKey('error.type');
 });
 
 it('a span that did not fail has no error.type', function () {
@@ -561,6 +614,32 @@ it('two runs in one trace each keep their own session.id', function () {
         ->and($second->conversationId)->not->toBe($first->conversationId)
         ->and($sessions)->toBe([$first->conversationId, $second->conversationId, $first->conversationId])
         ->and(Otlp::attributes($runs[1]))->toHaveKey('gen_ai.conversation.id', $second->conversationId);
+});
+
+it('the run that titles a new conversation nests under the run that started it, in the same trace', function () {
+    $this->loadMigrationsFrom(dirname(__DIR__, 2).'/vendor/laravel/ai/database/migrations');
+
+    config(['ai.conversations.generate_title' => true]);
+
+    ChatAgent::fake(['Hello.']);
+
+    $response = ChatAgent::make()->forUser((object) ['id' => 1])->prompt('Hello');
+
+    app(Recorder::class)->flush();
+
+    $runs = array_values(array_filter(Otlp::spans(), fn (array $span) => str_starts_with($span['name'], 'invoke_agent')));
+
+    expect($runs)->toHaveCount(2);
+
+    // The SDK titles with an anonymous agent, or with ConversationTitleAgent in later releases.
+    [$run, $title] = $runs;
+
+    expect($run['name'])->toBe('invoke_agent ChatAgent')
+        ->and($title['parentSpanId'])->toBe($run['spanId'])
+        ->and($title['traceId'])->toBe($run['traceId'])
+        ->and($title['startTimeUnixNano'] >= $run['startTimeUnixNano'])->toBeTrue()
+        ->and($title['endTimeUnixNano'] <= $run['endTimeUnixNano'])->toBeTrue()
+        ->and(Otlp::attributes($title))->toHaveKey('session.id', $response->conversationId);
 });
 
 it('a failed run of an agent that only uses the conversation trait keeps its session.id', function () {

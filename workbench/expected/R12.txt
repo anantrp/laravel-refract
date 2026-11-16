@@ -1,0 +1,5 @@
+environment: local
+invoke_agent BrokenClockAgent  ok
+  chat fake  ok
+  BrokenClock  error (RuntimeException)
+  chat fake  ok

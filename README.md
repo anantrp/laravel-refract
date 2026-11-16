@@ -10,7 +10,7 @@ Install it, set a few environment variables, and you are done. There is no API t
 
 - PHP 8.3 or higher
 - Laravel 12 or 13
-- `laravel/ai` 1.x
+- `laravel/ai` 1.4 or higher
 
 Refract uses `open-telemetry/api` only. It does not need the OpenTelemetry SDK.
 

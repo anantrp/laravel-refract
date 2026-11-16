@@ -6,6 +6,7 @@ use InvalidArgumentException;
 use OpenTelemetry\API\Trace\Span;
 use OpenTelemetry\API\Trace\SpanContext;
 use OpenTelemetry\API\Trace\TraceFlags;
+use Workbench\App\Ai\Agents\BrokenClockAgent;
 use Workbench\App\Ai\Agents\ChatAgent;
 use Workbench\App\Ai\Agents\SupervisorAgent;
 use Workbench\App\Ai\Agents\TimeAgent;
@@ -51,6 +52,8 @@ class Scenarios
             'R2' => $this->r2(...),
             'R4' => $this->r4(...),
             'R5' => $this->r5(...),
+            'R12' => $this->r12(...),
+            'R13' => $this->r13(...),
             'X1' => $this->x1(...),
             'X9' => $this->r1(...),
             'L6' => $this->l6(...),
@@ -149,19 +152,52 @@ class Scenarios
     }
 
     /**
-     * A saved run with a User participant (id 42).
+     * A tool that throws, and the run that goes on to its answer.
      */
-    protected function x1(): void
+    protected function r12(): void
     {
-        $user = User::query()->updateOrCreate(['id' => 42], [
-            'name' => 'Refract X1',
-            'email' => 'x1@refract.test',
-            'password' => 'not-used',
-        ]);
+        BrokenClockAgent::fakeTwoSteps();
+
+        BrokenClockAgent::make()->prompt('What time is it?');
+    }
+
+    /**
+     * A new conversation with title generation on: the SDK titles it with
+     * a run of its own, inside the saved run. The fake answers the title too.
+     */
+    protected function r13(): void
+    {
+        config(['ai.conversations.generate_title' => true]);
+
+        $user = $this->user();
 
         ChatAgent::fake(['Hello.']);
 
         ChatAgent::make()->forUser($user)->prompt('Hello');
+    }
+
+    /**
+     * A saved run with a User participant (id 42).
+     */
+    protected function x1(): void
+    {
+        $user = $this->user();
+
+        ChatAgent::fake(['Hello.']);
+
+        ChatAgent::make()->forUser($user)->prompt('Hello');
+    }
+
+    /**
+     * Get the User participant (id 42) of the saved-run scenarios.
+     */
+    protected function user(): User
+    {
+        return User::query()->updateOrCreate(['id' => 42], [
+            'name' => 'Refract X1',
+            'email' => 'x1@refract.test',
+            'password' => 'not-used',
+        ]);
     }
 
     /**

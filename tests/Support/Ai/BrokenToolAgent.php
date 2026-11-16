@@ -10,7 +10,7 @@ use Laravel\Ai\Responses\Data\ToolCall;
 use Stringable;
 
 /**
- * Calls BrokenTool, so the tool and then the run fail.
+ * Calls BrokenTool. The SDK hands the failure back to the model, so the run goes on.
  */
 #[Model('fake')]
 class BrokenToolAgent implements Agent, HasTools
@@ -18,13 +18,13 @@ class BrokenToolAgent implements Agent, HasTools
     use Promptable;
 
     /**
-     * Fake one step that calls BrokenTool.
+     * Fake two steps: one BrokenTool call, then the answer.
      */
     public static function fakeSteps(): void
     {
         static::fake([
             new ToolCall('call_1', 'BrokenTool', []),
-            'Never reached.',
+            'The tool failed.',
         ]);
     }
 
