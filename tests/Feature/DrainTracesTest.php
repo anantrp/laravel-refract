@@ -21,7 +21,7 @@ use Illuminate\Support\Facades\Queue;
  */
 
 beforeEach(function () {
-    $this->environmentConfig = ['refract.drain' => 'queue', 'cache.default' => 'array'];
+    $this->environmentConfig = ['refract.drain' => 'queue'];
     $this->exporter = $this->captureNeutralSpans();
     $this->collector = new MemoryCollector;
 
