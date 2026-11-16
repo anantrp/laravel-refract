@@ -8,6 +8,7 @@ providers:
 migrations:
   - vendor/orchestra/testbench-core/laravel/migrations
   - vendor/laravel/ai/database/migrations
+  - database/migrations
 
 workbench:
   start: '/'
