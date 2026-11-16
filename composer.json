@@ -36,6 +36,10 @@
         "pestphp/pest": "^3.0|^4.0",
         "pestphp/pest-plugin-laravel": "^3.0|^4.0"
     },
+    "suggest": {
+        "ext-redis": "Required to use the redis collector with the phpredis client (REFRACT_COLLECTOR=redis).",
+        "predis/predis": "Required to use the redis collector with the Predis client (REFRACT_COLLECTOR=redis)."
+    },
     "autoload": {
         "psr-4": {
             "Anantrp\\Refract\\": "src/"

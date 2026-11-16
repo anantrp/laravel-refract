@@ -4,38 +4,31 @@ namespace Anantrp\Refract\Export;
 
 use Anantrp\Refract\Contracts\Exporter;
 use Anantrp\Refract\Contracts\ExportResult;
-use Anantrp\Refract\Contracts\Parts;
-use Anantrp\Refract\Contracts\Reachability;
-use Anantrp\Refract\Contracts\RetryAfter;
 use Anantrp\Refract\Support\Diagnostics;
 use Anantrp\Refract\Support\Guard;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\RequestException;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
-use Illuminate\Support\Str;
 use Throwable;
 
 /**
  * Translates neutral spans, applies the platform's changes and posts OTLP JSON.
  *
- * A network error, 408, 429 or 5xx is retryable, and the transport decides
- * when to try again. Every other status is rejected and warned about here.
- * Redirects are never followed, so the headers never reach another host.
+ * Whole run trees are packed into requests of at most PART_LIMIT bytes.
+ * A network error, 408, 429 or 5xx is retryable: the export stops there
+ * and the caller decides what to do with the trees. Every other status is
+ * rejected and warned about here. Redirects are never followed, so the
+ * headers never reach another host.
  *
  * @phpstan-import-type TranslatedSpan from GenAiTranslator
  */
-class HttpExporter implements Exporter, Parts, Reachability, RetryAfter
+class HttpExporter implements Exporter
 {
     /**
      * The most bytes of OTLP JSON in one request, before gzip.
      */
     public const PART_LIMIT = 4_000_000;
-
-    /**
-     * The seconds to wait for the destination.
-     */
-    protected const TIMEOUT = 15;
 
     /**
      * The characters of a rejected response's body, or of a partial success message, put in the warning.
@@ -53,27 +46,12 @@ class HttpExporter implements Exporter, Parts, Reachability, RetryAfter
     protected const MAX_RETRY_AFTER = 300;
 
     /**
-     * The cURL errors raised before a connection to the destination is made.
+     * The fewest seconds left of an export's time limit for a request to be started.
      */
-    protected const CONNECT_ERRORS = [5, 6, 7, 35, 51, 60, 83, 90, 91, 96, 97, 98];
+    protected const MIN_REQUEST_SECONDS = 1;
 
     /**
-     * The cURL timeout messages that mean the connection was never made.
-     */
-    protected const CONNECT_TIMEOUTS = ['connection timed out', 'connection timeout', 'connection time-out', 'resolving timed out', 'name lookup timed out', 'ssl connection timeout', 'aborted due to timeout'];
-
-    /**
-     * The seconds the destination asked to wait after the last export, or null.
-     */
-    protected ?int $retryAfter = null;
-
-    /**
-     * Whether the last export could not connect to the destination.
-     */
-    protected bool $unreachable = false;
-
-    /**
-     * Create a new exporter instance.
+     * Create a new exporter instance that waits the given seconds for the destination.
      */
     public function __construct(
         protected Platform $platform,
@@ -81,93 +59,178 @@ class HttpExporter implements Exporter, Parts, Reachability, RetryAfter
         protected OtlpJson $encoder,
         protected string $environment,
         protected string $serviceName,
-        protected bool $compress = true,
+        protected int $timeout,
     ) {}
 
-    public function export(array $spans): ExportResult
+    /**
+     * Export the given trees, a request at a time, and stop at the first request the destination cannot take now.
+     *
+     * Given a time limit, each request waits at most what is left of it,
+     * and a request is not started with less than MIN_REQUEST_SECONDS
+     * left: the export is unfinished, with the trees whose every request
+     * was answered, and the unsent spans of a split tree that was cut
+     * part way, so a later export sends only those.
+     */
+    public function export(array $trees, ?float $within = null): ExportResult
     {
-        $this->retryAfter = null;
-        $this->unreachable = false;
+        $deadline = $within === null ? null : $this->seconds() + $within;
 
         try {
-            $translated = $this->platform->prepare(array_map($this->translator->translate(...), $spans));
-
-            $body = $this->encoder->encode($translated, $this->resource());
-
-            $headers = $this->platform->headers();
-            $compressed = $this->compress ? $this->gzip($body) : false;
-
-            if ($compressed !== false) {
-                $body = $compressed;
-                $headers['Content-Encoding'] = 'gzip';
-            }
-
-            // A redirect is never followed: it would send the headers to another host or turn the POST into a GET.
-            $response = Http::withHeaders($headers)
-                ->withoutRedirecting()
-                ->timeout(self::TIMEOUT)
-                ->withBody($body, 'application/json')
-                ->post($this->platform->endpoint());
-        } catch (ConnectionException $e) {
-            $this->unreachable = $this->beforeConnect($e);
-
-            return ExportResult::Retryable;
-        } catch (RequestException $e) {
-            $response = $e->response;
+            [$requests, $trees] = $this->requests($trees);
         } catch (Throwable $e) {
             Diagnostics::warn('export.error', 'Spans could not be exported ('.$e::class.'). The batch was dropped.');
 
-            return ExportResult::Rejected;
+            return ExportResult::rejected();
         }
 
-        return $this->result($response);
+        $result = ExportResult::ok();
+        $done = 0;
+        $answered = [];
+
+        foreach ($requests as [$spans, $treesDone, $parts]) {
+            $timeout = $this->timeout;
+
+            if ($deadline !== null) {
+                $left = $deadline - $this->seconds();
+
+                if ($left < self::MIN_REQUEST_SECONDS) {
+                    return ExportResult::unfinished($done, $this->unsent($trees[$done] ?? [], $answered[$done] ?? []));
+                }
+
+                $timeout = min($timeout, $left);
+            }
+
+            $sent = $this->post($spans, $timeout);
+
+            if ($sent->isRetryable()) {
+                return $sent;
+            }
+
+            if ($sent->isRejected()) {
+                $result = $sent;
+            }
+
+            foreach ($parts as [$position, $indexes]) {
+                $answered[$position] = [...$answered[$position] ?? [], ...$indexes];
+            }
+
+            $done = $treesDone;
+        }
+
+        return $result;
     }
 
-    public function parts(array $spans): array
+    /**
+     * Get the spans of a tree that no answered request carried, or none when no request carried any of them.
+     *
+     * @param  list<array<string, mixed>>  $tree
+     * @param  list<int>  $answered  The indexes in the tree of the spans an answered request carried.
+     * @return list<array<string, mixed>>
+     */
+    protected function unsent(array $tree, array $answered): array
     {
-        try {
-            $translated = $this->platform->prepare(array_map($this->translator->translate(...), $spans));
-            $budget = self::PART_LIMIT - strlen($this->encoder->encode([], $this->resource()));
-            $sizes = array_map($this->encoder->size(...), $translated);
-        } catch (Throwable) {
-            // export() warns about a batch it cannot translate or encode.
-            return [$spans];
-        }
+        return $answered === [] ? [] : array_values(array_diff_key($tree, array_flip($answered)));
+    }
 
-        // Each part is prepared again on its own, so it keeps the times the platform set for the whole batch.
-        $spans = array_map($this->withPreparedTimes(...), $spans, $translated);
+    /**
+     * Pack the given trees into the translated spans of each request.
+     *
+     * Whole trees are added to a request until the next one would take it
+     * over PART_LIMIT bytes of OTLP JSON. A tree too big for one request is
+     * the exception: its spans are packed one by one, with one warning,
+     * and a span too big for one request is sent alone. A tree is sized as
+     * the platform prepares it, since the platform may add attributes.
+     *
+     * Each request comes with the number of leading trees whose spans are
+     * all in it or in the requests before it, and with the position of each
+     * tree it carries spans of and the indexes of those spans in the tree.
+     * The trees come back too, a split tree with the times the platform
+     * prepared for it whole.
+     *
+     * @param  list<list<array<string, mixed>>>  $trees
+     * @return array{list<array{list<TranslatedSpan>, int, list<array{int, list<int>}>}>, list<list<array<string, mixed>>>}
+     */
+    protected function requests(array $trees): array
+    {
+        $budget = self::PART_LIMIT - strlen($this->encoder->encode([], $this->resource()));
 
+        [$units, $trees] = $this->units($trees, $budget);
+
+        $requests = [];
+        $request = [];
         $parts = [];
-        $part = [];
         $used = 0;
+        $done = 0;
 
-        foreach ($this->units($spans, $sizes, $budget) as $unit) {
-            $size = $this->bytes($unit, $sizes);
-
-            if ($part !== [] && $used + 1 + $size > $budget) {
-                $parts[] = $part;
-                $part = [];
+        foreach ($units as [$spans, $size, $treesDone, $position, $indexes]) {
+            if ($request !== [] && $used + 1 + $size > $budget) {
+                $requests[] = [$request, $done, $parts];
+                $request = [];
+                $parts = [];
             }
 
             if ($size > $budget) {
-                $request = $size + self::PART_LIMIT - $budget;
+                $bytes = $size + self::PART_LIMIT - $budget;
 
-                Diagnostics::warn('export.too_big', "A span makes a request of {$request} bytes of OTLP JSON, over the ".self::PART_LIMIT.' byte limit. It was sent alone; the destination may refuse it.');
+                Diagnostics::warn('export.too_big', "A span makes a request of {$bytes} bytes of OTLP JSON, over the ".self::PART_LIMIT.' byte limit. It was sent alone; the destination may refuse it.');
             }
 
-            $used = $part === [] ? $size : $used + 1 + $size;
-            $part = [...$part, ...$unit];
+            $used = $request === [] ? $size : $used + 1 + $size;
+            $request = [...$request, ...$spans];
+            $parts[] = [$position, $indexes];
+            $done = $treesDone;
         }
 
-        if ($part !== []) {
-            $parts[] = $part;
+        if ($request !== []) {
+            $requests[] = [$request, $done, $parts];
         }
 
-        return array_map(function (array $part) use ($spans) {
-            sort($part);
+        return [$requests, $trees];
+    }
 
-            return array_map(fn (int $index) => $spans[$index], $part);
-        }, $parts);
+    /**
+     * Get the units the given trees are packed by, with the bytes each takes in an encoded body: each tree that fits a request, and each span of a tree that does not.
+     *
+     * Each unit comes with the number of leading trees done once it is sent,
+     * the position of its tree, and the indexes of its spans in that tree.
+     *
+     * A split tree takes the times the platform prepared for it whole (a
+     * platform may move tied siblings apart), since each request is
+     * prepared on its own and would move its part alone. The
+     * neutral tree takes them too, so its unsent spans keep them in a
+     * later export.
+     *
+     * @param  list<list<array<string, mixed>>>  $trees
+     * @return array{list<array{list<TranslatedSpan>, int, int, int, list<int>}>, list<list<array<string, mixed>>>}
+     */
+    protected function units(array $trees, int $budget): array
+    {
+        $units = [];
+
+        foreach ($trees as $position => $tree) {
+            $spans = array_map($this->translator->translate(...), $tree);
+            $prepared = $this->platform->prepare($spans);
+            $sizes = array_map($this->encoder->size(...), $prepared);
+            $size = array_sum($sizes) + count($sizes) - 1;
+
+            if ($size <= $budget) {
+                $units[] = [$spans, $size, $position + 1, $position, array_keys($spans)];
+
+                continue;
+            }
+
+            Diagnostics::warn('export.split', 'A run tree is over the '.self::PART_LIMIT.' byte limit of one request. Its spans were sent in more than one request.');
+
+            $trees[$position] = $tree = array_map($this->withPreparedTimes(...), $tree, $prepared);
+            $spans = array_map($this->translator->translate(...), $tree);
+            $last = array_key_last($spans);
+
+            foreach ($spans as $index => $span) {
+                $units[] = [[$span], $sizes[$index], $index === $last ? $position + 1 : $position, $position, [$index]];
+            }
+        }
+
+        return [$units, $trees];
     }
 
     /**
@@ -198,72 +261,49 @@ class HttpExporter implements Exporter, Parts, Reachability, RetryAfter
     }
 
     /**
-     * Get the units a batch is packed into parts by, as span indexes: each
-     * run tree that fits a part, and each span of a tree that does not.
+     * Prepare, encode and post the given translated spans in one request, waiting the given seconds for the answer.
      *
-     * @param  list<array<string, mixed>>  $spans
-     * @param  list<int>  $sizes
-     * @return list<list<int>>
+     * @param  list<TranslatedSpan>  $spans
      */
-    protected function units(array $spans, array $sizes, int $budget): array
+    protected function post(array $spans, int|float $timeout): ExportResult
     {
-        $units = [];
+        try {
+            $body = $this->encoder->encode($this->platform->prepare($spans), $this->resource());
 
-        foreach ($this->trees($spans) as $tree) {
-            $size = $this->bytes($tree, $sizes);
+            $headers = $this->platform->headers();
+            // Always gzipped; on the rare failure the body goes plain.
+            $compressed = gzencode($body);
 
-            if ($size <= $budget) {
-                $units[] = $tree;
-            } else {
-                array_push($units, ...array_map(fn (int $index) => [$index], $tree));
+            if ($compressed !== false) {
+                $body = $compressed;
+                $headers['Content-Encoding'] = 'gzip';
             }
+
+            // A redirect is never followed: it would send the headers to another host or turn the POST into a GET.
+            $response = Http::withHeaders($headers)
+                ->withoutRedirecting()
+                ->timeout($timeout)
+                ->withBody($body, 'application/json')
+                ->post($this->platform->endpoint());
+        } catch (ConnectionException) {
+            return ExportResult::retryable();
+        } catch (RequestException $e) {
+            $response = $e->response;
+        } catch (Throwable $e) {
+            Diagnostics::warn('export.error', 'Spans could not be exported ('.$e::class.'). The batch was dropped.');
+
+            return ExportResult::rejected();
         }
 
-        return $units;
+        return $this->result($response);
     }
 
     /**
-     * Get the bytes the given spans take in an encoded body, with the commas between them.
-     *
-     * @param  list<int>  $indexes
-     * @param  list<int>  $sizes
+     * Get the monotonic clock in seconds.
      */
-    protected function bytes(array $indexes, array $sizes): int
+    protected function seconds(): float
     {
-        return array_sum(array_map(fn (int $index) => $sizes[$index], $indexes)) + count($indexes) - 1;
-    }
-
-    /**
-     * Get the run trees of a batch as span indexes, in the order each tree first appears.
-     *
-     * @param  list<array<string, mixed>>  $spans
-     * @return list<list<int>>
-     */
-    protected function trees(array $spans): array
-    {
-        $indexes = [];
-
-        foreach ($spans as $index => $span) {
-            if (is_string($span['span_id'] ?? null)) {
-                $indexes[$span['span_id']] ??= $index;
-            }
-        }
-
-        $trees = [];
-
-        foreach ($spans as $index => $span) {
-            $root = $index;
-            $seen = [];
-
-            while (is_string($parent = $spans[$root]['parent_span_id'] ?? null) && isset($indexes[$parent]) && ! isset($seen[$root])) {
-                $seen[$root] = true;
-                $root = $indexes[$parent];
-            }
-
-            $trees[$root][] = $index;
-        }
-
-        return array_values($trees);
+        return hrtime(true) / 1_000_000_000;
     }
 
     /**
@@ -281,6 +321,8 @@ class HttpExporter implements Exporter, Parts, Reachability, RetryAfter
 
     /**
      * Get the export result of the given response, and warn when it is rejected.
+     *
+     * A 429 or 503 carries its Retry-After seconds, the two statuses that send one.
      */
     protected function result(Response $response): ExportResult
     {
@@ -288,67 +330,30 @@ class HttpExporter implements Exporter, Parts, Reachability, RetryAfter
             // The batch was delivered, so a failure here must not read as a dropped batch.
             Guard::run('export.partial', 'to read a partial success answer', fn () => $this->warnOfRefusedSpans($response));
 
-            return ExportResult::Ok;
+            return ExportResult::ok();
         }
 
         $status = $response->status();
 
-        if ($status === 408 || $status === 429 || $status >= 500) {
-            $this->retryAfter = $status === 429 || $status === 503 ? $this->retryAfterSeconds($response->header('Retry-After')) : null;
+        if ($status === 429 || $status === 503) {
+            return ExportResult::retryable($this->retryAfterSeconds($response->header('Retry-After')));
+        }
 
-            return ExportResult::Retryable;
+        if ($status === 408 || $status >= 500) {
+            return ExportResult::retryable();
         }
 
         $excerpt = $this->excerpt($response->body());
 
         Diagnostics::warn('export.rejected', "Spans were rejected by the destination with HTTP {$status}: {$excerpt}. The batch was dropped.");
 
-        return ExportResult::Rejected;
-    }
-
-    /**
-     * Gzip the given body, or get false when it cannot be gzipped.
-     */
-    protected function gzip(string $body): string|false
-    {
-        try {
-            return gzencode($body);
-        } catch (Throwable) {
-            return false;
-        }
-    }
-
-    /**
-     * Determine if the given connection error happened before the destination was reached.
-     */
-    protected function beforeConnect(ConnectionException $e): bool
-    {
-        if (preg_match('/cURL error (\d+):/', $e->getMessage(), $matches) !== 1) {
-            return true;
-        }
-
-        $error = (int) $matches[1];
-
-        if ($error === 28) {
-            return Str::contains($e->getMessage(), self::CONNECT_TIMEOUTS, ignoreCase: true);
-        }
-
-        return in_array($error, self::CONNECT_ERRORS, true);
-    }
-
-    public function retryAfter(): ?int
-    {
-        return $this->retryAfter;
-    }
-
-    public function unreachable(): bool
-    {
-        return $this->unreachable;
+        return ExportResult::rejected();
     }
 
     /**
      * Get the seconds of a Retry-After header, capped, or null when it is
-     * not a whole number of seconds (an HTTP date, a negative number or text).
+     * missing or not a whole number of seconds (an HTTP date, a negative
+     * number or text). Only the queue drain waits for it.
      */
     protected function retryAfterSeconds(string $header): ?int
     {

@@ -5,7 +5,6 @@ use Anantrp\Refract\Capture\RecordAgentRuns;
 use Anantrp\Refract\Capture\Recorder;
 use Anantrp\Refract\Contracts\Exporter;
 use Anantrp\Refract\Contracts\ExportResult;
-use Anantrp\Refract\Contracts\Transport;
 use Anantrp\Refract\Export\GenAiTranslator;
 use Anantrp\Refract\Export\HttpExporter;
 use Anantrp\Refract\Export\OtlpJson;
@@ -14,22 +13,20 @@ use Anantrp\Refract\Support\Diagnostics;
 use Anantrp\Refract\Tests\Support\Ai\CountingAgent;
 use Anantrp\Refract\Tests\Support\Ai\CountingSupervisor;
 use Anantrp\Refract\Tests\Support\Env;
-use Anantrp\Refract\Tests\Support\FlakyTransport;
+use Anantrp\Refract\Tests\Support\MemoryExporter;
 use Anantrp\Refract\Tests\Support\Otlp;
 use Anantrp\Refract\Tests\Support\RefractStack;
 use Anantrp\Refract\Tests\Support\ThrowingRecorder;
 use Anantrp\Refract\Tests\Support\WarningLog;
+use Anantrp\Refract\Transport\Drain;
 use Illuminate\Contracts\Console\Kernel as ConsoleKernel;
 use Illuminate\Contracts\Foundation\Application;
 use Illuminate\Contracts\Http\Kernel;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Http\Request;
-use Illuminate\Queue\Events\JobFailed;
 use Illuminate\Queue\WorkerOptions;
 use Illuminate\Support\Facades\Artisan;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
-use Illuminate\Support\Facades\Exceptions;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Queue;
@@ -47,7 +44,7 @@ use Workbench\App\Jobs\RunAgent;
  */
 
 /**
- * The config of a working Langfuse destination with the sync transport.
+ * The config of a working Langfuse destination.
  *
  * @param  array<string, mixed>  $config
  * @return array<string, mixed>
@@ -55,7 +52,6 @@ use Workbench\App\Jobs\RunAgent;
 function safetyConfig(array $config = []): array
 {
     return [
-        'refract.transport' => 'sync',
         'refract.destination' => 'langfuse',
         'refract.destinations.langfuse.public_key' => 'pk-test',
         'refract.destinations.langfuse.secret_key' => 'sk-test',
@@ -268,9 +264,10 @@ function safetyQueue(): void
     });
 }
 
-it('a flush hook whose transport throws still clears the buffer, and the app is unaffected', function (string $hook) {
-    $transport = new FlakyTransport;
-    $this->extenders[Transport::class] = fn () => $transport;
+it('an exporter that throws at a run end or a flush point drops the trees with one warning, clears the buffer, and the app is unaffected', function (string $hook) {
+    $exporter = new MemoryExporter;
+    $exporter->throws = true;
+    $this->extenders[Exporter::class] = fn () => $exporter;
 
     if ($hook === 'web terminating') {
         Env::set(['APP_RUNNING_IN_CONSOLE' => 'false']);
@@ -311,19 +308,18 @@ it('a flush hook whose transport throws still clears the buffer, and the app is 
         })(),
     };
 
-    $transport->throws = false;
+    $exporter->throws = false;
     app(Recorder::class)->flush();
 
-    expect($transport->spans)->toBe([])
+    expect($exporter->spans)->toBe([])
         ->and($log->warnings)->toHaveCount(1)
         ->and($log->warnings[0])->toContain(LogicException::class)
         ->and($log->warnings[0])->not->toContain('SECRET');
 })->with(['web terminating', 'job end', 'command end']);
 
-it('a flush that fails while building the batch, or a reset that throws, still clears the buffer', function () {
-    $transport = new FlakyTransport;
-    $transport->throws = false;
-    $this->extenders[Transport::class] = fn () => $transport;
+it('a flush that fails while building the trees, or a reset that throws, still clears the buffer', function () {
+    $exporter = new MemoryExporter;
+    $this->extenders[Exporter::class] = fn () => $exporter;
     $this->extenders[Recorder::class] = fn (Recorder $recorder, Application $app) => new class($app) extends Recorder
     {
         public bool $broken = true;
@@ -342,15 +338,15 @@ it('a flush that fails while building the batch, or a reset that throws, still c
     $recorder = app(Recorder::class);
     $recorder->flushing(fn () => throw new RuntimeException('Refract bug in a reset, SECRET'));
 
-    TimeAgent::fakeTwoSteps();
-    TimeAgent::make()->prompt('What time is it?');
+    // An open run, so its tree is built at the flush point.
+    $recorder->start('run:open', 'invoke_agent', null, ['agent' => 'TimeAgent']);
 
     app(FlushPoints::class)->flush();
 
     $recorder->broken = false;
     $recorder->flush();
 
-    expect($transport->spans)->toBe([])
+    expect($exporter->spans)->toBe([])
         ->and($log->warnings)->toHaveCount(2)
         ->and(implode("\n", $log->warnings))->toContain(LogicException::class)
         ->and(implode("\n", $log->warnings))->toContain(RuntimeException::class)
@@ -404,7 +400,8 @@ it('instructions(), tools() and name() are called only by the SDK, never by Refr
         ->and(CountingAgent::$sdkCalls['instructions'] ?? 0)->toBeGreaterThan(0)
         ->and(CountingAgent::$sdkCalls['tools'] ?? 0)->toBeGreaterThan(0)
         ->and(CountingAgent::$sdkCalls['name'] ?? 0)->toBeGreaterThan(0)
-        ->and(count(Http::recorded()))->toBe(1)
+        // One request per top-level run: a console process sends each run when it ends.
+        ->and(count(Http::recorded()))->toBe(count(array_filter(Otlp::spans(), fn (array $span) => ! isset($span['parentSpanId']))))
         // A top-level run is named by its class; a sub-agent run by the tool the SDK called it as.
         ->and($runs->map(fn (array $attributes) => $attributes['gen_ai.agent.name'])->all())->toBe(['CountingAgent', 'CountingAgent', 'CountingAgent', 'counting_agent']);
 });
@@ -429,7 +426,15 @@ it('with Refract disabled no listener or flush hook is registered', function (bo
 })->with(['disabled' => false, 'enabled (control)' => true]);
 
 it('2,000 runs in one worker keep memory flat', function () {
-    bootSafety(['refract.transport' => 'null', 'refract.capture.content' => true]);
+    $this->extenders[Exporter::class] = fn () => new class implements Exporter
+    {
+        public function export(array $trees, ?float $within = null): ExportResult
+        {
+            return ExportResult::ok();
+        }
+    };
+
+    bootSafety(['refract.capture.content' => true]);
 
     // The events of one real run with a failover, replayed under new invocation ids,
     // so the SDK's own fakes (which keep every prompt) do not grow memory here.
@@ -486,18 +491,18 @@ it('2,000 runs in one worker keep memory flat', function () {
 });
 
 /**
- * One neutral run span with the given call data.
+ * One run tree of one neutral run span with the given call data.
  *
  * @param  array<string, mixed>  $call
- * @return list<array<string, mixed>>
+ * @return list<list<array<string, mixed>>>
  */
 function safetyBatch(array $call = []): array
 {
-    return [[
+    return [[[
         'v' => 1, 'trace_id' => str_repeat('a', 32), 'span_id' => str_repeat('b', 16), 'parent_span_id' => null,
         'kind' => 'invoke_agent', 'start' => 1, 'end' => 2, 'status' => 'ok', 'status_message' => null,
         'call' => ['agent' => 'TimeAgent', ...$call], 'content' => [], 'context' => [], 'events' => [],
-    ]];
+    ]]];
 }
 
 /**
@@ -507,63 +512,22 @@ function throwingExporter(): Exporter
 {
     return new class implements Exporter
     {
-        public function export(array $spans): ExportResult
+        public function export(array $trees, ?float $within = null): ExportResult
         {
             throw new LogicException('Refract bug in the exporter, SECRET');
         }
     };
 }
 
-it('an exporter that throws on the sync transport drops the batch with one warning', function () {
+it('an exporter that throws drops the trees with one warning', function () {
     $this->extenders[Exporter::class] = fn () => throwingExporter();
     $log = bootSafety();
 
-    app(Transport::class)->send(safetyBatch());
+    app(Drain::class)->send(safetyBatch());
 
     expect($log->warnings)->toHaveCount(1)
         ->and($log->warnings[0])->toContain(LogicException::class)
         ->and($log->warnings[0])->toContain('dropped')
-        ->and($log->warnings[0])->not->toContain('SECRET');
-});
-
-it('an exporter that throws in the queue job drops the batch with one warning, not reported as a failed job', function () {
-    $this->extenders[Exporter::class] = fn () => throwingExporter();
-    $log = bootSafety(['refract.transport' => 'queue']);
-    safetyQueue();
-    Exceptions::fake();
-
-    $failed = 0;
-    Event::listen(JobFailed::class, function () use (&$failed) {
-        $failed++;
-    });
-
-    app(Transport::class)->send(safetyBatch());
-    app('queue.worker')->runNextJob('database', 'default', new WorkerOptions(sleep: 0));
-
-    Exceptions::assertNothingReported();
-    expect($failed)->toBe(0)
-        ->and(DB::table('jobs')->count())->toBe(0)
-        ->and($log->warnings)->toHaveCount(1)
-        ->and($log->warnings[0])->toContain(LogicException::class)
-        ->and($log->warnings[0])->not->toContain('SECRET');
-});
-
-it('a batch the queue transport cannot encode is exported in this process with one warning', function () {
-    $log = bootSafety(['refract.transport' => 'queue']);
-    safetyQueue();
-
-    app(Transport::class)->send(safetyBatch(['broken' => new class implements JsonSerializable
-    {
-        public function jsonSerialize(): mixed
-        {
-            throw new LogicException('Refract bug in the encoder, SECRET');
-        }
-    }]));
-
-    Http::assertSentCount(1);
-    expect(DB::table('jobs')->count())->toBe(0)
-        ->and($log->warnings)->toHaveCount(1)
-        ->and($log->warnings[0])->toContain(LogicException::class)
         ->and($log->warnings[0])->not->toContain('SECRET');
 });
 
@@ -572,11 +536,6 @@ it('the exporter guards translating, preparing and encoding, not only the HTTP c
 
     $platform = new class implements Platform
     {
-        public static function fromConfig(string $key): ?static
-        {
-            return null;
-        }
-
         public function endpoint(): string
         {
             return 'https://otlp.test/v1/traces';
@@ -598,9 +557,9 @@ it('the exporter guards translating, preparing and encoding, not only the HTTP c
         }
     };
 
-    $exporter = new HttpExporter($platform, new GenAiTranslator, new OtlpJson, 'testing', 'app');
+    $exporter = new HttpExporter($platform, new GenAiTranslator, new OtlpJson, 'testing', 'app', 5);
 
-    expect($exporter->export(safetyBatch()))->toBe(ExportResult::Rejected)
+    expect($exporter->export(safetyBatch())->isRejected())->toBeTrue()
         ->and($log->warnings)->toHaveCount(1)
         ->and($log->warnings[0])->toContain(LogicException::class)
         ->and($log->warnings[0])->not->toContain('SECRET');

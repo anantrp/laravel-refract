@@ -16,10 +16,9 @@ use Laravel\Ai\Events\StartingStep;
 use Laravel\Ai\Events\StepCompleted;
 use Laravel\Ai\Events\StepFailed;
 use Laravel\Ai\Events\StreamingAgent;
-use Laravel\Ai\Events\ToolApprovalRequested;
-use Laravel\Ai\Events\ToolApprovalResolved;
 use Laravel\Ai\Events\ToolFailed;
 use Laravel\Ai\Events\ToolInvoked;
+use Laravel\Ai\Messages\AssistantMessage;
 use Laravel\Ai\Prompts\AgentPrompt;
 use Laravel\Ai\Providers\Provider;
 use Laravel\Ai\Tools\ToolNameResolver;
@@ -56,8 +55,6 @@ class RecordAgentRuns
         $events->listen(InvokingTool::class, $this->guarded($this->invokingTool(...)));
         $events->listen(ToolInvoked::class, $this->guarded($this->toolInvoked(...)));
         $events->listen(ToolFailed::class, $this->guarded($this->toolFailed(...)));
-        $events->listen(ToolApprovalRequested::class, $this->guarded($this->toolApprovalRequested(...)));
-        $events->listen(ToolApprovalResolved::class, $this->guarded($this->toolApprovalResolved(...)));
 
         $this->recorder->flushing(fn () => $this->failingOver = []);
     }
@@ -86,7 +83,8 @@ class RecordAgentRuns
      * and the span shows the provider and model of that attempt. A run
      * dropped at the cap stays dropped for that attempt, with its children.
      * A run resumed from approval decisions sent no prompt text, so it is
-     * marked as resumed and no prompt is ever recorded for it.
+     * marked as resumed and no prompt is ever recorded for it. Each of its
+     * decisions is an event on the new run span.
      */
     public function promptingAgent(PromptingAgent $event): void
     {
@@ -122,15 +120,76 @@ class RecordAgentRuns
             contextFrom: $parentKey === null ? null : $this->contextSourceOf($event->prompt, $parentKey),
             content: $event->prompt->hasApprovalDecisions() ? [] : $this->content->runInput($event->prompt),
         );
+
+        $this->recordDecisions($this->runKey($event->invocationId), $event->prompt);
+    }
+
+    /**
+     * Record each approval decision of a resumed run as an event on its run span.
+     *
+     * A decision names only the tool call id ("*" for every call without
+     * its own decision). The tool name comes from the matching tool call in
+     * the prompt's own messages; a conversation the SDK loads from its store
+     * is not read, so a decision for a call not in them has no tool name.
+     */
+    protected function recordDecisions(string $key, AgentPrompt $prompt): void
+    {
+        $decisions = $prompt->approvalDecisions;
+
+        if ($decisions === null) {
+            return;
+        }
+
+        $tools = $this->toolNames($prompt);
+
+        foreach ($decisions->all() as $id => $decision) {
+            $this->recorder->event($key, 'approval_resolved', [
+                ...(isset($tools[$id]) ? ['tool' => $tools[$id]] : []),
+                // An id of digits only is an integer array key.
+                'tool_call_id' => (string) $id,
+                'action' => $decision->action,
+                'approved' => ! $decision->isRejected(),
+            ]);
+        }
+    }
+
+    /**
+     * Get the name of each tool call in the prompt's messages, keyed by the tool call id.
+     *
+     * @return array<string, string>
+     */
+    protected function toolNames(AgentPrompt $prompt): array
+    {
+        $names = [];
+
+        foreach ($prompt->messages ?? [] as $message) {
+            if ($message instanceof AssistantMessage) {
+                foreach ($message->toolCalls as $toolCall) {
+                    $names[$toolCall->id] = $toolCall->name;
+                }
+            }
+        }
+
+        return $names;
     }
 
     /**
      * End the run span with its output. A new conversation has its id only now.
+     *
+     * Each tool call the run paused on for approval is an event on the run
+     * span, recorded before it ends.
      */
     public function agentPrompted(AgentPrompted $event): void
     {
         $key = $this->runKey($event->invocationId);
         $conversationId = $event->response->conversationId;
+
+        foreach ($event->response->pendingApprovals as $approval) {
+            $this->recorder->event($key, 'approval_requested', [
+                'tool' => $approval->tool,
+                'tool_call_id' => $approval->id,
+            ]);
+        }
 
         $this->recorder->end(
             $key,
@@ -208,37 +267,6 @@ class RecordAgentRuns
     public function toolFailed(ToolFailed $event): void
     {
         $this->recorder->end($this->toolKey($event->toolInvocationId), 'error', $event->exception::class);
-    }
-
-    /**
-     * Record each tool call waiting for approval as an event on the run span.
-     *
-     * The SDK sends this after the run ended, so the event sits at the run's end.
-     */
-    public function toolApprovalRequested(ToolApprovalRequested $event): void
-    {
-        foreach ($event->pendingApprovals as $approval) {
-            $this->recorder->event($this->runKey($event->invocationId), 'approval_requested', [
-                'tool' => $approval->tool,
-                'tool_call_id' => $approval->id,
-            ]);
-        }
-    }
-
-    /**
-     * Record each approval decision of a resumed run as an event on its run span.
-     *
-     * The SDK sends this after the run ended, so the event sits at the run's end.
-     */
-    public function toolApprovalResolved(ToolApprovalResolved $event): void
-    {
-        foreach ($event->toolResults as $result) {
-            $this->recorder->event($this->runKey($event->invocationId), 'approval_resolved', [
-                'tool' => $result->name,
-                'tool_call_id' => $result->id,
-                'approved' => ! $result->denied,
-            ]);
-        }
     }
 
     /**

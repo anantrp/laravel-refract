@@ -51,9 +51,9 @@ function packageFiles(array $folders): array
     return $files;
 }
 
-arch('Capture uses nothing from Transport or Export')
+arch('Capture uses nothing from Export: it hands finished trees to the Transport drain')
     ->expect('Anantrp\Refract\Capture')
-    ->not->toUse(['Anantrp\Refract\Transport', 'Anantrp\Refract\Export']);
+    ->not->toUse('Anantrp\Refract\Export');
 
 arch('Transport uses only Contracts and Support from Refract (the Exporter contract is in Contracts)')
     ->expect('Anantrp\Refract\Transport')
@@ -63,7 +63,7 @@ arch('Export uses nothing from Capture or Transport')
     ->expect('Anantrp\Refract\Export')
     ->not->toUse(['Anantrp\Refract\Capture', 'Anantrp\Refract\Transport']);
 
-arch('the platform names langfuse and Langfuse appear only in the Langfuse platform folder and the config', function () {
+arch('the platform names langfuse and Langfuse appear only in the Langfuse platform folder, the provider that builds it and the config', function () {
     $named = array_values(array_filter(
         packageFiles(['src', 'config']),
         fn (string $file) => preg_match('/langfuse/i', (string) file_get_contents(dirname(__DIR__, 2).'/'.$file)) === 1,
@@ -71,7 +71,7 @@ arch('the platform names langfuse and Langfuse appear only in the Langfuse platf
 
     $outside = array_values(array_filter(
         $named,
-        fn (string $file) => ! str_starts_with($file, 'src/Export/Platforms/Langfuse/') && $file !== 'config/refract.php',
+        fn (string $file) => ! str_starts_with($file, 'src/Export/Platforms/Langfuse/') && ! in_array($file, ['config/refract.php', 'src/RefractServiceProvider.php'], true),
     ));
 
     expect($named)->toContain('config/refract.php')

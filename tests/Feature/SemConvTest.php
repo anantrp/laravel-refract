@@ -203,7 +203,6 @@ function semConvEmitted(): array
 
 beforeEach(function () {
     $this->refreshApplicationWithConfig([
-        'refract.transport' => 'sync',
         'refract.destination' => 'langfuse',
         'refract.destinations.langfuse.public_key' => 'pk-test',
         'refract.destinations.langfuse.secret_key' => 'sk-test',

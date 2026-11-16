@@ -8,7 +8,8 @@ use JsonException;
  * Turns neutral spans into spans with OTel GenAI attributes.
  *
  * A span closed at flush without its end event (status "abandoned") has
- * no OTel status and the laravel.ai.abandoned attribute. A failed span
+ * no OTel status and the laravel.ai.abandoned attribute. A run that
+ * reached the per-run span cap has laravel.ai.truncated. A failed span
  * (status "error") has the error status and error.type, both the
  * exception class.
  *
@@ -19,9 +20,9 @@ use JsonException;
 class GenAiTranslator
 {
     /**
-     * The OTel user attribute. A Context mapping never sets it.
+     * The OTel session attribute: a saved run's conversation id, else a Context mapping's value.
      */
-    public const USER_ID = 'user.id';
+    public const SESSION_ID = 'session.id';
 
     /**
      * The error.type of a failed span whose exception class is not known.
@@ -83,6 +84,7 @@ class GenAiTranslator
             ...$this->content($kind, $content),
             ...$this->context($context),
             'laravel.ai.abandoned' => $abandoned ?: null,
+            'laravel.ai.truncated' => ($call['truncated'] ?? null) === true ?: null,
             // The exception class, per the OTel conventions; "_OTHER" when it is not known.
             'error.type' => $error ? (is_string($message) && $message !== '' ? $message : self::OTHER_ERROR) : null,
         ];
@@ -96,9 +98,9 @@ class GenAiTranslator
             'start' => $this->int($span, 'start'),
             'end' => $this->int($span, 'end'),
             // A mapped value never takes the name of a real attribute, even one that is empty here,
-            // and never sets user.id, which a platform makes only from the participant.
+            // but session.id: a mapping may give one to a run that is not saved.
             'attributes' => array_filter($own, fn (mixed $value) => $value !== null)
-                + array_diff_key($this->mapped($context), $own, [self::USER_ID => true]),
+                + array_diff_key($this->mapped($context), array_diff_key($own, [self::SESSION_ID => true])),
             'events' => $this->events($span['events'] ?? null),
             'status' => [
                 'code' => match (true) {
@@ -264,7 +266,7 @@ class GenAiTranslator
         $participant = is_array($context['participant'] ?? null) ? $context['participant'] : [];
 
         return [
-            'session.id' => $session,
+            self::SESSION_ID => $session,
             'gen_ai.conversation.id' => $session,
             'laravel.ai.participant.type' => $participant['type'] ?? null,
             'laravel.ai.participant.id' => $participant['id'] ?? null,
@@ -326,6 +328,7 @@ class GenAiTranslator
                 'approval_resolved' => ['laravel.ai.tool_approval.resolved', [
                     'gen_ai.tool.name' => $call['tool'] ?? null,
                     'gen_ai.tool.call.id' => $call['tool_call_id'] ?? null,
+                    'laravel.ai.tool_approval.action' => $call['action'] ?? null,
                     'laravel.ai.tool_approval.approved' => $call['approved'] ?? null,
                 ]],
                 default => [$this->string($event, 'kind'), []],

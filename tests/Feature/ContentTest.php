@@ -39,6 +39,7 @@ use Laravel\Ai\Files\Audio;
 use Laravel\Ai\Files\Document;
 use Laravel\Ai\Files\Image;
 use Laravel\Ai\Files\S3Document;
+use Laravel\Ai\Gateway\ParentInvocation;
 use Laravel\Ai\Messages\AssistantMessage;
 use Laravel\Ai\Messages\Message;
 use Laravel\Ai\Messages\ToolResultMessage;
@@ -78,7 +79,6 @@ enum Lab: string
 function contentConfig(array $capture = []): array
 {
     return [
-        'refract.transport' => 'sync',
         'refract.destination' => 'langfuse',
         'refract.destinations.langfuse.public_key' => 'pk-test',
         'refract.destinations.langfuse.secret_key' => 'sk-test',
@@ -177,7 +177,8 @@ it('with capture off no span or event holds a prompt, output, tool argument, too
 
     $body = sentBodies();
 
-    expect(Http::recorded())->toHaveCount(1)
+    // A console process sends each top-level run when it ends.
+    expect(Http::recorded())->toHaveCount(count(array_filter(Otlp::spans(), fn (array $span) => ! isset($span['parentSpanId']))))
         ->and(count(Otlp::spans()))->toBeGreaterThan(20)
         ->and(array_merge(...array_column(Otlp::spans(), 'events')))->not->toBeEmpty()
         ->and($body)->not->toContain('SECRET')
@@ -342,13 +343,11 @@ it('abandoned and failed spans keep their input and get no output', function () 
 });
 
 it('a value over the byte cap is cut and marked with its original size', function () {
-    $this->environmentConfig = contentConfig(['refract.capture.content' => true, 'refract.capture.max_bytes' => 64]);
+    $this->environmentConfig = contentConfig(['refract.capture.content' => true]);
     $memory = $this->captureNeutralSpans();
 
-    $prompt = str_repeat('a', 1000);
-
     TimeAgent::fake(['Short.']);
-    TimeAgent::make()->prompt($prompt);
+    TimeAgent::make()->prompt(str_repeat('a', 200_000));
 
     app(Recorder::class)->flush();
 
@@ -356,46 +355,46 @@ it('a value over the byte cap is cut and marked with its original size', functio
 
     $cut = $run['content']['input'][0]['parts'][0]['content'];
 
-    expect(strlen($cut))->toBe(64)
-        ->and($cut)->toEndWith('[cut, original size 1000 bytes]')
+    expect(strlen($cut))->toBe(Content::MAX_BYTES)
+        ->and($cut)->toEndWith('[cut, original size 200000 bytes]')
         ->and($cut)->toStartWith(str_repeat('a', 10))
         ->and($run['content']['output'][0]['parts'][0]['content'])->toBe('Short.');
 });
 
 it('a cut never splits a multibyte character', function () {
-    $this->environmentConfig = contentConfig(['refract.capture.content' => true, 'refract.capture.max_bytes' => 64]);
+    $this->environmentConfig = contentConfig(['refract.capture.content' => true]);
     $memory = $this->captureNeutralSpans();
 
     TimeAgent::fake(['Short.']);
-    TimeAgent::make()->prompt(str_repeat('é', 500));
+    TimeAgent::make()->prompt(str_repeat('é', 70_000));
 
     app(Recorder::class)->flush();
 
     $cut = ofKind($memory->spans, 'invoke_agent')[0]['content']['input'][0]['parts'][0]['content'];
 
     expect(mb_check_encoding($cut, 'UTF-8'))->toBeTrue()
-        ->and(strlen($cut))->toBeLessThanOrEqual(64)
-        ->and($cut)->toEndWith('[cut, original size 1000 bytes]')
+        ->and(strlen($cut))->toBeLessThanOrEqual(Content::MAX_BYTES)
+        ->and($cut)->toEndWith('[cut, original size 140000 bytes]')
         ->and($cut)->toStartWith('éé');
 });
 
-it('at the minimum byte cap of 64 a cut value, marker included, never exceeds the cap', function (string $value) {
-    $this->environmentConfig = contentConfig(['refract.capture.content' => true, 'refract.capture.max_bytes' => 64]);
+it('a cut value, marker included, never exceeds the byte cap', function (string $value) {
+    $this->environmentConfig = contentConfig(['refract.capture.content' => true]);
     $this->refreshApplication();
 
     $cut = app(Content::class)->value($value);
 
-    expect(strlen($cut))->toBeLessThanOrEqual(64)
+    expect(strlen($cut))->toBeLessThanOrEqual(Content::MAX_BYTES)
         ->and(mb_check_encoding($cut, 'UTF-8'))->toBeTrue()
         ->and($cut)->toEndWith('[cut, original size '.strlen($value).' bytes]');
 })->with([
-    '65 bytes' => [str_repeat('a', 65)],
-    '1 KB of multibyte text' => [str_repeat('é', 512)],
+    'one byte over' => [str_repeat('a', 131_073)],
+    'multibyte text' => [str_repeat('é', 70_000)],
     '1 MB' => [str_repeat('a', 1_000_000)],
     '10 MB' => [str_repeat('a', 10_000_000)],
 ]);
 
-it('the default byte cap is 128 KB', function () {
+it('the byte cap is 128 KB', function () {
     $this->environmentConfig = contentConfig(['refract.capture.content' => true]);
     $memory = $this->captureNeutralSpans();
 
@@ -417,7 +416,6 @@ it('the mask runs on every captured value before export, and before the cut', fu
     $this->refreshApplicationWithConfig(contentConfig([
         'refract.capture.content' => true,
         'refract.capture.mask' => RecordingMask::class,
-        'refract.capture.max_bytes' => 2000,
     ]));
 
     Http::fake();
@@ -427,7 +425,7 @@ it('the mask runs on every captured value before export, and before the cut', fu
     NotesAgent::make()->prompt('Tell me the secret.', attachments: [Image::fromUrl('https://cdn.test/secret.png')]);
 
     TimeAgent::fake(['Short.']);
-    TimeAgent::make()->prompt(str_repeat('a', 3000).'secret');
+    TimeAgent::make()->prompt(str_repeat('a', Content::MAX_BYTES).'secret');
 
     app(Recorder::class)->flush();
 
@@ -439,7 +437,7 @@ it('the mask runs on every captured value before export, and before the cut', fu
         ->and(RecordingMask::$seen)->toContain('The secret answer.')
         ->and(RecordingMask::$seen)->toContain('{"topic":"secret topic"}')
         ->and(RecordingMask::$seen)->toContain('{"topic":"secret topic","note":"the secret note"}')
-        ->and(RecordingMask::$seen)->toContain(str_repeat('a', 3000).'secret');
+        ->and(RecordingMask::$seen)->toContain(str_repeat('a', Content::MAX_BYTES).'secret');
 
     [$tool] = exportedAttributes('execute_tool');
 
@@ -946,9 +944,9 @@ it('a tool call response in messages exported as JSON text still gets its fixed 
 });
 
 /**
- * Fill the buffer with the given number of spans: one open run and its tools.
+ * Open a run of the given number of spans, its tools ended, and one more open tool under it that calls a sub-agent.
  */
-function fillBuffer(string $run, int $spans): void
+function openRunWithTool(string $run, int $spans): void
 {
     $recorder = app(Recorder::class);
     $recorder->start("run:{$run}", 'invoke_agent', null, ['agent' => 'Filler']);
@@ -957,6 +955,8 @@ function fillBuffer(string $run, int $spans): void
         $recorder->start("tool:{$run}:{$i}", 'execute_tool', "run:{$run}", ['tool' => 'Filler']);
         $recorder->end("tool:{$run}:{$i}");
     }
+
+    $recorder->start("tool:{$run}", 'execute_tool', "run:{$run}", ['tool' => 'Notes']);
 }
 
 it('with capture on the end content of a span dropped at the cap, or under a dropped parent, is never built, so the mask is not called for its output or result', function (int $filler, array $seen) {
@@ -969,31 +969,32 @@ it('with capture on the end content of a span dropped at the cap, or under a dro
     Diagnostics::reset();
     Log::swap($log = new WarningLog);
 
-    // An open run holds the buffer, so a full-buffer send frees no room.
-    fillBuffer('long', $filler);
+    // A sub-agent counts toward the cap of the run that called it.
+    openRunWithTool('long', $filler);
 
     NotesAgent::fakeTwoSteps();
-    $response = NotesAgent::make()->prompt('What is new?');
+    $response = ParentInvocation::within('long', 'long', fn () => NotesAgent::make()->prompt('What is new?'));
 
-    app(Recorder::class)->flush();
+    app(Recorder::class)->end('tool:long');
+    app(Recorder::class)->end('run:long');
 
-    $recorded = array_values(array_filter($memory->spans, fn (array $span) => ($span['call']['agent'] ?? null) === 'NotesAgent'));
+    $recorded = array_values(array_filter($memory->spans, fn (array $span) => ($span['call']['agent_class'] ?? null) === NotesAgent::class));
 
     expect($response->text)->toBe('The release is on Friday.')
         ->and(array_count_values(RecordingMask::$seen))->toBe($seen)
         ->and($log->warnings)->toHaveCount(1)
         ->and($memory->spans)->toHaveCount(1_000)
-        ->and(array_column($recorded, 'content'))->toBe($filler === 1_000 ? [] : [[
+        ->and(array_column($recorded, 'content'))->toBe($filler === 999 ? [] : [[
             'input' => [['role' => 'user', 'parts' => [['type' => 'text', 'content' => 'What is new?']]]],
             'output' => [['role' => 'assistant', 'parts' => [['type' => 'text', 'content' => 'The release is on Friday.']]]],
         ]]);
 })->with([
     // The start values are still masked (backlog): the prompt, each step's input, the tool's arguments.
-    'the run dropped at the cap, its steps and tool under it' => [1_000, [
+    'the run dropped at the cap, its steps and tool under it' => [999, [
         'What is new?' => 3,
         '{"topic":"release"}' => 2,
     ]],
-    'the run kept, its steps and tool dropped at the cap' => [999, [
+    'the run kept, its steps and tool dropped at the cap' => [998, [
         'What is new?' => 3,
         '{"topic":"release"}' => 2,
         'The release is on Friday.' => 1,

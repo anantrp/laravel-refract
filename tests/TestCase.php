@@ -2,9 +2,9 @@
 
 namespace Anantrp\Refract\Tests;
 
-use Anantrp\Refract\Contracts\Transport;
+use Anantrp\Refract\Contracts\Exporter;
 use Anantrp\Refract\RefractServiceProvider;
-use Anantrp\Refract\Tests\Support\MemoryTransport;
+use Anantrp\Refract\Tests\Support\MemoryExporter;
 use Closure;
 use Illuminate\Foundation\Application;
 use Illuminate\Http\Client\Factory as HttpFactory;
@@ -21,9 +21,9 @@ abstract class TestCase extends Orchestra
     protected array $environmentConfig = [];
 
     /**
-     * The transport that receives the neutral spans instead of the configured one.
+     * The exporter that receives the run trees instead of the configured one.
      */
-    protected ?MemoryTransport $memoryTransport = null;
+    protected ?MemoryExporter $memoryExporter = null;
 
     /**
      * The services to replace before the providers boot, as extenders keyed by service.
@@ -33,15 +33,15 @@ abstract class TestCase extends Orchestra
     protected array $extenders = [];
 
     /**
-     * Recreate the application with a transport that keeps the neutral spans.
+     * Recreate the application with an exporter that keeps the run trees.
      */
-    protected function captureNeutralSpans(): MemoryTransport
+    protected function captureNeutralSpans(): MemoryExporter
     {
-        $this->memoryTransport = new MemoryTransport;
+        $this->memoryExporter = new MemoryExporter;
 
         $this->refreshApplication();
 
-        return $this->memoryTransport;
+        return $this->memoryExporter;
     }
 
     /**
@@ -96,10 +96,14 @@ abstract class TestCase extends Orchestra
             'ai.default' => 'openai',
             'ai.providers.openai' => ['driver' => 'openai', 'key' => 'test'],
             'ai.conversations.generate_title' => false,
-            'refract.transport' => 'null',
             // Never touch the workbench database file that the live scenarios use.
             'database.default' => 'testing',
             'database.connections.testing' => ['driver' => 'sqlite', 'database' => self::sqliteFile(), 'prefix' => ''],
+            // The drain job's unique lock lives in the cache: a file cache would keep it from one test to the next.
+            'cache.default' => 'array',
+            // A destination that can send, so Refract registers, whatever the local .env says. No request reaches it unless faked.
+            'refract.destination' => 'otlp',
+            'refract.destinations.otlp.endpoint' => 'https://otlp.test/v1/traces',
         ]);
 
         $app['config']->set($this->environmentConfig);
@@ -118,10 +122,11 @@ abstract class TestCase extends Orchestra
             $app->extend($abstract, $extender);
         }
 
-        if ($this->memoryTransport !== null) {
-            $transport = $this->memoryTransport;
+        if ($this->memoryExporter !== null) {
+            $exporter = $this->memoryExporter;
 
-            $app->extend(Transport::class, fn () => $transport);
+            // After the providers register, so the configured exporter is never built.
+            $app->booted(fn () => $app->instance(Exporter::class, $exporter));
         }
     }
 
