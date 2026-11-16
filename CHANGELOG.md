@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- Requires `laravel/ai` 1.4 or higher. A tool that throws is a failed `execute_tool` span; since 1.4 the SDK hands the failure back to the model, so the run goes on and ends ok.
+
 ## [0.1.0] - 2026-10-09
 
 First release.

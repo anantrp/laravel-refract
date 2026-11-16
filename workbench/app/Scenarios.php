@@ -6,6 +6,7 @@ use InvalidArgumentException;
 use OpenTelemetry\API\Trace\Span;
 use OpenTelemetry\API\Trace\SpanContext;
 use OpenTelemetry\API\Trace\TraceFlags;
+use Workbench\App\Ai\Agents\BrokenClockAgent;
 use Workbench\App\Ai\Agents\ChatAgent;
 use Workbench\App\Ai\Agents\SupervisorAgent;
 use Workbench\App\Ai\Agents\TimeAgent;
@@ -51,6 +52,7 @@ class Scenarios
             'R2' => $this->r2(...),
             'R4' => $this->r4(...),
             'R5' => $this->r5(...),
+            'R12' => $this->r12(...),
             'X1' => $this->x1(...),
             'X9' => $this->r1(...),
             'L6' => $this->l6(...),
@@ -146,6 +148,16 @@ class Scenarios
         foreach (TimeAgent::make()->stream('What time is it?') as $event) {
             break;
         }
+    }
+
+    /**
+     * A tool that throws, and the run that goes on to its answer.
+     */
+    protected function r12(): void
+    {
+        BrokenClockAgent::fakeTwoSteps();
+
+        BrokenClockAgent::make()->prompt('What time is it?');
     }
 
     /**
