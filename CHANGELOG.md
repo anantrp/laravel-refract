@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-16
+
 0.2 splits sending into collecting and draining, and cuts the configuration to ten environment variables.
 
 ### Added
@@ -65,5 +67,6 @@ First release.
 - Refract is never tied to the app's database transactions. An app rollback does not remove spans.
 - A send in the process while a console process runs keeps its spans when the destination fails, and tries them again later. Once a part cannot connect, the later parts of that send wait for the next try.
 
-[Unreleased]: https://github.com/anantrp/laravel-refract/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/anantrp/laravel-refract/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/anantrp/laravel-refract/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/anantrp/laravel-refract/releases/tag/v0.1.0
