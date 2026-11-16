@@ -510,3 +510,66 @@ it('an export in this process waits at most 5 s for the destination', function (
 
     expect($timeouts)->toBe([5]);
 });
+
+it('given a time limit, a request is never started with less than a second of it left, and the result counts the whole trees done', function () {
+    bootExport();
+    Http::fake(function () {
+        usleep(600_000);
+
+        return Http::response('', 200);
+    });
+
+    // Three trees of 3 MB: one request each.
+    $trees = array_map(fn () => runTree([randomText(3_000_000)]), range(1, 3));
+
+    $result = app(Exporter::class)->export($trees, 1.5);
+
+    Http::assertSentCount(1);
+    expect($result->isUnfinished())->toBeTrue()
+        ->and($result->done)->toBe(1);
+});
+
+it('a tree split over requests is done only once its last request is answered', function () {
+    bootExport();
+    Http::fake(function () {
+        usleep(600_000);
+
+        return Http::response('', 200);
+    });
+
+    $small = runTree([randomText(1_000)]);
+    $big = runTree(array_map(fn () => randomText(1_500_000), range(1, 4)));
+
+    $result = app(Exporter::class)->export([$small, $big], 1.5);
+
+    Http::assertSentCount(1);
+    expect($result->isUnfinished())->toBeTrue()
+        ->and($result->done)->toBe(1);
+});
+
+it('given a time limit, a request waits at most what is left of it', function () {
+    bootExport();
+    $timeouts = [];
+    Http::fake(function ($request, array $options) use (&$timeouts) {
+        $timeouts[] = $options['timeout'] ?? null;
+
+        return Http::response('', 200);
+    });
+
+    $result = app(Exporter::class)->export([runTree(['x'])], 3);
+
+    expect($result->isOk())->toBeTrue()
+        ->and($timeouts)->toHaveCount(1)
+        ->and($timeouts[0])->toBeGreaterThan(2)->toBeLessThanOrEqual(3);
+});
+
+it('with less than a second of the time limit left, nothing is sent and no tree is done', function () {
+    bootExport();
+    fakeDestination(200);
+
+    $result = app(Exporter::class)->export([runTree(['x'])], 0.5);
+
+    Http::assertNothingSent();
+    expect($result->isUnfinished())->toBeTrue()
+        ->and($result->done)->toBe(0);
+});

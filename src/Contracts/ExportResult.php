@@ -3,10 +3,12 @@
 namespace Anantrp\Refract\Contracts;
 
 /**
- * What became of an export: delivered, worth trying again later, or refused for good.
+ * What became of an export: delivered, worth trying again later, refused for good, or cut short by its time limit.
  *
  * A retryable result may carry the seconds the destination asked to wait
- * (its Retry-After), already capped by the exporter.
+ * (its Retry-After), already capped by the exporter. An unfinished result
+ * carries the number of leading trees that were done (taken or refused)
+ * before time ran out; the rest were not sent in full.
  */
 final readonly class ExportResult
 {
@@ -16,6 +18,7 @@ final readonly class ExportResult
     private function __construct(
         protected string $status,
         public ?int $retryAfter = null,
+        public int $done = 0,
     ) {}
 
     /**
@@ -43,6 +46,14 @@ final readonly class ExportResult
     }
 
     /**
+     * Time ran out before every tree was sent: the given number of leading trees were done, the rest may be sent again.
+     */
+    public static function unfinished(int $done): self
+    {
+        return new self('unfinished', done: $done);
+    }
+
+    /**
      * Determine if the destination took the trees.
      */
     public function isOk(): bool
@@ -56,6 +67,14 @@ final readonly class ExportResult
     public function isRetryable(): bool
     {
         return $this->status === 'retryable';
+    }
+
+    /**
+     * Determine if time ran out before every tree was sent.
+     */
+    public function isUnfinished(): bool
+    {
+        return $this->status === 'unfinished';
     }
 
     /**

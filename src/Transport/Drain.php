@@ -70,9 +70,10 @@ class Drain
     /**
      * Put the given trees in the collector, and make sure a drain job is on its way.
      *
-     * The drain job is unique: while one is waiting, dispatching it again
-     * is a no-op, so only the first push after the store went idle
-     * dispatches one.
+     * Each tree is pushed on its own, so a push that fails drops only its
+     * tree. The drain job is dispatched when at least one tree was stored.
+     * It is unique: while one is waiting, dispatching it again is a no-op,
+     * so only the first push after the store went idle dispatches one.
      *
      * @param  list<list<array<string, mixed>>>  $trees
      */
@@ -80,13 +81,24 @@ class Drain
     {
         try {
             $collector = $this->container->make(Collector::class);
-
-            foreach ($trees as $tree) {
-                $collector->push($tree);
-            }
         } catch (Throwable $e) {
             Diagnostics::warn('collect.error', 'Run trees could not be stored for the queue drain ('.$e::class.'). They were dropped.');
 
+            return;
+        }
+
+        $stored = 0;
+
+        foreach ($trees as $tree) {
+            try {
+                $collector->push($tree);
+                $stored++;
+            } catch (Throwable $e) {
+                Diagnostics::warn('collect.error', 'Run trees could not be stored for the queue drain ('.$e::class.'). They were dropped.');
+            }
+        }
+
+        if ($stored === 0) {
             return;
         }
 

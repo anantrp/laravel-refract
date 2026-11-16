@@ -225,10 +225,12 @@ It needs:
 How it works:
 
 - The first push after the store went idle dispatches one drain job, 5 seconds later, so a burst of runs leaves together. Later pushes do not dispatch another while it waits.
-- The drain claims about 4 MB of trees, exports them in one request, removes them from the store, and repeats until the store is empty. After 20 seconds it hands over to a new drain job.
+- The drain claims about 4 MB of trees, exports them in one request, removes them from the store, and repeats until the store is empty. It starts no new claim after 20 seconds, and hands over to a new drain job.
+- The drain ends within 45 seconds, inside its 60 second job `timeout`, which is itself inside the 90 second `retry_after` of Laravel's default queue connections. Each request waits at most what is left of the 45 seconds, and a request is not started with less than a second left: the trees not sent in full go back to the store for the next drain, which is dispatched at once. Keep your queue connection's `retry_after` above 60 seconds.
 - On a network error, 408, 429 or 5xx, the drain gives the claimed trees back and stops. The next drain waits 10, then 60, then 300 seconds after each failure in a row, or the `Retry-After` of the answer when it is longer, at most 300 seconds. A tree is tried again until it is sent: there is no attempt limit. The store cap bounds what waits.
-- The drain job never throws, so nothing reaches `failed_jobs`.
-- A claimed tree is leased for 120 seconds. If the worker dies, the tree is claimed again when the lease runs out.
+- If the destination settings are missing or invalid in the worker, the drain logs one warning and, while trees are stored, tries again with the same backoff. On an empty store it dispatches nothing.
+- The drain job never throws, and it has no attempt limit (`$tries = 0`), so nothing reaches `failed_jobs`: a drain whose worker dies, or that is killed at its timeout, is given to a worker again after the connection's `retry_after`.
+- A claimed tree is leased for 120 seconds, twice the job `timeout`, so a running drain never loses its trees to another. If the worker dies, the tree is claimed again when the lease runs out.
 
 Delivery is at least once. A crash between the export and the removal from the store, or a retryable failure in the middle of a batch, sends trees again. Span ids are set when a span is recorded, so backends deduplicate a resent tree by span id.
 

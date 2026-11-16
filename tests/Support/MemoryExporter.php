@@ -30,7 +30,14 @@ class MemoryExporter implements Exporter
     public int $exports = 0;
 
     /**
-     * The run trees exported with an ok result so far, one export after another.
+     * The time limit of each export so far, in seconds, or null for none.
+     *
+     * @var list<?float>
+     */
+    public array $limits = [];
+
+    /**
+     * The run trees exported with an ok result so far, and the done trees of an unfinished one, one export after another.
      *
      * @var list<list<array<string, mixed>>>
      */
@@ -43,9 +50,10 @@ class MemoryExporter implements Exporter
      */
     public array $spans = [];
 
-    public function export(array $trees): ExportResult
+    public function export(array $trees, ?float $within = null): ExportResult
     {
         $this->exports++;
+        $this->limits[] = $within;
 
         if ($this->throws) {
             throw new LogicException('Refract bug in the exporter, SECRET');
@@ -53,7 +61,9 @@ class MemoryExporter implements Exporter
 
         $result = array_shift($this->results) ?? ExportResult::ok();
 
-        if (! $result->isOk()) {
+        if ($result->isUnfinished()) {
+            $trees = array_slice($trees, 0, $result->done);
+        } elseif (! $result->isOk()) {
             return $result;
         }
 

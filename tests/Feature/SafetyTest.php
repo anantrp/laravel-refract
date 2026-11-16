@@ -428,7 +428,7 @@ it('with Refract disabled no listener or flush hook is registered', function (bo
 it('2,000 runs in one worker keep memory flat', function () {
     $this->extenders[Exporter::class] = fn () => new class implements Exporter
     {
-        public function export(array $trees): ExportResult
+        public function export(array $trees, ?float $within = null): ExportResult
         {
             return ExportResult::ok();
         }
@@ -512,7 +512,7 @@ function throwingExporter(): Exporter
 {
     return new class implements Exporter
     {
-        public function export(array $trees): ExportResult
+        public function export(array $trees, ?float $within = null): ExportResult
         {
             throw new LogicException('Refract bug in the exporter, SECRET');
         }

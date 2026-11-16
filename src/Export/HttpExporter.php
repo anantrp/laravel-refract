@@ -46,6 +46,11 @@ class HttpExporter implements Exporter
     protected const MAX_RETRY_AFTER = 300;
 
     /**
+     * The fewest seconds left of an export's time limit for a request to be started.
+     */
+    protected const MIN_REQUEST_SECONDS = 1;
+
+    /**
      * Create a new exporter instance that waits the given seconds for the destination.
      */
     public function __construct(
@@ -59,9 +64,16 @@ class HttpExporter implements Exporter
 
     /**
      * Export the given trees, a request at a time, and stop at the first request the destination cannot take now.
+     *
+     * Given a time limit, each request waits at most what is left of it,
+     * and a request is not started with less than MIN_REQUEST_SECONDS
+     * left: the export is unfinished, with the trees whose every request
+     * was answered.
      */
-    public function export(array $trees): ExportResult
+    public function export(array $trees, ?float $within = null): ExportResult
     {
+        $deadline = $within === null ? null : $this->seconds() + $within;
+
         try {
             $requests = $this->requests($trees);
         } catch (Throwable $e) {
@@ -71,9 +83,22 @@ class HttpExporter implements Exporter
         }
 
         $result = ExportResult::ok();
+        $done = 0;
 
-        foreach ($requests as $spans) {
-            $sent = $this->post($spans);
+        foreach ($requests as [$spans, $treesDone]) {
+            $timeout = $this->timeout;
+
+            if ($deadline !== null) {
+                $left = $deadline - $this->seconds();
+
+                if ($left < self::MIN_REQUEST_SECONDS) {
+                    return ExportResult::unfinished($done);
+                }
+
+                $timeout = min($timeout, $left);
+            }
+
+            $sent = $this->post($spans, $timeout);
 
             if ($sent->isRetryable()) {
                 return $sent;
@@ -82,6 +107,8 @@ class HttpExporter implements Exporter
             if ($sent->isRejected()) {
                 $result = $sent;
             }
+
+            $done = $treesDone;
         }
 
         return $result;
@@ -96,8 +123,11 @@ class HttpExporter implements Exporter
      * and a span too big for one request is sent alone. A tree is sized as
      * the platform prepares it, since the platform may add attributes.
      *
+     * Each request comes with the number of leading trees whose spans are
+     * all in it or in the requests before it.
+     *
      * @param  list<list<array<string, mixed>>>  $trees
-     * @return list<list<TranslatedSpan>>
+     * @return list<array{list<TranslatedSpan>, int}>
      */
     protected function requests(array $trees): array
     {
@@ -106,10 +136,11 @@ class HttpExporter implements Exporter
         $requests = [];
         $request = [];
         $used = 0;
+        $done = 0;
 
-        foreach ($this->units($trees, $budget) as [$spans, $size]) {
+        foreach ($this->units($trees, $budget) as [$spans, $size, $treesDone]) {
             if ($request !== [] && $used + 1 + $size > $budget) {
-                $requests[] = $request;
+                $requests[] = [$request, $done];
                 $request = [];
             }
 
@@ -121,10 +152,11 @@ class HttpExporter implements Exporter
 
             $used = $request === [] ? $size : $used + 1 + $size;
             $request = [...$request, ...$spans];
+            $done = $treesDone;
         }
 
         if ($request !== []) {
-            $requests[] = $request;
+            $requests[] = [$request, $done];
         }
 
         return $requests;
@@ -133,28 +165,32 @@ class HttpExporter implements Exporter
     /**
      * Get the units the given trees are packed by, with the bytes each takes in an encoded body: each tree that fits a request, and each span of a tree that does not.
      *
+     * Each unit comes with the number of leading trees done once it is sent.
+     *
      * @param  list<list<array<string, mixed>>>  $trees
-     * @return list<array{list<TranslatedSpan>, int}>
+     * @return list<array{list<TranslatedSpan>, int, int}>
      */
     protected function units(array $trees, int $budget): array
     {
         $units = [];
 
-        foreach ($trees as $tree) {
+        foreach ($trees as $position => $tree) {
             $spans = array_map($this->translator->translate(...), $tree);
             $sizes = array_map($this->encoder->size(...), $this->platform->prepare($spans));
             $size = array_sum($sizes) + count($sizes) - 1;
 
             if ($size <= $budget) {
-                $units[] = [$spans, $size];
+                $units[] = [$spans, $size, $position + 1];
 
                 continue;
             }
 
             Diagnostics::warn('export.split', 'A run tree is over the '.self::PART_LIMIT.' byte limit of one request. Its spans were sent in more than one request.');
 
+            $last = array_key_last($spans);
+
             foreach ($spans as $index => $span) {
-                $units[] = [[$span], $sizes[$index]];
+                $units[] = [[$span], $sizes[$index], $index === $last ? $position + 1 : $position];
             }
         }
 
@@ -162,11 +198,11 @@ class HttpExporter implements Exporter
     }
 
     /**
-     * Prepare, encode and post the given translated spans in one request.
+     * Prepare, encode and post the given translated spans in one request, waiting the given seconds for the answer.
      *
      * @param  list<TranslatedSpan>  $spans
      */
-    protected function post(array $spans): ExportResult
+    protected function post(array $spans, int|float $timeout): ExportResult
     {
         try {
             $body = $this->encoder->encode($this->platform->prepare($spans), $this->resource());
@@ -183,7 +219,7 @@ class HttpExporter implements Exporter
             // A redirect is never followed: it would send the headers to another host or turn the POST into a GET.
             $response = Http::withHeaders($headers)
                 ->withoutRedirecting()
-                ->timeout($this->timeout)
+                ->timeout($timeout)
                 ->withBody($body, 'application/json')
                 ->post($this->platform->endpoint());
         } catch (ConnectionException) {
@@ -197,6 +233,14 @@ class HttpExporter implements Exporter
         }
 
         return $this->result($response);
+    }
+
+    /**
+     * Get the monotonic clock in seconds.
+     */
+    protected function seconds(): float
+    {
+        return hrtime(true) / 1_000_000_000;
     }
 
     /**

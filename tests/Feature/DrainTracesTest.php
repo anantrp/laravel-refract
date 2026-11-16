@@ -1,12 +1,14 @@
 <?php
 
 use Anantrp\Refract\Contracts\Collector;
+use Anantrp\Refract\Contracts\Exporter;
 use Anantrp\Refract\Contracts\ExportResult;
 use Anantrp\Refract\Support\Diagnostics;
 use Anantrp\Refract\Tests\Support\MemoryCollector;
 use Anantrp\Refract\Tests\Support\WarningLog;
 use Anantrp\Refract\Transport\Drain;
 use Anantrp\Refract\Transport\DrainTraces;
+use Illuminate\Bus\UniqueLock;
 use Illuminate\Contracts\Cache\Repository;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
@@ -62,7 +64,8 @@ function realQueue(string $connection): void
     app()->forgetInstance('queue');
     Queue::clearResolvedInstance('queue');
 
-    config(['queue.default' => $connection]);
+    // Failed jobs are logged to the tests' database, where a test can count them.
+    config(['queue.default' => $connection, 'queue.failed.database' => 'testing']);
 }
 
 /**
@@ -94,7 +97,7 @@ it('the queue drain stores each tree and dispatches one drain job, 5 s later on 
         ->and($this->exporter->exports)->toBe(0);
 
     Queue::assertPushedOn('refract', DrainTraces::class);
-    Queue::assertPushed(DrainTraces::class, fn (DrainTraces $job) => $job->delay === 5 && $job->afterCommit === false && $job->tries === 1);
+    Queue::assertPushed(DrainTraces::class, fn (DrainTraces $job) => $job->delay === 5 && $job->afterCommit === false && $job->tries === 0 && $job->timeout === 60);
 });
 
 it('a drain job is dispatched once while one is waiting: later pushes are no-ops', function () {
@@ -260,6 +263,81 @@ it('a drain that spends its time budget dispatches the next drain at once and st
         ->and(pushedDrains())->toBe([0]);
 });
 
+it('a drain gives each export what is left of its 45 s limit, so it ends within its 60 s timeout and a lease outlives it', function () {
+    $this->collector->push(drainTree('one'));
+
+    drainNow();
+
+    $job = new DrainTraces;
+
+    expect($this->exporter->limits)->toHaveCount(1)
+        ->and($this->exporter->limits[0])->toBeGreaterThan(44)->toBeLessThanOrEqual(45)
+        ->and($job->timeout)->toBeGreaterThan(45)
+        ->and(DrainTraces::LEASE)->toBeGreaterThan($job->timeout);
+});
+
+it('an export cut short by the time limit acks the trees done, releases the rest at once and dispatches the next drain', function () {
+    foreach (['one', 'two', 'three'] as $name) {
+        $this->collector->push(drainTree($name));
+    }
+
+    $this->exporter->results = [ExportResult::unfinished(1)];
+
+    drainNow();
+
+    expect(drainedNames())->toBe(['one'])
+        ->and($this->collector->releases)->toBe([[[2, 3], 0]])
+        ->and($this->collector->size())->toBe(2)
+        ->and(pushedDrains())->toBe([0])
+        ->and($this->log->warnings)->toBe([]);
+
+    drainNow();
+
+    expect(drainedNames())->toBe(['one', 'two', 'three'])
+        ->and($this->collector->size())->toBe(0);
+});
+
+it('a drain killed by its worker is never failed: it is attempted again, however many times', function () {
+    $this->loadMigrationsFrom(dirname(__DIR__, 2).'/vendor/orchestra/testbench-core/laravel/migrations');
+    realQueue('database');
+
+    DrainTraces::dispatch(0);
+
+    // A worker died with the drain reserved: its retry_after ran out, twice.
+    DB::table('jobs')->update(['attempts' => 2, 'reserved_at' => now()->subMinutes(5)->getTimestamp()]);
+
+    Artisan::call('queue:work', ['--once' => true, '--queue' => 'refract', '--sleep' => 0, '--tries' => 1]);
+
+    expect(DB::table('failed_jobs')->count())->toBe(0)
+        ->and(DB::table('jobs')->count())->toBe(0);
+});
+
+it('a drain that cannot make the exporter dispatches nothing when the store is empty', function () {
+    app()->bind(Exporter::class, fn () => throw new RuntimeException('no destination'));
+
+    drainNow();
+
+    expect(pushedDrains())->toBe([])
+        ->and($this->log->warnings)->toHaveCount(1)
+        ->and($this->log->warnings[0])->toContain('could not make the exporter');
+});
+
+it('a drain that cannot make the exporter tries again with the backoff while trees are stored', function () {
+    app()->bind(Exporter::class, fn () => throw new RuntimeException('no destination'));
+    $this->collector->push(drainTree('one'));
+
+    foreach ([10, 60, 300] as $wait) {
+        // As a worker does when the drain starts.
+        app(Repository::class)->lock(UniqueLock::getKey(new DrainTraces))->forceRelease();
+
+        drainNow();
+        $this->travel($wait)->seconds();
+    }
+
+    expect(pushedDrains())->toBe([10, 60, 300])
+        ->and($this->collector->size())->toBe(1);
+});
+
 it('a drain on an empty store sends nothing and dispatches nothing', function () {
     drainNow();
 
@@ -301,6 +379,28 @@ it('a store that fails on push drops the trees with one warning and dispatches n
         ->and($this->log->warnings)->toHaveCount(1)
         ->and($this->log->warnings[0])->toContain('could not be stored')
         ->and($this->log->warnings[0])->not->toContain('SECRET');
+});
+
+it('a push that fails drops only its tree: the rest are stored and the drain is dispatched, with one warning', function () {
+    $collector = new class extends MemoryCollector
+    {
+        public function push(array $tree): void
+        {
+            if ($tree[0]['call']['agent'] !== 'kept') {
+                throw new LogicException('Refract bug in the collector, SECRET');
+            }
+
+            parent::push($tree);
+        }
+    };
+    app()->instance(Collector::class, $collector);
+
+    app(Drain::class)->send([drainTree('lost'), drainTree('kept'), drainTree('lost too'), drainTree('kept')]);
+
+    expect($collector->size())->toBe(2)
+        ->and(pushedDrains())->toBe([5])
+        ->and($this->log->warnings)->toHaveCount(1)
+        ->and($this->log->warnings[0])->toContain('could not be stored');
 });
 
 it('a drain job that cannot be dispatched is one warning, and the trees stay stored', function () {

@@ -26,6 +26,13 @@ use Throwable;
  * with a backoff and the drain stops until then. It never throws, so it
  * never reaches the failed jobs table.
  *
+ * It keeps to a time limit, so it ends well before its worker timeout and
+ * before any queue connection's retry_after, and a claim's lease outlives
+ * it: a drain is never killed or run twice in the middle of an export. A
+ * drain that is killed anyway (a crash, a deploy) is never failed: the
+ * queue gives it to a worker again after its retry_after, and the trees it
+ * claimed are claimed again once their lease runs out.
+ *
  * It is unique until it starts processing: while one drain is waiting,
  * dispatching another is a no-op, and a running drain can dispatch the
  * next one. The lock lives in the app's default cache store, so the
@@ -56,17 +63,27 @@ class DrainTraces implements ShouldBeUniqueUntilProcessing, ShouldQueue
     public const CLAIM_BYTES = 4_000_000;
 
     /**
-     * The seconds a claim holds its trees. Longer than the job may run, so a live drain never loses its trees to another.
+     * The seconds a claim holds its trees: twice the job's timeout, so a drain still running never loses its trees to another.
      */
     public const LEASE = 120;
 
     /**
-     * The seconds one drain spends claiming, before it hands over to the next drain.
-     *
-     * Its last export may add up to a few TIMEOUTs, which keeps the job
-     * well under its timeout and under the queue's default retry_after.
+     * The seconds one drain starts new claims for, before it hands over to the next drain.
      */
     protected const int BUDGET = 20;
+
+    /**
+     * The seconds after the drain starts by which its exports end.
+     *
+     * A claim is at most CLAIM_BYTES and one tree, and a tree over a
+     * request's limit is sent in more than one request: the export is
+     * given what is left of this limit, never starts a request it could
+     * not finish in time, and leaves the rest of the claim for the next
+     * drain. With the claims, acks and encoding around it, the drain ends
+     * well within its 60 second timeout, itself within the 90 second
+     * retry_after of Laravel's default queue connections.
+     */
+    protected const int LIMIT = 45;
 
     /**
      * The seconds to wait after each failed export in a row. A Retry-After is waited for when it is longer.
@@ -96,12 +113,16 @@ class DrainTraces implements ShouldBeUniqueUntilProcessing, ShouldQueue
     protected const BACKOFF_KEY = 'refract:drain:backoff';
 
     /**
-     * The drain is tried once. A retry is a new drain, dispatched by this one.
+     * The drain is never failed for its attempts: a drain killed by a crash or its timeout is given to a worker again.
+     *
+     * The drain never throws, so it is attempted again only when its
+     * worker died. A retry after a failed export is a new drain,
+     * dispatched by this one.
      */
-    public int $tries = 1;
+    public int $tries = 0;
 
     /**
-     * The seconds the worker lets the drain run.
+     * The seconds the worker lets the drain run: longer than LIMIT, shorter than LEASE.
      */
     public int $timeout = 60;
 
@@ -131,25 +152,65 @@ class DrainTraces implements ShouldBeUniqueUntilProcessing, ShouldQueue
     public function handle(Container $container): void
     {
         try {
-            $this->drain($container->make(Collector::class), $container->make(Exporter::class), $container->make(Cache::class));
+            $collector = $container->make(Collector::class);
+            $cache = $container->make(Cache::class);
         } catch (Throwable $e) {
-            Diagnostics::warn('drain.error', 'The queue drain failed ('.$e::class.'). The trees it claimed are sent again when their lease runs out.');
+            $this->broke($e);
 
-            // So the trees it may have claimed are not left waiting for the next run.
-            try {
-                $this->next(self::LEASE);
-            } catch (Throwable) {
-                //
-            }
+            return;
+        }
+
+        try {
+            $exporter = $container->make(Exporter::class);
+        } catch (Throwable $e) {
+            $this->withoutExporter($collector, $cache, $e);
+
+            return;
+        }
+
+        try {
+            $this->drain($collector, $exporter, $cache);
+        } catch (Throwable $e) {
+            $this->broke($e);
         }
     }
 
     /**
-     * Claim, export and ack until the store is empty, the destination cannot take a batch, or the budget is spent.
+     * Warn that the drain failed, and dispatch the next one for when the trees it may have claimed are due again.
+     */
+    protected function broke(Throwable $e): void
+    {
+        Diagnostics::warn('drain.error', 'The queue drain failed ('.$e::class.'). The trees it claimed are sent again when their lease runs out.');
+
+        try {
+            $this->next(self::LEASE);
+        } catch (Throwable) {
+            //
+        }
+    }
+
+    /**
+     * Warn that no exporter could be made, and try again with the backoff of a failed export while trees are stored.
+     */
+    protected function withoutExporter(Collector $collector, Cache $cache, Throwable $e): void
+    {
+        Diagnostics::warn('drain.exporter', 'The queue drain could not make the exporter ('.$e::class.'). Check the destination settings; the stored trees are kept.');
+
+        try {
+            if ($collector->size() > 0) {
+                $this->next($this->failureDelay($cache, ExportResult::retryable()));
+            }
+        } catch (Throwable) {
+            //
+        }
+    }
+
+    /**
+     * Claim, export and ack until the store is empty, the destination cannot take a batch, or the time is spent.
      */
     protected function drain(Collector $collector, Exporter $exporter, Cache $cache): void
     {
-        $deadline = hrtime(true) + static::BUDGET * 1_000_000_000;
+        $started = hrtime(true);
         [$until, $failures] = $this->backoffState($cache);
 
         // Another drain was told to wait: this one never sends before then.
@@ -159,7 +220,7 @@ class DrainTraces implements ShouldBeUniqueUntilProcessing, ShouldQueue
             return;
         }
 
-        while (hrtime(true) < $deadline) {
+        while ($this->elapsed($started) < static::BUDGET) {
             $trees = $collector->claim(self::CLAIM_BYTES, self::LEASE);
 
             if ($trees === []) {
@@ -171,15 +232,25 @@ class DrainTraces implements ShouldBeUniqueUntilProcessing, ShouldQueue
                 return;
             }
 
-            $result = $this->export($exporter, array_values($trees));
+            $ids = array_keys($trees);
+            $result = $this->export($exporter, array_values($trees), static::LIMIT - $this->elapsed($started));
 
             if ($result->isRetryable()) {
-                $this->retryLater($collector, $cache, array_keys($trees), $result, $failures + 1);
+                $this->retryLater($collector, $cache, $ids, $result);
 
                 return;
             }
 
-            $collector->ack(array_keys($trees));
+            if ($result->isUnfinished()) {
+                // The done trees are acked; the rest go back, due at once, for the next drain.
+                $collector->ack(array_slice($ids, 0, $result->done));
+                $collector->release(array_slice($ids, $result->done), 0);
+                $this->next(0);
+
+                return;
+            }
+
+            $collector->ack($ids);
 
             if ($failures > 0) {
                 $cache->forget(self::BACKOFF_KEY);
@@ -193,14 +264,22 @@ class DrainTraces implements ShouldBeUniqueUntilProcessing, ShouldQueue
     }
 
     /**
+     * Get the seconds since the given monotonic time.
+     */
+    protected function elapsed(int|float $since): float
+    {
+        return (hrtime(true) - $since) / 1_000_000_000;
+    }
+
+    /**
      * Export the given trees. An exporter that throws drops them, so a tree that breaks it is never tried again.
      *
      * @param  list<list<array<string, mixed>>>  $trees
      */
-    protected function export(Exporter $exporter, array $trees): ExportResult
+    protected function export(Exporter $exporter, array $trees, float $within): ExportResult
     {
         try {
-            return $exporter->export($trees);
+            return $exporter->export($trees, max(0.0, $within));
         } catch (Throwable $e) {
             Diagnostics::warn('export.error', 'Spans could not be exported ('.$e::class.'). The batch was dropped.');
 
@@ -211,22 +290,34 @@ class DrainTraces implements ShouldBeUniqueUntilProcessing, ShouldQueue
     /**
      * Release the given trees, record the backoff for every drain, and dispatch the drain that tries them again.
      *
-     * The wait is the backoff of the failures in a row, or the Retry-After
-     * when it is longer: Retry-After means "not before".
-     *
      * @param  list<array-key>  $ids
      */
-    protected function retryLater(Collector $collector, Cache $cache, array $ids, ExportResult $result, int $failures): void
+    protected function retryLater(Collector $collector, Cache $cache, array $ids, ExportResult $result): void
     {
-        $delay = min(self::MAX_BACKOFF, max($result->retryAfter ?? 0, self::BACKOFF[min($failures, count(self::BACKOFF)) - 1]));
+        $delay = $this->failureDelay($cache, $result);
 
         $collector->release($ids, $delay);
-
-        $cache->put(self::BACKOFF_KEY, ['until' => $this->currentTime() + $delay, 'failures' => $failures], $delay + self::LOCK_MARGIN);
 
         Diagnostics::warn('drain.retry', "Spans could not be exported: the destination could not be reached or answered 408, 429 or 5xx. They are tried again in {$delay} seconds.");
 
         $this->next($delay);
+    }
+
+    /**
+     * Record one more failed export in a row for every drain, and get the seconds to wait before the next try.
+     *
+     * The wait is the backoff of the failures in a row, or the Retry-After
+     * when it is longer: Retry-After means "not before".
+     */
+    protected function failureDelay(Cache $cache, ExportResult $result): int
+    {
+        $failures = $this->backoffState($cache)[1] + 1;
+
+        $delay = min(self::MAX_BACKOFF, max($result->retryAfter ?? 0, self::BACKOFF[min($failures, count(self::BACKOFF)) - 1]));
+
+        $cache->put(self::BACKOFF_KEY, ['until' => $this->currentTime() + $delay, 'failures' => $failures], $delay + self::LOCK_MARGIN);
+
+        return $delay;
     }
 
     /**
