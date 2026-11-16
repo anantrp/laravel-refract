@@ -14,7 +14,7 @@ Install it, set a few environment variables, and you are done. There is no API t
 
 Refract uses `open-telemetry/api` only. It does not need the OpenTelemetry SDK.
 
-Laravel Octane is not supported in 0.1.
+Laravel Octane is not supported in 0.2.
 
 ## Installation
 
@@ -22,7 +22,7 @@ Laravel Octane is not supported in 0.1.
 composer require anantrp/laravel-refract
 ```
 
-The service provider is discovered automatically. Refract does nothing useful until you tell it where to send traces. Until then it logs one warning and exports nothing.
+The service provider is discovered automatically. Refract does nothing until you tell it where to send traces. Until then it logs one warning per process and records nothing.
 
 ## Quick Start
 
@@ -40,13 +40,15 @@ Traces go to Langfuse Cloud (`https://cloud.langfuse.com`). Set `LANGFUSE_BASE_U
 
 ```ini
 REFRACT_DESTINATION=otlp
-OTEL_EXPORTER_OTLP_ENDPOINT=https://otlp.example.com
-OTEL_EXPORTER_OTLP_HEADERS="x-api-key=your-key"
+REFRACT_OTLP_ENDPOINT=https://otlp.example.com/v1/traces
+REFRACT_OTLP_HEADERS="x-api-key=your-key"
 ```
 
-`otlp` is the default destination, so the first line is optional.
+`otlp` is the default destination, so the first line is optional. The endpoint is the full URL traces are posted to.
 
 Run any agent. Each run is recorded as a tree of spans. A run starts a new trace, or joins your app's active OpenTelemetry trace when there is one. A sub-agent run nests inside the run that called it.
+
+Traces are sent from the process that ran the agent, after the response. To send them from your queue workers instead, with retries, see [Collecting and Draining](#collecting-and-draining).
 
 ## Configuration
 
@@ -56,28 +58,23 @@ All settings come from environment variables.
 | --- | --- | --- |
 | `REFRACT_ENABLED` | `true` | When `false`, Refract registers no listener at all. |
 | `REFRACT_DESTINATION` | `otlp` | `otlp` or `langfuse`. See [Destinations](#destinations). |
-| `REFRACT_ENVIRONMENT` | `APP_ENV` | Sent as `deployment.environment.name`. |
-| `OTEL_SERVICE_NAME` | `APP_NAME` | Sent as `service.name`. |
 | `REFRACT_OTLP_ENDPOINT` | none | `otlp`: the full URL traces are posted to. |
-| `REFRACT_OTLP_HEADERS` | none | `otlp`: headers for any OTLP endpoint. |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | none | `otlp`: a base URL. `/v1/traces` is appended. Used only when `REFRACT_OTLP_ENDPOINT` is not set. |
-| `OTEL_EXPORTER_OTLP_HEADERS` | none | `otlp`: headers sent only to `OTEL_EXPORTER_OTLP_ENDPOINT`. |
-| `OTEL_EXPORTER_OTLP_COMPRESSION` | `gzip` | `gzip` or `none`. Both destinations: the only `OTEL_EXPORTER_OTLP_*` variable that also applies to `langfuse`. See [Compression](#compression). |
+| `REFRACT_OTLP_HEADERS` | none | `otlp`: headers sent with every request. |
 | `LANGFUSE_BASE_URL` | Langfuse Cloud | `langfuse`: your Langfuse host. |
 | `LANGFUSE_PUBLIC_KEY` | none | `langfuse`: required. |
 | `LANGFUSE_SECRET_KEY` | none | `langfuse`: required. |
+| `REFRACT_DRAIN` | `sync` | `sync` or `queue`. See [Collecting and Draining](#collecting-and-draining). |
+| `REFRACT_COLLECTOR` | `redis` | `redis` or `database`, used when `REFRACT_DRAIN=queue`. |
 | `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` | `false` | Record prompts, outputs and tool data. See [Content Capture](#content-capture). |
-| `REFRACT_CAPTURE_MAX_BYTES` | `131072` (128 KB) | The cap per captured value. At least `64`. |
-| `REFRACT_CONTEXT_PARTICIPANT_TYPE` | `refract.participant_type` | The `Context` key that holds the participant type. |
-| `REFRACT_CONTEXT_PARTICIPANT_ID` | `refract.participant_id` | The `Context` key that holds the participant id. |
+
+The service name is your app's name (`APP_NAME`, or `Laravel` when it is empty). The environment is your app's environment (`APP_ENV`).
 
 Rules for every variable:
 
 - Missing or empty (`FOO=`) means the default, with no warning.
-- Invalid means the default plus one warning. For example: text where a number goes, `0` or a negative number, or a `REFRACT_CAPTURE_MAX_BYTES` under 64. An unknown destination, or a boolean where a name goes, is also invalid.
+- Invalid means the default plus one warning. For example: an unknown destination, drain or collector, or a boolean where a name goes.
 - Invalid headers mean no headers from that variable, plus one warning.
-- An invalid `REFRACT_OTLP_ENDPOINT` or `LANGFUSE_BASE_URL` exports nothing, plus one warning. Refract never falls back to another host, so your keys and headers never go to a host you did not name.
-- An invalid `OTEL_EXPORTER_OTLP_ENDPOINT` counts as not set, plus one warning.
+- A destination that cannot send logs one warning, and Refract registers nothing, as if `REFRACT_ENABLED=false`. That is an `otlp` destination with no endpoint, a `langfuse` destination with a missing key, or an invalid `REFRACT_OTLP_ENDPOINT` or `LANGFUSE_BASE_URL`. Refract never falls back to another host, so your keys and headers never go to a host you did not name.
 
 Everything works with `php artisan config:cache`.
 
@@ -87,17 +84,7 @@ Everything works with `php artisan config:cache`.
 php artisan vendor:publish --tag=refract-config
 ```
 
-This writes `config/refract.php`. Two settings live only in this file: the `Context` attribute map (`context.attributes`) and the content `mask` (`capture.mask`).
-
-If you edit `destinations` in a published config, keep each destination's `'platform'` line. A destination without a valid `'platform'` class exports nothing and logs one warning.
-
-```php
-'langfuse' => [
-    'platform' => LangfusePlatform::class, // keep this line
-    'url' => env('LANGFUSE_BASE_URL'),
-    // ...
-],
-```
+This writes `config/refract.php`. Two settings live only in this file: the `Context` attribute map (`context.attributes`) and the content `mask` (`capture.mask`). The connection each collector uses is set there too (`collectors.redis.connection`, `collectors.database.connection`).
 
 ## What a Trace Looks Like
 
@@ -130,7 +117,7 @@ invoke_agent SupportAgent
 | `laravel.ai.invocation_id`, `laravel.ai.agent.class` | `invoke_agent` |
 | `laravel.ai.step`, `laravel.ai.final_step` | `chat` |
 | `laravel.ai.tool_invocation_id` | `execute_tool` |
-| `session.id`, `gen_ai.conversation.id` | `invoke_agent`, from the SDK conversation id |
+| `session.id`, `gen_ai.conversation.id` | `invoke_agent`, from the SDK conversation id. A run that is not saved can get `session.id` from a [Context mapping](#context-attributes). |
 | `laravel.ai.participant.type`, `laravel.ai.participant.id` | `invoke_agent`. See [Participant](#participant) |
 | `error.type` | any span that failed: the exception class |
 | `laravel.ai.abandoned` | any span closed as abandoned |
@@ -151,18 +138,14 @@ If your app already has an active OpenTelemetry span (through `open-telemetry/ap
 
 Any backend that accepts OTLP over HTTP with JSON.
 
-There are two ways to set the endpoint:
-
-- `REFRACT_OTLP_ENDPOINT` is the full traces URL, used as is. It gets only `REFRACT_OTLP_HEADERS`. Your `OTEL_EXPORTER_OTLP_HEADERS` are never sent to it, so another exporter's credentials stay with that exporter.
-- `OTEL_EXPORTER_OTLP_ENDPOINT` is a base URL. Refract appends `/v1/traces`. It gets `OTEL_EXPORTER_OTLP_HEADERS` plus `REFRACT_OTLP_HEADERS`. On the same header name, the `REFRACT_` value wins.
-
-`REFRACT_OTLP_ENDPOINT` wins when both are set. The `_TRACES_` variants of the OTel variables are not read.
-
-Headers use the OpenTelemetry format, with URL-encoded values:
-
 ```ini
+REFRACT_OTLP_ENDPOINT=https://otlp.example.com/v1/traces
 REFRACT_OTLP_HEADERS="x-api-key=abc123,x-team=my%20team"
 ```
+
+`REFRACT_OTLP_ENDPOINT` is the full traces URL, used as is. Headers use the OpenTelemetry format, with URL-encoded values.
+
+The standard `OTEL_EXPORTER_OTLP_*` variables are not read. They belong to your app's own OpenTelemetry exporter, and its credentials stay with it.
 
 ### `langfuse`
 
@@ -174,21 +157,19 @@ LANGFUSE_SECRET_KEY=sk-lf-...
 ```
 
 - An empty `LANGFUSE_BASE_URL` means Langfuse Cloud.
-- A missing key exports nothing and logs one warning.
+- A missing key logs one warning, and Refract records nothing.
 - Refract posts to `/api/public/otel/v1/traces` with Basic auth from your keys.
 - The environment name is changed to fit Langfuse: lowercase, anything but letters, digits, `-` and `_` becomes `-`, at most 40 characters. `Staging EU 1` becomes `staging-eu-1`. An empty result becomes `default`.
 - Langfuse names tool observations by the tool name, so `execute_tool LookupOrder` shows as `LookupOrder`.
 - Langfuse stores times in milliseconds. Spans that start in the same millisecond are moved to distinct milliseconds, so they keep their order. Parents still cover their children and events stay inside their span.
-- `user.id` is set only from a user participant: the participant type must implement `Illuminate\Contracts\Auth\Authenticatable`. A `Team` participant gets no `user.id`. A `Context` mapping never sets `user.id`.
+- `user.id` is set from a user participant: the participant type must implement `Illuminate\Contracts\Auth\Authenticatable`. A user participant wins over a `user.id` from a `Context` mapping. A run with no user participant, such as a `Team` participant or a run that is not saved, keeps the mapped `user.id`, if any.
 - A `Context` mapping never sets a `langfuse.*` attribute. Refract sets those itself, for example on abandoned spans.
-
-### Compression
-
-Every export is gzipped and sent with `Content-Encoding: gzip`, to `otlp` and to `langfuse`. Set `OTEL_EXPORTER_OTLP_COMPRESSION=none` to send it plain, for example through a proxy that does not accept gzip. It is the only `OTEL_EXPORTER_OTLP_*` variable that also applies to `langfuse`. If gzip fails, the export is sent plain.
 
 ### Request Size
 
 Refract packs whole run trees (a run and every span under it, sub-agent runs included) into requests of at most 4 MB of OTLP JSON, counted before gzip. So a destination with a body size limit does not refuse them. A big tree usually comes from content capture. A run tree over 4 MB alone is the exception: its spans are packed one by one, so the tree is split over several requests, with one warning. A single span over 4 MB is sent alone, with one warning: the destination may refuse it.
+
+Every request is gzipped and sent with `Content-Encoding: gzip`.
 
 On Langfuse, spans that start in the same millisecond are moved apart within each request. Siblings of a run tree that was split over two requests can still share a millisecond.
 
@@ -196,31 +177,91 @@ On Langfuse, spans that start in the same millisecond are moved apart within eac
 
 Refract hands a run tree on once its top-level run ends. Nothing touches the network before a web response is sent.
 
-- **Web request:** every finished run tree is sent once, after the response is sent. Runs that are still open then are closed as abandoned and sent with them.
-- **Console process** (command, queue worker, tinker): each run tree is sent when its top-level run ends, in a request of its own. The end of an async queued job and the end of the outermost command close the runs still open as abandoned, and send them.
+- **Web request:** every finished run tree is handed on once, after the response is sent. Runs that are still open then are closed as abandoned and handed on with them.
+- **Console process** (command, queue worker, tinker): each run tree is handed on when its top-level run ends. The end of an async queued job and the end of the outermost command close the runs still open as abandoned, and hand them on.
 
-A sync-driver job or an `Artisan::call()` inside a web request does not send on its own. Its spans leave with the request.
+A sync-driver job or an `Artisan::call()` inside a web request does not hand on its own runs. Its spans leave with the request.
 
-Refract exports in the same process, once. It is best effort: the export waits up to 5 seconds for the destination, and a tree that cannot be exported is dropped with one warning. It is never tried again.
+Where a run tree goes depends on `REFRACT_DRAIN`:
+
+- **`sync`** (the default): the tree is exported in the same process, once. It is best effort: the export waits up to 5 seconds for the destination, and a tree that cannot be exported is dropped with one warning. It is never tried again. There is nothing to set up.
+- **`queue`**: the tree is stored in a collector, and your queue workers export it, with retries. See [Collecting and Draining](#collecting-and-draining).
 
 ### Export Failures
 
-| Result | What happens |
-| --- | --- |
-| 2xx | Done |
-| 2xx whose `partialSuccess` refuses spans or has a message | Done, one warning |
-| Network error, 408, 429, 5xx | Dropped, one warning. The later requests of that export are not tried. |
-| Any other status (3xx, 400, 401, 403, 404, ...) | Dropped, one warning. The later requests of that export are still sent. |
+| Result | `sync` | `queue` |
+| --- | --- | --- |
+| 2xx | Done | Done |
+| 2xx whose `partialSuccess` refuses spans or has a message | Done, one warning | Done, one warning |
+| Network error, 408, 429, 5xx | Dropped, one warning. The later requests of that export are not tried. | Kept and tried again later, one warning. The drain stops until then. |
+| Any other status (3xx, 400, 401, 403, 404, ...) | Dropped, one warning | Dropped, one warning |
 
 A rejected batch's warning names the status and the first 200 characters of the response body. Refract masks credentials that the destination echoes in the body as `[removed]`. It masks `Bearer` and `Basic` tokens. It also masks values under key names that contain `key`, `token`, `secret`, `auth`, `password`, `passwd`, `credential` or `cookie`, in JSON, in header lines and in `key=value` pairs. Other text, such as a plain error line, is kept.
 
 A 2xx can carry an OTLP `partialSuccess` (JSON answers only). When it refuses spans or has a message, one warning names the refused count and the message, masked the same way. The answer does not say which spans were refused. They are not retried, as the OTLP spec asks. An empty body, `{}` or a body that is not JSON logs nothing.
 
-Redirects are never followed, so your keys and headers never go to another host. A 3xx is dropped like any other rejected status. The HTTP timeout is 5 seconds.
+Redirects are never followed, so your keys and headers never go to another host. A 3xx is dropped like any other rejected status. The HTTP timeout is 5 seconds with `sync` and 15 seconds from the queue drain.
 
-### No Endpoint
+## Collecting and Draining
 
-When the destination has no endpoint, or Langfuse has no keys, nothing is exported and one warning is logged. The warning comes on the first export, not at boot.
+With `REFRACT_DRAIN=queue`, a finished run tree is not exported where it ran. It is pushed to a collector, a bounded store, and a `DrainTraces` job exports it from your own queue workers. There is no extra daemon.
+
+```ini
+REFRACT_DRAIN=queue
+REFRACT_COLLECTOR=redis
+```
+
+Run a worker that reads the `refract` queue of your default queue connection:
+
+```bash
+php artisan queue:work --queue=default,refract
+```
+
+It needs:
+
+- **An async queue connection.** On the `sync` connection the drain runs at once, inside the push, and cannot wait before a retry: Refract logs one warning.
+- **A cache store shared by every process.** The drain job is unique while it waits, and the backoff after a failure is shared, both through your default cache store. The `array` store, or a `file` store on more than one server, does not share them.
+
+How it works:
+
+- The first push after the store went idle dispatches one drain job, 5 seconds later, so a burst of runs leaves together. Later pushes do not dispatch another while it waits.
+- The drain claims about 4 MB of trees, exports them in one request, removes them from the store, and repeats until the store is empty. After 20 seconds it hands over to a new drain job.
+- On a network error, 408, 429 or 5xx, the drain gives the claimed trees back and stops. The next drain waits 10, then 60, then 300 seconds after each failure in a row, or the `Retry-After` of the answer when it is longer, at most 300 seconds. A tree is tried again until it is sent: there is no attempt limit. The store cap bounds what waits.
+- The drain job never throws, so nothing reaches `failed_jobs`.
+- A claimed tree is leased for 120 seconds. If the worker dies, the tree is claimed again when the lease runs out.
+
+Delivery is at least once. A crash between the export and the removal from the store, or a retryable failure in the middle of a batch, sends trees again. Span ids are set when a span is recorded, so backends deduplicate a resent tree by span id.
+
+The store holds at most 64 MB of trees. At the cap, new trees are dropped and counted, with one warning. The trees already stored are kept.
+
+### Redis Collector
+
+```ini
+REFRACT_COLLECTOR=redis
+```
+
+Trees are kept in a Redis stream, on your default Redis connection, or the one named in `collectors.redis.connection` in the published config.
+
+- It needs Redis 6.2 or higher (`XAUTOCLAIM`), and the `phpredis` extension or `predis/predis`.
+- Use a connection that never evicts keys. Under an `allkeys-*` eviction policy, Redis can drop stored traces, or the store's byte count, without a warning.
+- On Redis Cluster, every key shares the hash tag `{traces}`, so they live on one node.
+
+### Database Collector
+
+```ini
+REFRACT_COLLECTOR=database
+```
+
+Trees are kept in a `refract_traces` table. Publish the migration and run it:
+
+```bash
+php artisan vendor:publish --tag=refract-migrations
+php artisan migrate
+```
+
+- The migration and the collector use your default database connection, or the one named in `collectors.database.connection` in the published config.
+- Give the collector a connection of its own. A push runs on that connection, so a run that ends inside your `DB::transaction()` on the same connection is stored in that transaction, and rolled back with it.
+- On MySQL 8+, MariaDB 10.6+ and PostgreSQL, a claim uses `SELECT ... FOR UPDATE SKIP LOCKED`, so two drains never claim the same tree. SQLite has no `SKIP LOCKED`: a claim is a plain transaction, which is fine for one worker.
 
 ## Content Capture
 
@@ -240,7 +281,7 @@ The agent's instructions are not recorded. Exception messages are never recorded
 
 How values are recorded:
 
-- **Byte cap.** Each value is cut at `REFRACT_CAPTURE_MAX_BYTES` (default 128 KB, at least 64), at a character border, and marked with its original size: `…[cut, original size N bytes]`.
+- **Byte cap.** Each value is cut at 128 KB, at a character border, and marked with its original size: `…[cut, original size N bytes]`.
 - **No files or media.** Attachments and files are never recorded, with capture on or off: no bytes, no name, no URL, no size. A file inside a value, for example a tool that returns an image, becomes `[file]`.
 - **Tool results in step history.** In a `chat` span's input messages, a tool result is only a reference (tool name and call id). The result itself is on the `execute_tool` span.
 - **No built-in redaction.** Refract does not look for secrets. Use a `mask`.
@@ -265,7 +306,6 @@ A mask is an invokable class. Refract makes it from the container and gives it e
 ```php
 'capture' => [
     'content' => env('OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT'),
-    'max_bytes' => env('REFRACT_CAPTURE_MAX_BYTES'),
     'mask' => App\Support\MaskSecrets::class,
 ],
 ```
@@ -288,40 +328,41 @@ The mask is not called for the output or tool result of a span dropped at the ca
 
 ## Participant
 
-The participant is who the run is for. Refract records it as `laravel.ai.participant.type` and `laravel.ai.participant.id`. The type is always the full class name, for example `App\Models\User`.
+The participant is who the run is for. A saved run with a participant (`->forUser($user)`, `->forParticipant($team)`, `continue($id, as: $user)`) records the conversation participant as `laravel.ai.participant.type` and `laravel.ai.participant.id`. The type is always the full class name, for example `App\Models\User`.
 
-Refract uses one source per run, never both:
+A run that is not saved, or saved with no participant, records no participant. To say who it is for, map Laravel `Context` keys to `user.id` and `session.id` (see [Context Attributes](#context-attributes)):
 
-1. **Saved run with a participant** (`->forUser($user)`, `->forParticipant($team)`, `continue($id, as: $user)`): the conversation participant. `Context` is ignored, even when it is set.
-2. **Any other run** (not saved, or saved with no participant, such as `continue($id)` without `as:`): the two `Context` keys, used only when both are set. If only one is set, no participant is recorded.
+```php
+// config/refract.php
+'attributes' => [
+    'user_id' => 'user.id',
+    'thread' => 'session.id',
+],
+```
 
 ```php
 use Illuminate\Support\Facades\Context;
 
-Context::add('refract.participant_type', App\Models\User::class);
-Context::add('refract.participant_id', $user->id);
+Context::add('user_id', $user->id);
 ```
 
-A morph alias in the type key (for example `user`) is turned into its class. The key names come from `REFRACT_CONTEXT_PARTICIPANT_TYPE` and `REFRACT_CONTEXT_PARTICIPANT_ID`.
-
-`Context` has no effect on a saved run with a participant. For a saved run, use `->forUser()` or `->forParticipant()`.
+A saved run keeps its own values: its conversation id wins over a mapped `session.id`, and on Langfuse a user participant wins over a mapped `user.id`.
 
 ### Scheduled Agents
 
-A scheduled agent run often concerns a user who did not start it. Set the participant in the job:
+A scheduled agent run often concerns a user who did not start it. Say who it is for in the job:
 
 ```php
 // Saved run: the conversation participant is used.
 WeeklySummaryAgent::make()->forUser($user)->prompt('Summarize my week.');
 
-// Run not saved: set both Context keys.
-Context::add('refract.participant_type', App\Models\User::class);
-Context::add('refract.participant_id', $user->id);
+// Run not saved: set the Context key mapped to user.id.
+Context::add('user_id', $user->id);
 
 WeeklySummaryAgent::make()->prompt('Summarize the week.');
 ```
 
-Who started the run is a separate fact. Send it through the [Context attribute map](#context-attributes):
+Who started the run is a separate fact. Send it through the same map:
 
 ```php
 // config/refract.php
@@ -348,14 +389,16 @@ Context::add('trigger', 'schedule');
 ```
 
 - Only scalar values are copied, and only onto the `invoke_agent` span. Sub-agents use their parent run's values.
-- A mapped key never replaces an attribute Refract sets on the run span, even an empty one.
-- A mapped key never sets `user.id`, and on Langfuse never sets a `langfuse.*` attribute.
+- A mapped key never replaces an attribute Refract sets on the run span, even an empty one. The exception is `session.id`: a mapped key sets it on a run that is not saved.
+- A mapped key may set `user.id`. On Langfuse, a user participant wins over it.
+- On Langfuse, a mapped key never sets a `langfuse.*` attribute.
 - A numeric attribute name, such as `'123'`, is sent as the string `"123"`.
 
 ## Safety
 
 - **Refract never breaks your app.** Every listener and lifecycle hook is guarded. A failure inside Refract logs one warning and the run goes on. Your app's own exceptions pass through unchanged.
-- **No extra calls.** Refract never calls agent methods that run your code (`instructions()`, `tools()`) and runs no queries. A run is named without calling the agent's `name()`. To name a tool span, Refract reads the tool name the way the SDK does. This calls `name()` once per tool call, on a tool or on an agent used as a tool. The SDK makes the same call.
+- **No extra calls.** Refract never calls agent methods that run your code (`instructions()`, `tools()`) and runs no queries while a run records. The only queries are the database collector's, after the response. A run is named without calling the agent's `name()`. To name a tool span, Refract reads the tool name the way the SDK does. This calls `name()` once per tool call, on a tool or on an agent used as a tool. The SDK makes the same call.
+- **Bounded retries.** With `REFRACT_DRAIN=queue`, the drain job never throws, so nothing reaches `failed_jobs`, and the store never grows past its cap.
 - **Warnings.** Each warning is logged at the `warning` level, prefixed `[refract]`, once per kind per process. After 10 different warnings, Refract stays silent.
 
 ### Bounded Memory
@@ -364,6 +407,7 @@ Context::add('trigger', 'schedule');
 - A run dropped at the cap stays dropped. Its steps, tools and sub-agent runs are dropped too. So they never show up as traces of their own.
 - A console process holds only its open runs: each run tree leaves when it ends. A web request holds its finished run trees until the response is sent.
 - A stream that the app stopped reading stays open until the end of the process.
+- With `REFRACT_DRAIN=queue`, the collector holds at most 64 MB of trees. At the cap, new trees are dropped with one warning.
 
 ## Known Limitations
 
@@ -371,10 +415,12 @@ Context::add('trigger', 'schedule');
 - With a morph map, the participant type is the full class name. So it does not match the `participant_type` column of the `agent_conversations` table, which holds the alias.
 - With no `mask` set, a secret inside captured content is sent as is.
 - Only agent runs are traced. Embeddings, images, audio and other SDK operations are not.
-- The send after the response still runs in the same PHP-FPM worker. A destination that is down keeps that worker busy for up to 5 seconds per export.
-- Sends inside a queue job run under that job's `timeout`. A slow or down destination adds up to 5 seconds per run the job makes. Give jobs that run agents room in their `timeout`.
-- Spans not yet sent are lost when the worker kills a job at its `timeout`. They are also lost when a command ends by a signal, `exit()` or `dd()`.
-- A destination that is down or slow loses the traces sent meanwhile: nothing is tried again.
+- With `sync`, the export after the response still runs in the same PHP-FPM worker. A destination that is down keeps that worker busy for up to 5 seconds per export.
+- With `sync`, exports inside a queue job run under that job's `timeout`. A slow or down destination adds up to 5 seconds per run the job makes. Give jobs that run agents room in their `timeout`, or use `REFRACT_DRAIN=queue`.
+- With `sync`, a destination that is down or slow loses the traces sent meanwhile: nothing is tried again. Use `REFRACT_DRAIN=queue` to keep them.
+- Spans not yet handed on are lost when the worker kills a job at its `timeout`. They are also lost when a command ends by a signal, `exit()` or `dd()`.
+- With `REFRACT_DRAIN=queue`, a tree can be sent twice (see [Collecting and Draining](#collecting-and-draining)). Backends that do not deduplicate by span id show it twice.
+- With `REFRACT_DRAIN=queue`, a push is a write to Redis or your database after the response. If the store cannot be reached, the trees are dropped with one warning.
 
 ## Contributing
 
@@ -385,6 +431,8 @@ composer test
 vendor/bin/pint --test
 composer analyse
 ```
+
+The Redis collector tests run against Redis on `127.0.0.1` and are skipped when it cannot be reached (`--exclude-group=redis` leaves them out). The MySQL collector tests run only with `REFRACT_TEST_MYSQL_HOST` set, plus `_PORT`, `_DATABASE`, `_USERNAME` and `_PASSWORD` (`--group=mysql`).
 
 The workbench runs real scenarios and reads the traces back from Langfuse. Copy `workbench/.env.example` to `workbench/.env`, add the keys of a Langfuse project you use for testing, then:
 

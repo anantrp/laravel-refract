@@ -6,9 +6,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+0.2 splits sending into collecting and draining, and cuts the configuration to ten environment variables.
+
+### Added
+
+- `REFRACT_DRAIN=queue`: finished run trees are stored in a collector and exported from your queue workers by a unique `DrainTraces` job on the `refract` queue. It retries network errors, 408, 429 and 5xx with a 10, 60, 300 s backoff, honouring `Retry-After` up to 300 s, and never reaches `failed_jobs`. Delivery is at least once.
+- Collectors, chosen with `REFRACT_COLLECTOR`: `redis` (a Redis 6.2+ stream) and `database` (a `refract_traces` table, published with `--tag=refract-migrations`, claimed with `SKIP LOCKED` on MySQL 8+, MariaDB 10.6+ and PostgreSQL). Each holds at most 64 MB, and drops new trees with one warning at the cap.
+- A `Context` key mapped to `user.id` or `session.id` sets it on a run that is not saved. A saved conversation's session id and, on Langfuse, a user participant win over the mapped values.
+- One run records at most 1,000 spans. Past that, its new spans are dropped and the run is marked `laravel.ai.truncated=true`.
+- Tool approval events are recorded on the run they belong to.
+
 ### Changed
 
+- `REFRACT_DRAIN=sync`, the default, exports once in the process, after the response: best effort, a tree that cannot be exported is dropped with one warning. The HTTP timeout is 5 s (15 s from the queue drain).
+- A destination that cannot send (no endpoint, a missing Langfuse key, an invalid URL) logs one warning at boot, and Refract registers nothing, as if disabled.
+- Exports are always gzipped.
+- Captured values are always cut at 128 KB.
+- `service.name` is `APP_NAME` (`Laravel` when empty) and `deployment.environment.name` is `APP_ENV`.
 - Requires `laravel/ai` 1.4 or higher. A tool that throws is a failed `execute_tool` span; since 1.4 the SDK hands the failure back to the model, so the run goes on and ends ok.
+
+### Removed
+
+These environment variables are no longer read:
+
+- `REFRACT_TRANSPORT`: use `REFRACT_DRAIN` (`sync` or `queue`). `null` is `REFRACT_ENABLED=false`.
+- `OTEL_SERVICE_NAME` and `REFRACT_ENVIRONMENT`: set `APP_NAME` and `APP_ENV`.
+- `OTEL_EXPORTER_OTLP_ENDPOINT` and `OTEL_EXPORTER_OTLP_HEADERS`: set `REFRACT_OTLP_ENDPOINT` (the full traces URL) and `REFRACT_OTLP_HEADERS`.
+- `OTEL_EXPORTER_OTLP_COMPRESSION`: exports are always gzipped.
+- `REFRACT_CAPTURE_MAX_BYTES`: the cap is 128 KB.
+- `REFRACT_CONTEXT_PARTICIPANT_TYPE` and `REFRACT_CONTEXT_PARTICIPANT_ID`: a saved conversation still gives the participant; otherwise map `Context` keys to `user.id` and `session.id` in `context.attributes`.
+
+Also removed: the `queue` and `null` transports and their `ExportSpans` job; the `platform` key of each destination in the published config (now ignored); the partial sends of runs still open in a console process; and retrying a failed export in the process.
 
 ### Fixed
 
