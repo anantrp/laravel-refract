@@ -1,0 +1,6 @@
+environment: local
+user: 42
+invoke_agent ChatAgent  ok
+  chat fake  ok
+  invoke_agent AnonymousAgent  ok
+    chat gpt-6-luna  ok

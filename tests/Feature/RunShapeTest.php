@@ -616,6 +616,32 @@ it('two runs in one trace each keep their own session.id', function () {
         ->and(Otlp::attributes($runs[1]))->toHaveKey('gen_ai.conversation.id', $second->conversationId);
 });
 
+it('the run that titles a new conversation nests under the run that started it, in the same trace', function () {
+    $this->loadMigrationsFrom(dirname(__DIR__, 2).'/vendor/laravel/ai/database/migrations');
+
+    config(['ai.conversations.generate_title' => true]);
+
+    ChatAgent::fake(['Hello.']);
+
+    $response = ChatAgent::make()->forUser((object) ['id' => 1])->prompt('Hello');
+
+    app(Recorder::class)->flush();
+
+    $runs = array_values(array_filter(Otlp::spans(), fn (array $span) => str_starts_with($span['name'], 'invoke_agent')));
+
+    expect($runs)->toHaveCount(2);
+
+    // The SDK titles with an anonymous agent, or with ConversationTitleAgent in later releases.
+    [$run, $title] = $runs;
+
+    expect($run['name'])->toBe('invoke_agent ChatAgent')
+        ->and($title['parentSpanId'])->toBe($run['spanId'])
+        ->and($title['traceId'])->toBe($run['traceId'])
+        ->and($title['startTimeUnixNano'] >= $run['startTimeUnixNano'])->toBeTrue()
+        ->and($title['endTimeUnixNano'] <= $run['endTimeUnixNano'])->toBeTrue()
+        ->and(Otlp::attributes($title))->toHaveKey('session.id', $response->conversationId);
+});
+
 it('a failed run of an agent that only uses the conversation trait keeps its session.id', function () {
     $this->loadMigrationsFrom(dirname(__DIR__, 2).'/vendor/laravel/ai/database/migrations');
 

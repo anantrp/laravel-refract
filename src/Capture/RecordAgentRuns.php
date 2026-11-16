@@ -20,6 +20,7 @@ use Laravel\Ai\Events\ToolApprovalRequested;
 use Laravel\Ai\Events\ToolApprovalResolved;
 use Laravel\Ai\Events\ToolFailed;
 use Laravel\Ai\Events\ToolInvoked;
+use Laravel\Ai\Prompts\AgentPrompt;
 use Laravel\Ai\Providers\Provider;
 use Laravel\Ai\Tools\ToolNameResolver;
 
@@ -74,10 +75,12 @@ class RecordAgentRuns
     }
 
     /**
-     * Start the run span. A sub-agent run nests under the tool span that called it.
+     * Start the run span. A sub-agent run nests under the tool span that
+     * called it. A run that another open run prompted outside any tool,
+     * like the one that titles a new conversation, nests under that run.
      *
-     * A sub-agent run takes the context of the run that called it, at
-     * flush, since a new conversation has its id only when that run ends.
+     * A nested run takes the context of the run above it, at flush,
+     * since a new conversation has its id only when that run ends.
      *
      * The attempt after a failover keeps the run span it failed over from,
      * and the span shows the provider and model of that attempt. A run
@@ -105,9 +108,7 @@ class RecordAgentRuns
         }
 
         $agent = $event->prompt->agent;
-        $parentTool = $event->prompt->parentToolInvocationId;
-
-        $parentKey = $parentTool === null ? null : $this->toolKey($parentTool);
+        $parentKey = $this->parentKeyOf($event->prompt);
 
         $this->recorder->start($this->runKey($event->invocationId), 'invoke_agent', $parentKey, [
             'invocation_id' => $event->invocationId,
@@ -118,7 +119,7 @@ class RecordAgentRuns
             ...($event->prompt->hasApprovalDecisions() ? ['resumed' => true] : []),
         ],
             context: $parentKey === null ? $this->context->of($agent) : [],
-            contextFrom: $parentKey === null ? null : $this->recorder->parentKey($parentKey),
+            contextFrom: $parentKey === null ? null : $this->contextSourceOf($event->prompt, $parentKey),
             content: $event->prompt->hasApprovalDecisions() ? [] : $this->content->runInput($event->prompt),
         );
     }
@@ -238,6 +239,35 @@ class RecordAgentRuns
                 'approved' => ! $result->denied,
             ]);
         }
+    }
+
+    /**
+     * Get the key of the span a run nests under, or null for a top-level run.
+     *
+     * The SDK names the calling run without a tool when that run prompts
+     * an agent from its own middleware. It is nested only while open, so a
+     * run that outlives it still becomes its own trace, as it did before.
+     */
+    protected function parentKeyOf(AgentPrompt $prompt): ?string
+    {
+        if ($prompt->parentToolInvocationId !== null) {
+            return $this->toolKey($prompt->parentToolInvocationId);
+        }
+
+        if ($prompt->parentInvocationId !== null && $this->recorder->isOpen($this->runKey($prompt->parentInvocationId))) {
+            return $this->runKey($prompt->parentInvocationId);
+        }
+
+        return null;
+    }
+
+    /**
+     * Get the key of the run whose context a nested run takes: the run
+     * above the calling tool span, or the parent run itself.
+     */
+    protected function contextSourceOf(AgentPrompt $prompt, string $parentKey): ?string
+    {
+        return $prompt->parentToolInvocationId === null ? $parentKey : $this->recorder->parentKey($parentKey);
     }
 
     protected function runKey(string $invocationId): string
