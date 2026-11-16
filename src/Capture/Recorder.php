@@ -8,6 +8,7 @@ use Anantrp\Refract\Transport\Drain;
 use Closure;
 use Illuminate\Contracts\Container\Container;
 use Illuminate\Contracts\Foundation\Application;
+use Illuminate\Database\DatabaseManager;
 use OpenTelemetry\API\Trace\Span;
 
 /**
@@ -16,8 +17,9 @@ use OpenTelemetry\API\Trace\Span;
  * A run tree is a top-level span and every span under it, sub-agent runs
  * included. Each span records the span id of its tree's top-level span
  * when it starts, so the tree is finished when that span ends. A console
- * process hands the tree on then; a web request holds it until the flush
- * point, after the response is sent.
+ * process hands the tree on then, unless a database transaction is open:
+ * then the tree waits until none is. A web request holds it until the
+ * flush point, after the response is sent.
  *
  * Times are read from the monotonic clock while recording and turned into
  * wall clock times when a tree is handed on.
@@ -72,6 +74,13 @@ class Recorder
      * @var array<string, true>
      */
     protected array $truncated = [];
+
+    /**
+     * The span ids of the top-level spans whose trees ended in a console process and wait to be handed on.
+     *
+     * @var array<string, true>
+     */
+    protected array $waiting = [];
 
     /**
      * The callbacks that reset other capture state at each flush.
@@ -327,7 +336,7 @@ class Recorder
     }
 
     /**
-     * Hand the tree with the given top-level span id on now, in a console process.
+     * Hand the tree with the given top-level span id on, in a console process.
      *
      * A console process (command, queue worker, tinker) may run for long, so
      * each run tree leaves when it ends. A web request keeps its trees until
@@ -339,24 +348,68 @@ class Recorder
             return;
         }
 
-        $tree = [];
+        $this->waiting[$root] = true;
+
+        $this->sendWaiting();
+    }
+
+    /**
+     * Hand on the trees waiting in a console process, unless a database transaction is open.
+     *
+     * A tree handed on inside the app's transaction would hold it open for
+     * an export, or be written into it and rolled back with it. So a tree
+     * that ends inside one waits, and leaves when the transaction ends, with
+     * the next run that ends outside one, or at the flush point.
+     */
+    public function sendWaiting(): void
+    {
+        if ($this->waiting === [] || $this->inTransaction()) {
+            return;
+        }
+
+        $trees = [];
         $rest = [];
 
         foreach ($this->finished as $span) {
-            if ($span['root'] === $root) {
-                $tree[] = $span;
+            if (isset($this->waiting[$span['root']])) {
+                $trees[$span['root']][] = $span;
             } else {
                 $rest[] = $span;
             }
         }
 
         $this->finished = $rest;
+        $this->waiting = [];
 
-        $this->send([$tree]);
+        $this->send(array_values($trees));
+    }
+
+    /**
+     * Determine if a database transaction is open on a connection this process made. No connection is made to find out.
+     */
+    protected function inTransaction(): bool
+    {
+        if (! $this->container->resolved('db')) {
+            return false;
+        }
+
+        /** @var DatabaseManager $database */
+        $database = $this->container->make('db');
+
+        foreach ($database->getConnections() as $connection) {
+            if ($connection->transactionLevel() > 0) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
      * Close every open span as abandoned, children before their parent, then hand every finished tree on.
+     *
+     * The trees that wait for a transaction to end leave too, even if it is
+     * still open: the flush point is the last chance to hand them on.
      *
      * The buffer and the state kept between flushes are cleared even when
      * building the trees fails or a reset throws.
@@ -378,6 +431,7 @@ class Recorder
         } finally {
             $this->open = [];
             $this->finished = [];
+            $this->waiting = [];
             $this->dropped = [];
             $this->sizes = [];
             $this->truncated = [];

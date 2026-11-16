@@ -8,6 +8,8 @@ use Illuminate\Console\Events\CommandFinished;
 use Illuminate\Console\Events\CommandStarting;
 use Illuminate\Contracts\Events\Dispatcher;
 use Illuminate\Contracts\Foundation\Application;
+use Illuminate\Database\Events\TransactionCommitted;
+use Illuminate\Database\Events\TransactionRolledBack;
 use Illuminate\Queue\Events\JobAttempted;
 use Illuminate\Queue\Jobs\SyncJob;
 
@@ -22,6 +24,9 @@ use Illuminate\Queue\Jobs\SyncJob;
  * its caller. A flush closes every open span as abandoned and hands every
  * tree left on, so a flush from a process that does not own the buffer
  * would cut a live run short.
+ *
+ * In a console process, the end of each database transaction hands on the
+ * run trees that ended inside it, once no transaction is open.
  */
 class FlushPoints
 {
@@ -49,6 +54,7 @@ class FlushPoints
         $events->listen(JobAttempted::class, fn (JobAttempted $event) => $this->guard(fn () => $this->jobAttempted($event)));
         $events->listen(CommandStarting::class, fn (CommandStarting $event) => $this->guard(fn () => $this->commandStarting($event)));
         $events->listen(CommandFinished::class, fn (CommandFinished $event) => $this->guard(fn () => $this->commandFinished($event)));
+        $events->listen([TransactionCommitted::class, TransactionRolledBack::class], fn () => $this->guard($this->recorder->sendWaiting(...)));
     }
 
     /**

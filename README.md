@@ -179,6 +179,7 @@ Refract hands a run tree on once its top-level run ends. Nothing touches the net
 
 - **Web request:** every finished run tree is handed on once, after the response is sent. Runs that are still open then are closed as abandoned and handed on with them.
 - **Console process** (command, queue worker, tinker): each run tree is handed on when its top-level run ends. The end of an async queued job and the end of the outermost command close the runs still open as abandoned, and hand them on.
+- **Inside a database transaction:** in a console process, a run tree that ends while a `DB::transaction()` is open, on any connection the process has used, is handed on after the transaction ends, committed or rolled back. So an export never holds your transaction and its locks open, and a stored tree or drain job is never rolled back with your work. If Refract cannot see the transaction end, the tree leaves with the next run that ends outside a transaction, or at the end of the job or command at the latest, even if a transaction is still open then.
 
 A sync-driver job or an `Artisan::call()` inside a web request does not hand on its own runs. Its spans leave with the request.
 

@@ -18,6 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- In a console process, a run tree that ends inside a database transaction is handed on after the transaction ends, so an export never holds it open and a stored tree or drain job is never rolled back with it.
 - `REFRACT_DRAIN=sync`, the default, exports once in the process, after the response: best effort, a tree that cannot be exported is dropped with one warning. The HTTP timeout is 5 s (15 s from the queue drain).
 - A destination that cannot send (no endpoint, a missing Langfuse key, an invalid URL) logs one warning at boot, and Refract registers nothing, as if disabled.
 - Exports are always gzipped.
