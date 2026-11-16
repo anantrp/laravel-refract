@@ -39,8 +39,10 @@ class Scenarios
      */
     public function config(string $name): array
     {
-        // L2 exported through the queue transport; with sync export only, it runs as L1 does.
+        // L2 drains through the queue: the run is stored in Redis and exported by a worker
+        // (vendor/bin/testbench queue:work --queue=refract). Its tree is the same as L1's.
         return match ($name) {
+            'L2' => ['refract.drain' => 'queue'],
             default => [],
         };
     }

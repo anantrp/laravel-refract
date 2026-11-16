@@ -48,6 +48,8 @@ const BASE_ENV = [
     'REFRACT_CONTEXT_PARTICIPANT_ID' => null,
     'OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT' => null,
     'REFRACT_CAPTURE_MAX_BYTES' => null,
+    'REFRACT_DRAIN' => null,
+    'REFRACT_COLLECTOR' => null,
 ];
 
 /**
@@ -84,6 +86,8 @@ const CHANGED_ENV = [
     'REFRACT_CONTEXT_PARTICIPANT_ID' => 'changed_id',
     'OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT' => 'true',
     'REFRACT_CAPTURE_MAX_BYTES' => '1000',
+    'REFRACT_DRAIN' => 'queue',
+    'REFRACT_COLLECTOR' => 'database',
 ];
 
 /**
@@ -242,6 +246,9 @@ function envCases(): array
         ],
         'REFRACT_CAPTURE_MAX_BYTES' => [
             'env' => [], 'invalid' => 'lots', 'read' => $cap, 'default' => 131_072, 'warnings' => 0,
+        ],
+        'REFRACT_DRAIN' => [
+            'env' => [], 'invalid' => 'later', 'read' => fn () => (fn () => $this->drain)->call(app(Drain::class)), 'default' => 'sync', 'warnings' => 0,
         ],
     ];
 }

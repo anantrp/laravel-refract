@@ -57,6 +57,45 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Drain
+    |--------------------------------------------------------------------------
+    |
+    | How finished runs reach the destination. "sync" exports them in the
+    | process that ran them, after the response: best effort, dropped with
+    | one warning when the destination is down. "queue" stores them in the
+    | collector and exports them from your queue workers, on the "refract"
+    | queue of your default queue connection, retrying with a backoff.
+    |
+    | Supported: "sync", "queue"
+    |
+    */
+
+    'drain' => env('REFRACT_DRAIN'),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Collector
+    |--------------------------------------------------------------------------
+    |
+    | Where the queue drain stores finished runs until a worker exports
+    | them. "redis" uses the Redis connection named under "collectors"
+    | (your default connection when it is null): use one that never evicts
+    | keys.
+    |
+    | Supported: "redis"
+    |
+    */
+
+    'collector' => env('REFRACT_COLLECTOR'),
+
+    'collectors' => [
+        'redis' => [
+            'connection' => null,
+        ],
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Compression
     |--------------------------------------------------------------------------
     |

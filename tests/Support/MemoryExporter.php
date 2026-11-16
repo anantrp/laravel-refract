@@ -7,7 +7,8 @@ use Anantrp\Refract\Contracts\ExportResult;
 use LogicException;
 
 /**
- * Keeps every run tree it is given, for tests that read Capture's output, or throws while it is told to.
+ * Keeps every run tree it is given, for tests that read Capture's output,
+ * or answers with the results it is told to, or throws while it is told to.
  */
 class MemoryExporter implements Exporter
 {
@@ -17,14 +18,26 @@ class MemoryExporter implements Exporter
     public bool $throws = false;
 
     /**
-     * The run trees exported so far, one export after another.
+     * The results of the next exports, in order. Once they run out, every export is ok.
+     *
+     * @var list<ExportResult>
+     */
+    public array $results = [];
+
+    /**
+     * The number of exports so far, whatever their result.
+     */
+    public int $exports = 0;
+
+    /**
+     * The run trees exported with an ok result so far, one export after another.
      *
      * @var list<list<array<string, mixed>>>
      */
     public array $trees = [];
 
     /**
-     * The neutral spans of every run tree exported so far.
+     * The neutral spans of every run tree exported with an ok result so far.
      *
      * @var list<array<string, mixed>>
      */
@@ -32,8 +45,16 @@ class MemoryExporter implements Exporter
 
     public function export(array $trees): ExportResult
     {
+        $this->exports++;
+
         if ($this->throws) {
             throw new LogicException('Refract bug in the exporter, SECRET');
+        }
+
+        $result = array_shift($this->results) ?? ExportResult::ok();
+
+        if (! $result->isOk()) {
+            return $result;
         }
 
         foreach ($trees as $tree) {
@@ -42,6 +63,6 @@ class MemoryExporter implements Exporter
             array_push($this->spans, ...$tree);
         }
 
-        return ExportResult::ok();
+        return $result;
     }
 }

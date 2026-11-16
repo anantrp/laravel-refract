@@ -7,6 +7,7 @@ use Anantrp\Refract\Capture\FlushPoints;
 use Anantrp\Refract\Capture\RecordAgentRuns;
 use Anantrp\Refract\Capture\Recorder;
 use Anantrp\Refract\Capture\RunContext;
+use Anantrp\Refract\Contracts\Collector;
 use Anantrp\Refract\Contracts\Exporter;
 use Anantrp\Refract\Export\GenAiTranslator;
 use Anantrp\Refract\Export\HttpExporter;
@@ -14,9 +15,12 @@ use Anantrp\Refract\Export\NullExporter;
 use Anantrp\Refract\Export\OtlpJson;
 use Anantrp\Refract\Export\PlatformFactory;
 use Anantrp\Refract\Support\Settings;
+use Anantrp\Refract\Transport\Collectors\RedisCollector;
 use Anantrp\Refract\Transport\Drain;
+use Anantrp\Refract\Transport\DrainTraces;
 use Illuminate\Contracts\Events\Dispatcher;
 use Illuminate\Contracts\Foundation\Application;
+use Illuminate\Contracts\Redis\Factory as Redis;
 use Illuminate\Support\ServiceProvider;
 
 class RefractServiceProvider extends ServiceProvider
@@ -51,12 +55,25 @@ class RefractServiceProvider extends ServiceProvider
                 new OtlpJson,
                 Settings::string('environment', $app->environment()),
                 Settings::string('service_name', $this->appName()),
-                Drain::TIMEOUT,
+                // With the queue drain, only the drain job exports.
+                $this->drain() === 'queue' ? DrainTraces::TIMEOUT : Drain::TIMEOUT,
                 Settings::choice('compression', ['gzip', 'none'], 'gzip') === 'gzip',
             );
         });
 
-        $this->app->singleton(Drain::class);
+        $this->app->singleton(Collector::class, fn (Application $app) => match (Settings::choice('collector', ['redis'], 'redis')) {
+            default => new RedisCollector($app->make(Redis::class)->connection(Settings::string('collectors.redis.connection') ?: null)),
+        });
+
+        $this->app->singleton(Drain::class, fn (Application $app) => new Drain($app, $this->drain()));
+    }
+
+    /**
+     * Get the drain finished run trees take: "sync" or "queue".
+     */
+    protected function drain(): string
+    {
+        return Settings::choice('drain', ['sync', 'queue'], 'sync');
     }
 
     /**

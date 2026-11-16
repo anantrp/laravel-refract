@@ -1,10 +1,14 @@
 <?php
 
+use Anantrp\Refract\Contracts\Collector;
 use Anantrp\Refract\Support\Diagnostics;
 use Anantrp\Refract\Tests\Support\WarningLog;
 use Anantrp\Refract\Transport\Collectors\RedisCollector;
+use Anantrp\Refract\Transport\Drain;
+use Anantrp\Refract\Transport\DrainTraces;
 use Illuminate\Redis\Connections\Connection;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Queue;
 
 pest()->group('redis');
 
@@ -252,4 +256,43 @@ it('the byte count starts over when the store is empty, so it cannot drift for g
 
     expect($collector->size())->toBe(1)
         ->and($collector->dropped())->toBe(0);
+});
+
+it('end to end: the queue drain stores trees in Redis and a drain job exports and acks them', function () {
+    $collector = redisCollector();
+    $exporter = $this->captureNeutralSpans();
+    app()->instance(Collector::class, $collector);
+    config(['refract.drain' => 'queue']);
+    Queue::fake();
+
+    app(Drain::class)->send([storedTree('one'), storedTree('two')]);
+
+    Queue::assertPushed(DrainTraces::class, 1);
+
+    (new DrainTraces)->handle(app());
+
+    expect(array_map(fn (array $tree) => $tree[0]['call']['agent'], $exporter->trees))->toBe(['one', 'two'])
+        ->and($collector->size())->toBe(0);
+});
+
+it('the redis collector uses the configured connection', function () {
+    redisConnection();
+    $this->refreshApplicationWithConfig(['refract.collectors.redis.connection' => 'cache']);
+
+    $collector = app(Collector::class);
+    $redis = (fn () => $this->redis)->call($collector);
+
+    expect($collector)->toBeInstanceOf(RedisCollector::class)
+        ->and($redis->getName())->toBe('cache');
+});
+
+it('an invalid collector is the redis collector, with one warning', function () {
+    redisConnection();
+    $this->refreshApplicationWithConfig(['refract.collector' => 'file']);
+    Diagnostics::reset();
+    Log::swap($log = new WarningLog);
+
+    expect(app(Collector::class))->toBeInstanceOf(RedisCollector::class)
+        ->and($log->warnings)->toHaveCount(1)
+        ->and($log->warnings[0])->toContain('refract.collector');
 });
