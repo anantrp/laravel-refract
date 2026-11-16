@@ -430,7 +430,7 @@ it('2,000 runs in one worker keep memory flat', function () {
     {
         public function export(array $trees): ExportResult
         {
-            return ExportResult::Ok;
+            return ExportResult::ok();
         }
     };
 
@@ -564,7 +564,7 @@ it('the exporter guards translating, preparing and encoding, not only the HTTP c
 
     $exporter = new HttpExporter($platform, new GenAiTranslator, new OtlpJson, 'testing', 'app', 5);
 
-    expect($exporter->export(safetyBatch()))->toBe(ExportResult::Rejected)
+    expect($exporter->export(safetyBatch())->isRejected())->toBeTrue()
         ->and($log->warnings)->toHaveCount(1)
         ->and($log->warnings[0])->toContain(LogicException::class)
         ->and($log->warnings[0])->not->toContain('SECRET');

@@ -68,19 +68,19 @@ class HttpExporter implements Exporter
         } catch (Throwable $e) {
             Diagnostics::warn('export.error', 'Spans could not be exported ('.$e::class.'). The batch was dropped.');
 
-            return ExportResult::Rejected;
+            return ExportResult::rejected();
         }
 
-        $result = ExportResult::Ok;
+        $result = ExportResult::ok();
 
         foreach ($requests as $spans) {
             $sent = $this->post($spans);
 
-            if ($sent === ExportResult::Retryable) {
+            if ($sent->isRetryable()) {
                 return $sent;
             }
 
-            if ($sent === ExportResult::Rejected) {
+            if ($sent->isRejected()) {
                 $result = $sent;
             }
         }
@@ -187,13 +187,13 @@ class HttpExporter implements Exporter
                 ->withBody($body, 'application/json')
                 ->post($this->platform->endpoint());
         } catch (ConnectionException) {
-            return ExportResult::Retryable;
+            return ExportResult::retryable();
         } catch (RequestException $e) {
             $response = $e->response;
         } catch (Throwable $e) {
             Diagnostics::warn('export.error', 'Spans could not be exported ('.$e::class.'). The batch was dropped.');
 
-            return ExportResult::Rejected;
+            return ExportResult::rejected();
         }
 
         return $this->result($response);
@@ -214,6 +214,8 @@ class HttpExporter implements Exporter
 
     /**
      * Get the export result of the given response, and warn when it is rejected.
+     *
+     * A 429 or 503 carries its Retry-After seconds, the two statuses that send one.
      */
     protected function result(Response $response): ExportResult
     {
@@ -221,20 +223,24 @@ class HttpExporter implements Exporter
             // The batch was delivered, so a failure here must not read as a dropped batch.
             Guard::run('export.partial', 'to read a partial success answer', fn () => $this->warnOfRefusedSpans($response));
 
-            return ExportResult::Ok;
+            return ExportResult::ok();
         }
 
         $status = $response->status();
 
-        if ($status === 408 || $status === 429 || $status >= 500) {
-            return ExportResult::Retryable;
+        if ($status === 429 || $status === 503) {
+            return ExportResult::retryable($this->retryAfterSeconds($response->header('Retry-After')));
+        }
+
+        if ($status === 408 || $status >= 500) {
+            return ExportResult::retryable();
         }
 
         $excerpt = $this->excerpt($response->body());
 
         Diagnostics::warn('export.rejected', "Spans were rejected by the destination with HTTP {$status}: {$excerpt}. The batch was dropped.");
 
-        return ExportResult::Rejected;
+        return ExportResult::rejected();
     }
 
     /**
@@ -251,10 +257,8 @@ class HttpExporter implements Exporter
 
     /**
      * Get the seconds of a Retry-After header, capped, or null when it is
-     * not a whole number of seconds (an HTTP date, a negative number or text).
-     *
-     * Not read yet: an export in this process is never retried. The queue
-     * drain will carry it in the export result, to wait before its next try.
+     * missing or not a whole number of seconds (an HTTP date, a negative
+     * number or text). Only the queue drain waits for it.
      */
     protected function retryAfterSeconds(string $header): ?int
     {

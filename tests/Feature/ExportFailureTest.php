@@ -186,6 +186,40 @@ it('a Retry-After is not waited for: no retry and one warning, like any failed e
         ->and($log->warnings[0])->toContain('dropped');
 })->with(['429' => 429, '503' => 503]);
 
+it('a 429 or 503 carries its Retry-After seconds in the export result, capped at 300', function (int $status, string $header, ?int $seconds) {
+    bootExport();
+    Http::fake(fn () => Http::response('', $status, $header === 'missing' ? [] : ['Retry-After' => $header]));
+
+    $result = app(Exporter::class)->export([runTree(['x'])]);
+
+    expect($result->isRetryable())->toBeTrue()
+        ->and($result->retryAfter)->toBe($seconds);
+})->with(['429' => 429, '503' => 503])->with([
+    'seconds' => ['30', 30],
+    'zero' => ['0', 0],
+    'over the cap' => ['301', 300],
+    'too long for an int' => ['99999999999999999999999', 300],
+    'an HTTP date' => ['Wed, 21 Oct 2026 07:28:00 GMT', null],
+    'negative' => ['-5', null],
+    'missing' => ['missing', null],
+]);
+
+it('a 408, 500 or network error carries no Retry-After, and a 2xx or 4xx is not retryable', function (int|string $status, bool $retryable) {
+    bootExport();
+    Http::fake(fn () => $status === 'network' ? Http::failedConnection() : Http::response('', (int) $status, ['Retry-After' => '30']));
+
+    $result = app(Exporter::class)->export([runTree(['x'])]);
+
+    expect($result->isRetryable())->toBe($retryable)
+        ->and($result->retryAfter)->toBeNull();
+})->with([
+    '408' => [408, true],
+    '500' => [500, true],
+    'network error' => ['network', true],
+    '200' => [200, false],
+    '400' => [400, false],
+]);
+
 it('a 408, 429, 5xx or network error is not retried and logs one warning', function (int|string $status) {
     $log = bootExport();
     fakeDestination($status);

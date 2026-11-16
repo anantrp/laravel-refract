@@ -12,6 +12,6 @@ class NullExporter implements Exporter
 {
     public function export(array $trees): ExportResult
     {
-        return ExportResult::Ok;
+        return ExportResult::ok();
     }
 }

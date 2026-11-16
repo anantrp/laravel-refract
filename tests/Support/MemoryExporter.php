@@ -42,6 +42,6 @@ class MemoryExporter implements Exporter
             array_push($this->spans, ...$tree);
         }
 
-        return ExportResult::Ok;
+        return ExportResult::ok();
     }
 }

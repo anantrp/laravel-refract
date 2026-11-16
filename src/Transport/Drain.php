@@ -3,7 +3,6 @@
 namespace Anantrp\Refract\Transport;
 
 use Anantrp\Refract\Contracts\Exporter;
-use Anantrp\Refract\Contracts\ExportResult;
 use Anantrp\Refract\Support\Diagnostics;
 use Throwable;
 
@@ -45,7 +44,7 @@ class Drain
             return;
         }
 
-        if ($result === ExportResult::Retryable) {
+        if ($result->isRetryable()) {
             Diagnostics::warn('export.unavailable', 'Spans could not be exported: the destination could not be reached or answered 408, 429 or 5xx. The batch was dropped (an export in this process is not retried).');
         }
     }
