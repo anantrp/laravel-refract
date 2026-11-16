@@ -11,7 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Added
 
 - `REFRACT_DRAIN=queue`: finished run trees are stored in a collector and exported from your queue workers by a unique `DrainTraces` job on the `refract` queue. It retries network errors, 408, 429 and 5xx with a 10, 60, 300 s backoff, honouring `Retry-After` up to 300 s, and never reaches `failed_jobs`, even when its worker dies or kills it at its timeout. It ends within 45 s (job `timeout` 60 s, lease 120 s), leaving what it could not send in time to the next drain. Delivery is at least once.
-- Collectors, chosen with `REFRACT_COLLECTOR`: `redis` (a Redis 6.2+ stream) and `database` (a `refract_traces` table, published with `--tag=refract-migrations`, claimed with `SKIP LOCKED` on MySQL 8+, MariaDB 10.6+ and PostgreSQL). Each holds at most 64 MB, and drops new trees with one warning at the cap.
+- Collectors, chosen with `REFRACT_COLLECTOR`: `redis` (a Redis 6.2+ stream) and `database` (a `refract_traces` table, published with `--tag=refract-migrations`, claimed with `SKIP LOCKED` on MySQL 8+, MariaDB 10.6+ and PostgreSQL). Each holds at most 64 MB, and drops new trees with one warning at the cap. The database collector never writes inside a transaction open on its connection.
 - A `Context` key mapped to `user.id` or `session.id` sets it on a run that is not saved. A saved conversation's session id and, on Langfuse, a user participant win over the mapped values.
 - One run records at most 1,000 spans. Past that, its new spans are dropped and the run is marked `laravel.ai.truncated=true`.
 - Tool approval events are recorded on the run they belong to.

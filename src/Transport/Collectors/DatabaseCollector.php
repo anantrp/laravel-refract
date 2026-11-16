@@ -21,11 +21,22 @@ use stdClass;
  * is due again once its lease has run out. An ack deletes the rows; a
  * release clears the reservation and makes them due after a delay.
  *
- * The cap is on the bytes stored, checked before each insert: at the cap
- * a new tree is dropped and counted, and the stored trees are kept.
+ * Due rows are claimed in the order they became due (available_at, then
+ * id), so a released tree waits behind the trees that were due before it,
+ * and one batch the destination keeps failing never blocks the rest.
  *
- * A push on a connection inside an open DB::transaction() joins it, and
- * rolls back with it: give the collector a connection of its own.
+ * The cap is on the bytes stored, checked before each insert: at the cap
+ * a new tree is dropped and counted, and the stored trees are kept. The
+ * sum reads an index on the bytes column, never the payloads, and the cap
+ * bounds the rows it reads; a running total would drift on a manual delete
+ * or a crash between two writes.
+ *
+ * A push never runs inside an open transaction on the collector's
+ * connection: it is skipped with one warning. Joined to the app's
+ * transaction, the tree would be rolled back with it, and stay unseen by
+ * the drain until it commits; and a failed insert or a deadlock there
+ * would abort or roll back the app's own work. Give the collector a
+ * connection of its own.
  */
 class DatabaseCollector implements Collector
 {
@@ -71,6 +82,12 @@ class DatabaseCollector implements Collector
 
     public function push(array $tree): void
     {
+        if ($this->database->transactionLevel() > 0) {
+            Diagnostics::warn('collect.transaction', "A run tree ended inside an open database transaction on the trace store's connection [{$this->database->getName()}], and was dropped so it cannot affect that transaction. Give the database collector a connection of its own.");
+
+            return;
+        }
+
         $payload = TreePayload::encode($tree);
 
         if ($payload === null) {
@@ -107,7 +124,7 @@ class DatabaseCollector implements Collector
         $trees = [];
         $broken = [];
 
-        foreach ($this->table()->whereIn('id', $ids)->orderBy('id')->get(['id', 'payload']) as $row) {
+        foreach ($this->table()->whereIn('id', $ids)->orderBy('available_at')->orderBy('id')->get(['id', 'payload']) as $row) {
             $id = $this->number($row->id);
             $tree = TreePayload::decode(is_string($row->payload) ? $row->payload : '');
 
@@ -162,7 +179,7 @@ class DatabaseCollector implements Collector
     }
 
     /**
-     * Reserve the due rows, oldest first, until they reach the given bytes, and get their ids.
+     * Reserve the due rows, in the order they became due, until they reach the given bytes, and get their ids.
      *
      * The rows that fit are picked without a lock, then locked and checked
      * again: only the rows a claim takes are locked, so a claim running at
@@ -197,7 +214,7 @@ class DatabaseCollector implements Collector
     }
 
     /**
-     * Get a query on the rows that may be claimed now, oldest first: never claimed or released and due, or claimed and their lease ran out.
+     * Get a query on the rows that may be claimed now, in the order they became due: never claimed or released and due, or claimed and their lease ran out.
      */
     protected function due(int $now, int $lease): Builder
     {
@@ -205,6 +222,7 @@ class DatabaseCollector implements Collector
             ->where(fn (Builder $query) => $query
                 ->where(fn (Builder $query) => $query->whereNull('reserved_at')->where('available_at', '<=', $now))
                 ->orWhere('reserved_at', '<=', $now - $lease))
+            ->orderBy('available_at')
             ->orderBy('id');
     }
 

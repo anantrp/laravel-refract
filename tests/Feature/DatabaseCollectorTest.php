@@ -88,20 +88,54 @@ it('the dropped count is kept per process, by the collector instance', function 
         ->and(databaseCollector()->dropped())->toBe(0);
 });
 
-it('a push inside a transaction on the same connection rolls back with it', function () {
+it('a push inside a transaction on its connection is skipped with one warning, and the transaction is untouched', function () {
     $collector = databaseCollector();
 
-    try {
-        DB::transaction(function () use ($collector) {
-            $collector->push(storedTree('one'));
+    DB::table(DatabaseCollector::TABLE)->insert(['payload' => '[]', 'bytes' => 2, 'available_at' => 0, 'reserved_at' => null]);
 
-            throw new RuntimeException('The app failed.');
-        });
-    } catch (RuntimeException) {
-        //
-    }
+    DB::transaction(function () use ($collector) {
+        DB::table(DatabaseCollector::TABLE)->delete();
 
-    expect($collector->size())->toBe(0);
+        $collector->push(storedTree('one'));
+    });
+
+    expect($collector->size())->toBe(0)
+        ->and(DB::transactionLevel())->toBe(0)
+        ->and($this->log->warnings)->toHaveCount(1)
+        ->and($this->log->warnings[0])->toContain('open database transaction');
+
+    $collector->push(storedTree('two'));
+
+    expect(storedNames($collector->claim(4_000_000, 60)))->toBe(['two']);
+});
+
+it('a released tree goes behind the trees that were due before it, so a batch that keeps failing never blocks the store', function () {
+    $collector = databaseCollector();
+
+    $collector->push(storedTree('failing'));
+    $collector->push(storedTree('next'));
+    $this->travel(10)->seconds();
+
+    $failing = $collector->claim(1, 60);
+    expect(storedNames($failing))->toBe(['failing']);
+
+    $collector->release(array_keys($failing), 0);
+    $collector->push(storedTree('newer'));
+
+    expect(storedNames($collector->claim(4_000_000, 60)))->toBe(['next', 'failing', 'newer']);
+});
+
+it('the stored bytes are summed from an index, never from the payloads', function () {
+    $plan = collect(DB::select('EXPLAIN QUERY PLAN SELECT SUM(bytes) FROM '.DatabaseCollector::TABLE))->pluck('detail')->implode(' ');
+
+    expect($plan)->toContain('COVERING INDEX');
+});
+
+it('the migration indexes due order and the bytes', function () {
+    $indexes = collect(Schema::getIndexes(DatabaseCollector::TABLE))->pluck('columns')->all();
+
+    expect($indexes)->toContain(['available_at', 'id'])
+        ->toContain(['bytes']);
 });
 
 it('end to end: the queue drain stores trees in the database and a drain job exports and acks them', function () {

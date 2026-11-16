@@ -23,7 +23,10 @@ interface Collector
     public function push(array $tree): void;
 
     /**
-     * Claim the trees that are due, oldest first, keyed by their id.
+     * Claim the trees that are due, in the order they became due, keyed by their id.
+     *
+     * A released tree goes behind the trees that were due before it, so a
+     * batch that keeps failing never blocks the others.
      *
      * Trees are added until they reach the given bytes, so the last one may
      * take the claim over. A tree claimed more than the given lease seconds

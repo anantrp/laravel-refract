@@ -25,11 +25,15 @@ return new class extends Migration
             $table->id();
             $table->longText('payload');
             $table->unsignedInteger('bytes');
-            $table->unsignedInteger('available_at');
-            $table->unsignedInteger('reserved_at')->nullable();
+            // Unix times. Big integers: PostgreSQL has no unsigned integer, and a signed one ends in 2038.
+            $table->unsignedBigInteger('available_at');
+            $table->unsignedBigInteger('reserved_at')->nullable();
 
-            // A claim takes due trees ((reserved_at null, available_at past) or reserved_at past) in id order.
-            $table->index(['reserved_at', 'available_at']);
+            // A claim reads due trees in (available_at, id) order, so a released tree goes behind the trees due before it.
+            $table->index(['available_at', 'id']);
+
+            // Each push sums the stored bytes to keep the cap: this index covers the sum, so it never reads the payloads.
+            $table->index('bytes');
         });
     }
 

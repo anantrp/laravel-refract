@@ -262,7 +262,8 @@ php artisan migrate
 ```
 
 - The migration and the collector use your default database connection, or the one named in `collectors.database.connection` in the published config.
-- Give the collector a connection of its own. A push runs on that connection, so a run that ends inside your `DB::transaction()` on the same connection is stored in that transaction, and rolled back with it.
+- Give the collector a connection of its own. Refract never stores a tree inside a transaction that is open on the collector's connection: it would be rolled back with your work, and an error there could abort it. A run that ends inside a transaction is handed on after it (see [Sending](#sending)); a tree that still meets an open transaction on that connection is dropped with one warning.
+- Due trees are claimed in the order they became due, so a tree given back after a failure waits behind the trees that were already due.
 - On MySQL 8+, MariaDB 10.6+ and PostgreSQL, a claim uses `SELECT ... FOR UPDATE SKIP LOCKED`, so two drains never claim the same tree. SQLite has no `SKIP LOCKED`: a claim is a plain transaction, which is fine for one worker.
 
 ## Content Capture
