@@ -100,7 +100,7 @@ class Drain
             $pause = $breaker->failed();
             Stats::failed();
 
-            Diagnostics::dropped('unavailable', count($trees), 'export.unavailable', "Spans could not be exported: the destination could not be reached or answered 408, 429 or 5xx. The batch was dropped (an export in this process is not retried), and exports pause for {$pause} seconds.");
+            Diagnostics::dropped('unavailable', count($trees) - $result->done, 'export.unavailable', "Spans could not be exported: the destination could not be reached or answered 408, 429 or 5xx. The batch was dropped (an export in this process is not retried), and exports pause for {$pause} seconds.");
 
             return;
         }

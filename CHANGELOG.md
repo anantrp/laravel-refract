@@ -26,6 +26,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - The queue drain's collectors store trees gzipped (`gz1:` and base64, so still plain text in the database), so the 64 MB cap holds several times more traces. Trees stored by 0.3 still read. A drain claims 1 MB of stored trees at a time, about one 4 MB request of JSON. Requires `ext-zlib`. **Upgrading:** a tree stored by 0.4 cannot be read by 0.3, so rolling back with trees still stored drops them, each with a `decode` warning.
 
+### Fixed
+
+- The queue drain no longer sends trees again that an earlier request of the same drain delivered, when a later request fails with a network error, 408, 429 or 5xx.
+
 ### Removed
 
 - `DatabaseCollector::dropped()`. The drop count is now kept for every process, in the default cache store.

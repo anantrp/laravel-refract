@@ -6,7 +6,8 @@ namespace Anantrp\Refract\Contracts;
  * What became of an export: delivered, worth trying again later, refused for good, or cut short by its time limit.
  *
  * A retryable result may carry the seconds the destination asked to wait
- * (its Retry-After), already capped by the exporter. An unfinished result
+ * (its Retry-After), already capped by the exporter, and, like an
+ * unfinished one, the trees done before the failing request. An unfinished result
  * carries the number of leading trees that were done (taken or refused)
  * before time ran out; the rest were not sent in full. When time ran out
  * inside a tree split over requests, it also carries that tree's spans
@@ -36,10 +37,16 @@ final readonly class ExportResult
 
     /**
      * The destination could not take the trees now: a network error, 408, 429 or 5xx.
+     *
+     * When requests before the failing one were answered, the given number
+     * of leading trees are done, and the unsent spans of a tree split over
+     * requests are given, as for an unfinished export.
+     *
+     * @param  list<array<string, mixed>>  $rest  The unsent spans of the next tree, when some of its spans were sent.
      */
-    public static function retryable(?int $retryAfter = null): self
+    public static function retryable(?int $retryAfter = null, int $done = 0, array $rest = []): self
     {
-        return new self('retryable', $retryAfter);
+        return new self('retryable', $retryAfter, $done, $rest);
     }
 
     /**

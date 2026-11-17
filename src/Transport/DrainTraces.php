@@ -249,11 +249,7 @@ class DrainTraces implements ShouldBeUniqueUntilProcessing, ShouldQueue
             }
 
             if ($result->isUnfinished()) {
-                if ($result->done > 0) {
-                    Stats::exported();
-                }
-
-                $this->keepProgress($collector, $ids, $result);
+                $this->keepProgress($collector, $ids, $result, 0);
                 $this->next(0);
 
                 return;
@@ -274,7 +270,7 @@ class DrainTraces implements ShouldBeUniqueUntilProcessing, ShouldQueue
     }
 
     /**
-     * Ack the trees an unfinished export got through, and give the rest back, due at once, for the next drain.
+     * Ack the trees an export got through before it stopped, and give the rest back, due after the given seconds.
      *
      * A tree cut part way through its requests is acked too, and only its
      * unsent spans are stored again, as a tree of their own: sending it
@@ -286,8 +282,12 @@ class DrainTraces implements ShouldBeUniqueUntilProcessing, ShouldQueue
      *
      * @param  list<array-key>  $ids
      */
-    protected function keepProgress(Collector $collector, array $ids, ExportResult $result): void
+    protected function keepProgress(Collector $collector, array $ids, ExportResult $result, int $delay): void
     {
+        if ($result->done > 0 || $result->rest !== []) {
+            Stats::exported();
+        }
+
         $done = array_slice($ids, 0, $result->done);
         $rest = array_slice($ids, $result->done);
 
@@ -302,7 +302,7 @@ class DrainTraces implements ShouldBeUniqueUntilProcessing, ShouldQueue
         }
 
         $collector->ack($done);
-        $collector->release($rest, 0);
+        $collector->release($rest, $delay);
     }
 
     /**
@@ -347,7 +347,8 @@ class DrainTraces implements ShouldBeUniqueUntilProcessing, ShouldQueue
     {
         $delay = $this->failureDelay($cache, $result);
 
-        $collector->release($ids, $delay);
+        // The trees the requests before the failing one delivered are not sent again.
+        $this->keepProgress($collector, $ids, $result, $delay);
         Stats::failed();
 
         Diagnostics::warn('drain.retry', "Spans could not be exported: the destination could not be reached or answered 408, 429 or 5xx. They are tried again in {$delay} seconds.");

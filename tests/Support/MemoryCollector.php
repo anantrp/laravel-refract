@@ -4,6 +4,7 @@ namespace Anantrp\Refract\Tests\Support;
 
 use Anantrp\Refract\Contracts\Collector;
 use Anantrp\Refract\Support\Diagnostics;
+use Anantrp\Refract\Transport\Collectors\TreePayload;
 use Illuminate\Support\Facades\Date;
 use LogicException;
 
@@ -81,7 +82,8 @@ class MemoryCollector implements Collector
 
             $this->entries[$id]['claimed_at'] = $now;
             $trees[$id] = $entry['tree'];
-            $used += strlen((string) json_encode($entry['tree']));
+            // Sized as the real collectors store it, gzipped.
+            $used += strlen((string) TreePayload::encode($entry['tree']));
         }
 
         return $trees;

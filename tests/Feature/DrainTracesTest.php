@@ -5,6 +5,7 @@ use Anantrp\Refract\Contracts\Exporter;
 use Anantrp\Refract\Contracts\ExportResult;
 use Anantrp\Refract\Support\Diagnostics;
 use Anantrp\Refract\Tests\Support\MemoryCollector;
+use Anantrp\Refract\Tests\Support\Otlp;
 use Anantrp\Refract\Tests\Support\WarningLog;
 use Anantrp\Refract\Transport\Drain;
 use Anantrp\Refract\Transport\DrainTraces;
@@ -540,4 +541,40 @@ it('on a database queue a worker runs the drain once it is due, and nothing reac
     expect(drainedNames())->toBe(['one'])
         ->and(DB::table('jobs')->count())->toBe(0)
         ->and(DB::table('failed_jobs')->count())->toBe(0);
+});
+
+it('a 503 on the second request acks the trees the first one delivered', function () {
+    // The real exporter, not the memory one, so the trees go out in requests.
+    $this->memoryExporter = null;
+    bootExport(['refract.drain' => 'queue']);
+    app()->instance(Collector::class, $collector = new MemoryCollector);
+    Queue::fake();
+
+    // Each tree is about 2.5 MB of OTLP JSON, so two do not fit one 4 MB request; it is text, so both fit one claim, gzipped.
+    $text = fn (string $traceId) => str_repeat("The release ships on Friday {$traceId}. ", 40_000);
+    $tree = fn (string $traceId) => [[
+        ...drainTree($traceId)[0],
+        'trace_id' => $traceId,
+        'content' => ['output' => [['role' => 'assistant', 'parts' => [['type' => 'text', 'content' => $text($traceId)]]]]],
+    ]];
+    $first = str_repeat('1', 32);
+    $second = str_repeat('2', 32);
+
+    $collector->push($tree($first));
+    $collector->push($tree($second));
+
+    Http::fake(['*' => Http::sequence()->push('', 200)->push('', 503)->whenEmpty(Http::response('', 200))]);
+
+    drainNow();
+
+    expect($collector->size())->toBe(1);
+
+    $this->travel(11)->seconds();
+    drainNow();
+
+    $bodies = Http::recorded()->map(fn (array $pair) => Otlp::body($pair[0]))->values()->all();
+
+    expect($bodies)->toHaveCount(3)
+        ->and($bodies[2])->toContain($second)->not->toContain($first)
+        ->and($collector->size())->toBe(0);
 });
