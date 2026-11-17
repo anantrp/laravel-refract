@@ -206,6 +206,33 @@ A 2xx can carry an OTLP `partialSuccess` (JSON answers only). When it refuses sp
 
 Redirects are never followed, so your keys and headers never go to another host. A 3xx is dropped like any other rejected status. The HTTP timeout is 5 seconds with `sync` (for the whole export) and 15 seconds per request from the queue drain. Connecting to the destination may take at most 1 second with `sync` and 5 seconds from the queue drain, so a host that never answers a connection costs 1 second, not 5.
 
+### Lost Traces
+
+Every run tree Refract drops is counted by reason, in your default cache store, and fires an `Anantrp\Refract\Events\TracesDropped` event with the `count` and the `reason`:
+
+| Reason | What happened |
+| --- | --- |
+| `paused` | `sync`: dropped without a request, while exports pause after a failure |
+| `unavailable` | `sync`: a network error, timeout, 408, 429 or 5xx |
+| `rejected` | Any other status the destination answered with |
+| `unfinished` | `sync`: the export used its 5 seconds before sending these trees |
+| `error` | Refract failed to export or store the trees |
+| `full` | `queue`: the collector was at its cap |
+| `transaction` | `queue`: the database collector was asked to write inside a transaction open on its connection |
+| `encode`, `decode` | `queue`: a tree could not be stored, or a stored tree could not be read |
+| `run_cap` | One run passed 1,000 spans. Here `count` is the spans it dropped, not trees. |
+
+```php
+use Anantrp\Refract\Events\TracesDropped;
+use Illuminate\Support\Facades\Event;
+
+Event::listen(function (TracesDropped $event) {
+    // Send $event->count and $event->reason to your metrics.
+});
+```
+
+A listener that throws is ignored, and a drop inside a listener does not fire the event again.
+
 ## Collecting and Draining
 
 With `REFRACT_DRAIN=queue`, a finished run tree is not exported where it ran. It is pushed to a collector, a bounded store, and a `DrainTraces` job exports it from your own queue workers. There is no extra daemon.

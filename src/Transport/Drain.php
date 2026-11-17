@@ -64,7 +64,7 @@ class Drain
         $breaker = new ExportBreaker($this->container);
 
         if ($breaker->isOpen()) {
-            Diagnostics::warn('export.paused', 'Spans were dropped without trying the destination: it failed recently, so exports are paused for a while.');
+            Diagnostics::dropped('paused', count($trees), 'export.paused', 'Spans were dropped without trying the destination: it failed recently, so exports are paused for a while.');
 
             return;
         }
@@ -72,7 +72,7 @@ class Drain
         try {
             $result = $this->container->make(Exporter::class)->export($trees, self::TIMEOUT);
         } catch (Throwable $e) {
-            Diagnostics::warn('export.error', 'Spans could not be exported ('.$e::class.'). The batch was dropped.');
+            Diagnostics::dropped('error', count($trees), 'export.error', 'Spans could not be exported ('.$e::class.'). The batch was dropped.');
 
             return;
         }
@@ -80,17 +80,24 @@ class Drain
         if ($result->isRetryable()) {
             $pause = $breaker->failed();
 
-            Diagnostics::warn('export.unavailable', "Spans could not be exported: the destination could not be reached or answered 408, 429 or 5xx. The batch was dropped (an export in this process is not retried), and exports pause for {$pause} seconds.");
+            Diagnostics::dropped('unavailable', count($trees), 'export.unavailable', "Spans could not be exported: the destination could not be reached or answered 408, 429 or 5xx. The batch was dropped (an export in this process is not retried), and exports pause for {$pause} seconds.");
 
             return;
         }
 
         $breaker->answered();
 
+        if ($result->isRejected()) {
+            // The exporter warned with the destination's answer.
+            Diagnostics::dropped('rejected', count($trees));
+
+            return;
+        }
+
         if ($result->isUnfinished()) {
             $dropped = count($trees) - $result->done;
 
-            Diagnostics::warn('export.unfinished', 'An export in this process took its whole '.self::TIMEOUT." seconds: {$dropped} of ".count($trees).' run trees were not sent and were dropped.');
+            Diagnostics::dropped('unfinished', $dropped, 'export.unfinished', 'An export in this process took its whole '.self::TIMEOUT." seconds: {$dropped} of ".count($trees).' run trees were not sent and were dropped.');
         }
     }
 
@@ -109,7 +116,7 @@ class Drain
         try {
             $collector = $this->container->make(Collector::class);
         } catch (Throwable $e) {
-            Diagnostics::warn('collect.error', 'Run trees could not be stored for the queue drain ('.$e::class.'). They were dropped.');
+            Diagnostics::dropped('error', count($trees), 'collect.error', 'Run trees could not be stored for the queue drain ('.$e::class.'). They were dropped.');
 
             return;
         }
@@ -120,7 +127,7 @@ class Drain
             try {
                 $stored += $collector->push($tree) ? 1 : 0;
             } catch (Throwable $e) {
-                Diagnostics::warn('collect.error', 'Run trees could not be stored for the queue drain ('.$e::class.'). They were dropped.');
+                Diagnostics::dropped('error', 1, 'collect.error', 'Run trees could not be stored for the queue drain ('.$e::class.'). They were dropped.');
             }
         }
 

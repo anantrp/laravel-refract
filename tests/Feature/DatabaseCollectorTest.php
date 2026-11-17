@@ -3,6 +3,7 @@
 use Anantrp\Refract\Contracts\Collector;
 use Anantrp\Refract\RefractServiceProvider;
 use Anantrp\Refract\Support\Diagnostics;
+use Anantrp\Refract\Support\Stats;
 use Anantrp\Refract\Tests\Support\WarningLog;
 use Anantrp\Refract\Transport\Collectors\DatabaseCollector;
 use Anantrp\Refract\Transport\Drain;
@@ -78,14 +79,13 @@ it('leases and delays follow the app clock', function () {
     expect(storedNames($collector->claim(4_000_000, 60)))->toBe(['one']);
 });
 
-it('the dropped count is kept per process, by the collector instance', function () {
+it('a tree dropped at the cap is counted for every process, by reason', function () {
     $collector = databaseCollector(maxBytes: storedBytes(storedTree('one')) + 10);
 
     $collector->push(storedTree('one'));
     $collector->push(storedTree('two'));
 
-    expect($collector->dropped())->toBe(1)
-        ->and(databaseCollector()->dropped())->toBe(0);
+    expect(Stats::read()['dropped'])->toBe(['full' => 1]);
 });
 
 it('a push inside a transaction on its connection is skipped with one warning, and the transaction is untouched', function () {

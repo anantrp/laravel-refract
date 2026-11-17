@@ -222,13 +222,13 @@ class RedisCollector implements Collector
         $payload = TreePayload::encode($tree);
 
         if ($payload === null) {
-            Diagnostics::warn('collect.encode', 'A run tree could not be encoded for the store and was dropped.');
+            Diagnostics::dropped('encode', 1, 'collect.encode', 'A run tree could not be encoded for the store and was dropped.');
 
             return false;
         }
 
         if ($this->run(self::PUSH, $payload, $this->maxBytes) === 0) {
-            Diagnostics::warn('collect.full', "The trace store is full ({$this->maxBytes} bytes): new run trees are dropped until the queue drain catches up.");
+            Diagnostics::dropped('full', 1, 'collect.full', "The trace store is full ({$this->maxBytes} bytes): new run trees are dropped until the queue drain catches up.");
 
             return false;
         }
@@ -255,7 +255,7 @@ class RedisCollector implements Collector
         }
 
         if ($broken !== []) {
-            Diagnostics::warn('collect.decode', 'A stored run tree could not be decoded and was dropped.');
+            Diagnostics::dropped('decode', count($broken), 'collect.decode', 'A stored run tree could not be decoded and was dropped.');
 
             $this->ack($broken);
         }

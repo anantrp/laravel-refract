@@ -21,7 +21,7 @@ class Stats
      *
      * @var list<string>
      */
-    public const REASONS = ['full', 'encode', 'decode', 'transaction', 'paused', 'unavailable', 'unfinished', 'error', 'run_cap', 'poison'];
+    public const REASONS = ['full', 'encode', 'decode', 'transaction', 'paused', 'unavailable', 'unfinished', 'error', 'run_cap', 'poison', 'rejected'];
 
     /**
      * The prefix of the cache key that counts the drops of one reason.

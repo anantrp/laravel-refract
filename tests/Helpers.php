@@ -2,6 +2,7 @@
 
 use Anantrp\Refract\Contracts\Collector;
 use Anantrp\Refract\Support\Diagnostics;
+use Anantrp\Refract\Support\Stats;
 use Anantrp\Refract\Tests\Support\WarningLog;
 use Anantrp\Refract\Transport\Drain;
 use Illuminate\Support\Facades\Http;
@@ -51,8 +52,7 @@ function storedBytes(array $tree): int
 /**
  * Define the tests every stored collector passes, in the calling test file.
  *
- * The given closure makes an empty collector, capped at the given bytes,
- * whose dropped() counts the trees it dropped at the cap.
+ * The given closure makes an empty collector, capped at the given bytes.
  *
  * @param  Closure(int): Collector  $make
  */
@@ -145,7 +145,7 @@ function itBehavesLikeAStoredCollector(Closure $make): void
         $collector->push(storedTree('four', str_repeat('x', 1_000)));
 
         expect($collector->size())->toBe(2)
-            ->and($collector->dropped())->toBe(2)
+            ->and(Stats::read()['dropped']['full'] ?? 0)->toBe(2)
             ->and($this->log->warnings)->toHaveCount(1)
             ->and($this->log->warnings[0])->toContain('full');
 
@@ -168,7 +168,7 @@ function itBehavesLikeAStoredCollector(Closure $make): void
         $collector->push(storedTree('two', str_repeat('x', 1_000)));
 
         expect($collector->size())->toBe(1)
-            ->and($collector->dropped())->toBe(1);
+            ->and(Stats::read()['dropped']['full'] ?? 0)->toBe(1);
     });
 
     it('a stored tree survives the trip: invalid UTF-8 is replaced, floats keep their fraction', function () use ($make) {

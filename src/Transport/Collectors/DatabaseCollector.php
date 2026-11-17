@@ -63,11 +63,6 @@ class DatabaseCollector implements Collector
     protected const CLAIM_ATTEMPTS = 3;
 
     /**
-     * The number of trees this process dropped at the cap.
-     */
-    protected int $dropped = 0;
-
-    /**
      * The lock a claim reads due rows with, once known.
      */
     protected string|bool|null $lockForClaim = null;
@@ -83,7 +78,7 @@ class DatabaseCollector implements Collector
     public function push(array $tree): bool
     {
         if ($this->database->transactionLevel() > 0) {
-            Diagnostics::warn('collect.transaction', "A run tree ended inside an open database transaction on the trace store's connection [{$this->database->getName()}], and was dropped so it cannot affect that transaction. Give the database collector a connection of its own.");
+            Diagnostics::dropped('transaction', 1, 'collect.transaction', "A run tree ended inside an open database transaction on the trace store's connection [{$this->database->getName()}], and was dropped so it cannot affect that transaction. Give the database collector a connection of its own.");
 
             return false;
         }
@@ -91,16 +86,14 @@ class DatabaseCollector implements Collector
         $payload = TreePayload::encode($tree);
 
         if ($payload === null) {
-            Diagnostics::warn('collect.encode', 'A run tree could not be encoded for the store and was dropped.');
+            Diagnostics::dropped('encode', 1, 'collect.encode', 'A run tree could not be encoded for the store and was dropped.');
 
             return false;
         }
 
         // Two pushes at once may both pass the check: the cap is exact to within one tree per process.
         if ($this->storedBytes() + strlen($payload) > $this->maxBytes) {
-            $this->dropped++;
-
-            Diagnostics::warn('collect.full', "The trace store is full ({$this->maxBytes} bytes): new run trees are dropped until the queue drain catches up.");
+            Diagnostics::dropped('full', 1, 'collect.full', "The trace store is full ({$this->maxBytes} bytes): new run trees are dropped until the queue drain catches up.");
 
             return false;
         }
@@ -138,7 +131,7 @@ class DatabaseCollector implements Collector
         }
 
         if ($broken !== []) {
-            Diagnostics::warn('collect.decode', 'A stored run tree could not be decoded and was dropped.');
+            Diagnostics::dropped('decode', count($broken), 'collect.decode', 'A stored run tree could not be decoded and was dropped.');
 
             $this->ack($broken);
         }
@@ -170,14 +163,6 @@ class DatabaseCollector implements Collector
     public function size(): int
     {
         return $this->table()->count();
-    }
-
-    /**
-     * Get the number of trees this process dropped at the cap.
-     */
-    public function dropped(): int
-    {
-        return $this->dropped;
     }
 
     /**

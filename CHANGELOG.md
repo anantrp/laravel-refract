@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Every dropped run tree is counted by reason in the default cache store and fires an `Anantrp\Refract\Events\TracesDropped` event (`count`, `reason`). The reasons are `paused`, `unavailable`, `rejected`, `unfinished`, `error`, `full`, `transaction`, `encode`, `decode` and `run_cap` (whose count is spans).
+
+### Removed
+
+- `DatabaseCollector::dropped()`. The drop count is now kept for every process, in the default cache store.
+
 ## [0.3.0] - 2026-11-17
 
 0.3 makes the sync drain fail fast: a destination that is down costs a request or a queue job at most one bounded export, then nothing until it comes back.

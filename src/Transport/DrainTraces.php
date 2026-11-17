@@ -314,12 +314,19 @@ class DrainTraces implements ShouldBeUniqueUntilProcessing, ShouldQueue
     protected function export(Exporter $exporter, array $trees, float $within): ExportResult
     {
         try {
-            return $exporter->export($trees, max(0.0, $within));
+            $result = $exporter->export($trees, max(0.0, $within));
         } catch (Throwable $e) {
-            Diagnostics::warn('export.error', 'Spans could not be exported ('.$e::class.'). The batch was dropped.');
+            Diagnostics::dropped('error', count($trees), 'export.error', 'Spans could not be exported ('.$e::class.'). The batch was dropped.');
 
             return ExportResult::rejected();
         }
+
+        if ($result->isRejected()) {
+            // The exporter warned with the destination's answer.
+            Diagnostics::dropped('rejected', count($trees));
+        }
+
+        return $result;
     }
 
     /**
