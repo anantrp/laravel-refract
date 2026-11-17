@@ -4,6 +4,7 @@ use Anantrp\Refract\Contracts\Collector;
 use Anantrp\Refract\Support\Diagnostics;
 use Anantrp\Refract\Tests\Support\WarningLog;
 use Anantrp\Refract\Transport\Collectors\RedisCollector;
+use Anantrp\Refract\Transport\Collectors\TreePayload;
 use Anantrp\Refract\Transport\Drain;
 use Anantrp\Refract\Transport\DrainTraces;
 use Illuminate\Redis\Connections\Connection;
@@ -122,4 +123,30 @@ it('an invalid collector is the redis collector, with one warning', function () 
     expect(app(Collector::class))->toBeInstanceOf(RedisCollector::class)
         ->and($log->warnings)->toHaveCount(1)
         ->and($log->warnings[0])->toContain('refract.collector');
+});
+
+it('the Redis collector reports trees, bytes and the oldest due age', function () {
+    $collector = redisCollector(1_000_000);
+
+    expect($collector->stats())->toBe(['trees' => 0, 'bytes' => 0, 'max_bytes' => 1_000_000, 'oldest_age' => null, 'dropped' => 0]);
+
+    // An entry added 700 seconds ago, by its id.
+    $id = (int) floor(microtime(true) * 1000) - 700_000;
+    redisConnection()->eval("return redis.call('xadd', KEYS[1], ARGV[1], 'tree', ARGV[2])", 1, $this->redisKeys[0], "{$id}-0", (string) TreePayload::encode(storedTree('old')));
+    $collector->push($new = storedTree('new'));
+
+    $stats = $collector->stats();
+
+    expect($stats['trees'])->toBe(2)
+        ->and($stats['bytes'])->toBe(storedBytes($new))
+        ->and($stats['oldest_age'])->toBeGreaterThanOrEqual(700)->toBeLessThan(705);
+});
+
+it('a released Redis tree is not due, so it does not count as stalled', function () {
+    $collector = redisCollector();
+
+    $collector->push(storedTree('one'));
+    $collector->release(array_keys($collector->claim(1_000_000, 60)), 300);
+
+    expect($collector->stats())->toMatchArray(['trees' => 1, 'oldest_age' => null]);
 });

@@ -3,6 +3,7 @@
 namespace Anantrp\Refract\Transport\Collectors;
 
 use Anantrp\Refract\Contracts\Collector;
+use Anantrp\Refract\Contracts\ReportsStats;
 use Anantrp\Refract\Support\Diagnostics;
 use Illuminate\Database\Connection;
 use Illuminate\Database\Query\Builder;
@@ -38,7 +39,7 @@ use stdClass;
  * would abort or roll back the app's own work. Give the collector a
  * connection of its own.
  */
-class DatabaseCollector implements Collector
+class DatabaseCollector implements Collector, ReportsStats
 {
     use InteractsWithTime;
 
@@ -163,6 +164,21 @@ class DatabaseCollector implements Collector
     public function size(): int
     {
         return $this->table()->count();
+    }
+
+    public function stats(): array
+    {
+        $now = $this->currentTime();
+
+        $oldest = $this->table()->whereNull('reserved_at')->where('available_at', '<=', $now)->min('available_at');
+
+        return [
+            'trees' => $this->size(),
+            'bytes' => $this->storedBytes(),
+            'max_bytes' => $this->maxBytes,
+            'oldest_age' => $oldest === null ? null : max(0, $now - $this->number($oldest)),
+            'dropped' => null,
+        ];
     }
 
     /**

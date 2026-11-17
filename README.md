@@ -263,6 +263,7 @@ How it works:
 - If the destination settings are missing or invalid in the worker, the drain logs one warning and, while trees are stored, tries again with the same backoff. On an empty store it dispatches nothing.
 - The drain job never throws, and it has no attempt limit (`$tries = 0`), so nothing reaches `failed_jobs`: a drain whose worker dies, or that is killed at its timeout, is given to a worker again after the connection's `retry_after`.
 - A claimed tree is leased for 120 seconds, twice the job `timeout`, so a running drain never loses its trees to another. If the worker dies, the tree is claimed again when the lease runs out.
+- If no worker reads the `refract` queue, nothing drains the store. A push warns, at most every 10 minutes, once the oldest tree that is due has waited over 10 minutes: `No worker is draining the refract queue: ...`. The store is looked at no more than once a minute.
 
 Delivery is at least once. A crash between the export and the removal from the store, or a retryable failure in the middle of a batch, sends trees again. Span ids are set when a span is recorded, so backends deduplicate a resent tree by span id.
 

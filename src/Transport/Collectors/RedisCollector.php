@@ -3,6 +3,7 @@
 namespace Anantrp\Refract\Transport\Collectors;
 
 use Anantrp\Refract\Contracts\Collector;
+use Anantrp\Refract\Contracts\ReportsStats;
 use Anantrp\Refract\Support\Diagnostics;
 use Illuminate\Redis\Connections\Connection;
 use Illuminate\Redis\Connections\PhpRedisConnection;
@@ -27,7 +28,7 @@ use RuntimeException;
  * Redis Cluster. Use a connection that never evicts keys: an eviction
  * policy would drop trees, or the byte count, without a warning.
  */
-class RedisCollector implements Collector
+class RedisCollector implements Collector, ReportsStats
 {
     /**
      * The key of the stream; the other keys add a suffix to it.
@@ -209,6 +210,37 @@ class RedisCollector implements Collector
         LUA;
 
     /**
+     * Read the trees, their bytes, the milliseconds the oldest due tree has waited (-1 when none is due), and the trees dropped at the cap.
+     *
+     * A tree in the stream became due when it was added, at its id's time.
+     * A delayed tree is due at its score.
+     */
+    protected const STATS = <<<'LUA'
+        local time = redis.call('time')
+        local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
+        local oldest = nil
+
+        local first = redis.call('xrange', KEYS[1], '-', '+', 'COUNT', 1)
+
+        if #first > 0 then
+            oldest = tonumber(string.match(first[1][1], '^(%d+)-'))
+        end
+
+        local due = redis.call('zrangebyscore', KEYS[4], '-inf', now, 'WITHSCORES', 'LIMIT', 0, 1)
+
+        if #due > 0 and (oldest == nil or tonumber(due[2]) < oldest) then
+            oldest = tonumber(due[2])
+        end
+
+        return {
+            redis.call('xlen', KEYS[1]) + redis.call('zcard', KEYS[4]),
+            tonumber(redis.call('get', KEYS[2]) or '0'),
+            oldest == nil and -1 or math.max(0, now - oldest),
+            tonumber(redis.call('get', KEYS[3]) or '0'),
+        }
+        LUA;
+
+    /**
      * Create a new Redis collector instance.
      */
     public function __construct(
@@ -284,6 +316,20 @@ class RedisCollector implements Collector
     public function size(): int
     {
         return $this->count(self::SIZE);
+    }
+
+    public function stats(): array
+    {
+        $stats = $this->run(self::STATS);
+        [$trees, $bytes, $age, $dropped] = array_map(fn (mixed $value) => is_numeric($value) ? (int) $value : 0, is_array($stats) ? array_pad($stats, 4, 0) : [0, 0, -1, 0]);
+
+        return [
+            'trees' => $trees,
+            'bytes' => $bytes,
+            'max_bytes' => $this->maxBytes,
+            'oldest_age' => $age < 0 ? null : intdiv($age, 1000),
+            'dropped' => $dropped,
+        ];
     }
 
     /**

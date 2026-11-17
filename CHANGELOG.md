@@ -10,6 +10,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Every dropped run tree is counted by reason in the default cache store and fires an `Anantrp\Refract\Events\TracesDropped` event (`count`, `reason`). The reasons are `paused`, `unavailable`, `rejected`, `unfinished`, `error`, `full`, `transaction`, `encode`, `decode` and `run_cap` (whose count is spans).
 
+- With `REFRACT_DRAIN=queue`, a push warns when the oldest due tree in the store has waited over 10 minutes: no worker reads the `refract` queue. Both collectors implement a new `Anantrp\Refract\Contracts\ReportsStats` contract (trees, bytes, cap, oldest due age, drops at the cap).
+
 ### Changed
 
 - A warning is logged at most once per kind every 10 minutes, shared through the default cache store, and the next one says how many were held back (`(42 more since the last warning)`). Before, each process logged a kind once, ever, and stopped after 10 kinds: a long-lived queue worker went quiet during a long outage.
