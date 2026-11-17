@@ -185,7 +185,7 @@ A sync-driver job or an `Artisan::call()` inside a web request does not hand on 
 
 Where a run tree goes depends on `REFRACT_DRAIN`:
 
-- **`sync`** (the default): the tree is exported in the same process, once. It is best effort: the export waits up to 5 seconds for the destination, and a tree that cannot be exported is dropped with one warning. It is never tried again. There is nothing to set up.
+- **`sync`** (the default): the tree is exported in the same process, once. It is best effort: the export takes at most 5 seconds in all, however many requests it makes, and a tree that cannot be exported in that time is dropped with one warning. It is never tried again. There is nothing to set up.
 - **`queue`**: the tree is stored in a collector, and your queue workers export it, with retries. See [Collecting and Draining](#collecting-and-draining).
 
 ### Export Failures
@@ -201,7 +201,7 @@ A rejected batch's warning names the status and the first 200 characters of the 
 
 A 2xx can carry an OTLP `partialSuccess` (JSON answers only). When it refuses spans or has a message, one warning names the refused count and the message, masked the same way. The answer does not say which spans were refused. They are not retried, as the OTLP spec asks. An empty body, `{}` or a body that is not JSON logs nothing.
 
-Redirects are never followed, so your keys and headers never go to another host. A 3xx is dropped like any other rejected status. The HTTP timeout is 5 seconds with `sync` and 15 seconds from the queue drain.
+Redirects are never followed, so your keys and headers never go to another host. A 3xx is dropped like any other rejected status. The HTTP timeout is 5 seconds with `sync` (for the whole export) and 15 seconds per request from the queue drain. Connecting to the destination may take at most 1 second with `sync` and 5 seconds from the queue drain, so a host that never answers a connection costs 1 second, not 5.
 
 ## Collecting and Draining
 
@@ -419,8 +419,8 @@ Context::add('trigger', 'schedule');
 - With a morph map, the participant type is the full class name. So it does not match the `participant_type` column of the `agent_conversations` table, which holds the alias.
 - With no `mask` set, a secret inside captured content is sent as is.
 - Only agent runs are traced. Embeddings, images, audio and other SDK operations are not.
-- With `sync`, the export after the response still runs in the same PHP-FPM worker. A destination that is down keeps that worker busy for up to 5 seconds per export.
-- With `sync`, exports inside a queue job run under that job's `timeout`. A slow or down destination adds up to 5 seconds per run the job makes. Give jobs that run agents room in their `timeout`, or use `REFRACT_DRAIN=queue`.
+- With `sync`, the export after the response still runs in the same PHP-FPM worker. A destination that does not answer a connection keeps that worker busy for 1 second per export. One that accepts the connection and then hangs keeps it busy for up to 5 seconds per export.
+- With `sync`, exports inside a queue job run under that job's `timeout`. A destination that does not answer a connection adds 1 second per run the job makes, and one that accepts it and then hangs adds up to 5 seconds per run. Give jobs that run agents room in their `timeout`, or use `REFRACT_DRAIN=queue`.
 - With `sync`, a destination that is down or slow loses the traces sent meanwhile: nothing is tried again. Use `REFRACT_DRAIN=queue` to keep them.
 - Spans not yet handed on are lost when the worker kills a job at its `timeout`. They are also lost when a command ends by a signal, `exit()` or `dd()`.
 - With `REFRACT_DRAIN=queue`, a tree can be sent twice (see [Collecting and Draining](#collecting-and-draining)). Backends that do not deduplicate by span id show it twice.

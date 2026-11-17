@@ -58,6 +58,11 @@ class DrainTraces implements ShouldBeUniqueUntilProcessing, ShouldQueue
     public const TIMEOUT = 15;
 
     /**
+     * The seconds an export from the drain waits to connect to the destination.
+     */
+    public const CONNECT_TIMEOUT = 5;
+
+    /**
      * The most bytes of stored trees one claim takes, about one request.
      */
     public const CLAIM_BYTES = 4_000_000;

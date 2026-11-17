@@ -8,6 +8,7 @@
  * Each request adds one JSON line to requests.jsonl (next to this file, or
  * STUB_OTLP_LOG). The answer to request N is entry N-1 of the JSON array in
  * script.json (or STUB_OTLP_SCRIPT): {"status": 429, "headers": {"Retry-After": "2"}, "body": {}}.
+ * "delay_ms" holds the answer back that long, to stand in for a slow destination.
  * The body is a string, or JSON that is encoded as is.
  * A missing script or entry answers 200 {}; a script that does not parse answers 500.
  * Delete the log to start again at request 1, before writing a new script.
@@ -56,6 +57,8 @@ if (is_file($script) && ! is_array($answers)) {
 }
 
 $answer = $answer instanceof stdClass ? $answer : new stdClass;
+
+usleep(max(0, (int) ($answer->delay_ms ?? 0)) * 1000);
 
 http_response_code((int) ($answer->status ?? 200));
 header('Content-Type: application/json');

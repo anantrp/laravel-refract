@@ -51,7 +51,7 @@ class HttpExporter implements Exporter
     protected const MIN_REQUEST_SECONDS = 1;
 
     /**
-     * Create a new exporter instance that waits the given seconds for the destination.
+     * Create a new exporter instance that waits the given seconds for the destination, and the given seconds at most to connect to it.
      */
     public function __construct(
         protected Platform $platform,
@@ -60,6 +60,7 @@ class HttpExporter implements Exporter
         protected string $environment,
         protected string $serviceName,
         protected int $timeout,
+        protected ?int $connectTimeout = null,
     ) {}
 
     /**
@@ -280,9 +281,15 @@ class HttpExporter implements Exporter
             }
 
             // A redirect is never followed: it would send the headers to another host or turn the POST into a GET.
-            $response = Http::withHeaders($headers)
+            $request = Http::withHeaders($headers)
                 ->withoutRedirecting()
-                ->timeout($timeout)
+                ->timeout($timeout);
+
+            if ($this->connectTimeout !== null) {
+                $request->connectTimeout(min($this->connectTimeout, max(1, (int) ceil($timeout))));
+            }
+
+            $response = $request
                 ->withBody($body, 'application/json')
                 ->post($this->platform->endpoint());
         } catch (ConnectionException) {

@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- With `REFRACT_DRAIN=sync`, an export takes at most 5 s in all, however many requests it makes; trees it could not send in time are dropped with one warning. Before, each request had its own 5 s.
+- Connecting to the destination times out after 1 s with `sync` (5 s from the queue drain), so a destination that never answers a connection costs a run 1 s, not 5 s.
+
 ## [0.2.0] - 2026-11-16
 
 0.2 splits sending into collecting and draining, and cuts the configuration to ten environment variables.
