@@ -10,6 +10,9 @@
  * mode "big": sends one batch of <count> trees of about 1.5 MB each through
  * the drain, so the export makes more than one request.
  *
+ * With REPRO_CACHE_DIR set, the app's default cache is a file cache there,
+ * so separate runs of this script share it, as PHP-FPM requests would.
+ *
  * Prints one JSON line: the seconds each run or batch took, and the total.
  */
 
@@ -45,6 +48,10 @@ $app = Application::create($root.'/vendor/orchestra/testbench-core/laravel', opt
 ]]]);
 
 $app['config']->set('logging.default', 'stderr');
+
+if (getenv('REPRO_CACHE_DIR')) {
+    $app['config']->set(['cache.default' => 'file', 'cache.stores.file.path' => getenv('REPRO_CACHE_DIR')]);
+}
 
 $times = [];
 
