@@ -75,7 +75,7 @@ class RedisCollector implements Collector, ReportsStats
         LUA;
 
     /**
-     * Add back the delayed trees that are due, then take over expired leases and read new entries, until the bytes are reached.
+     * Add back the delayed trees that are due, then take over expired leases, 100 at a time, and read new entries, until the bytes are reached.
      */
     protected const CLAIM = <<<'LUA'
         local time = redis.call('time')
@@ -129,12 +129,26 @@ class RedisCollector implements Collector, ReportsStats
         local cursor = '0-0'
 
         repeat
-            local result = redis.call('xautoclaim', KEYS[1], ARGV[3], ARGV[4], ARGV[2], cursor, 'COUNT', 1)
+            local result = redis.call('xautoclaim', KEYS[1], ARGV[3], ARGV[4], ARGV[2], cursor, 'COUNT', 100)
 
             cursor = result[1]
 
+            -- XAUTOCLAIM made every entry it returned look fresh: the ones not taken get their lease back as run out, so the next claim takes them.
+            local left = {'xclaim', KEYS[1], ARGV[3], ARGV[4], 0}
+
             for _, entry in ipairs(result[2]) do
-                take(entry)
+                if not full() then
+                    take(entry)
+                elseif entry then
+                    table.insert(left, entry[1])
+                end
+            end
+
+            if #left > 5 then
+                table.insert(left, 'IDLE')
+                table.insert(left, ARGV[2])
+                table.insert(left, 'JUSTID')
+                redis.call(unpack(left))
             end
         until cursor == '0-0' or full()
 

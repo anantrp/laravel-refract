@@ -150,3 +150,34 @@ it('a released Redis tree is not due, so it does not count as stalled', function
 
     expect($collector->stats())->toMatchArray(['trees' => 1, 'oldest_age' => null]);
 });
+
+it('250 expired leases are all claimed in one claim, in order', function () {
+    $collector = redisCollector();
+
+    foreach (range(1, 250) as $i) {
+        $collector->push(storedTree("tree {$i}"));
+    }
+
+    expect($collector->claim(64_000_000, 60))->toHaveCount(250);
+
+    // A lease of 0 seconds has run out at once.
+    expect(storedNames($collector->claim(64_000_000, 0)))->toBe(array_map(fn (int $i) => "tree {$i}", range(1, 250)));
+});
+
+it('leases left over when the byte limit is hit part way through a batch are claimable at once', function () {
+    $collector = redisCollector();
+
+    foreach (range(1, 100) as $i) {
+        $collector->push(storedTree(sprintf('tree %03d', $i)));
+    }
+
+    expect($collector->claim(64_000_000, 1))->toHaveCount(100);
+
+    usleep(1_100_000);
+
+    // A limit that the 30th tree reaches: the trees are about the same size, give or take a few bytes of gzip.
+    $limit = intdiv(59 * storedBytes(storedTree('tree 001')), 2);
+
+    expect(storedNames($collector->claim($limit, 1)))->toBe(array_map(fn (int $i) => sprintf('tree %03d', $i), range(1, 30)))
+        ->and(storedNames($collector->claim($limit, 1)))->toBe(array_map(fn (int $i) => sprintf('tree %03d', $i), range(31, 60)));
+});

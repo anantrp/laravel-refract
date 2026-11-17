@@ -5,12 +5,15 @@ namespace Anantrp\Refract\Transport\Collectors;
 use Anantrp\Refract\Contracts\Collector;
 use Anantrp\Refract\Contracts\ReportsStats;
 use Anantrp\Refract\Support\Diagnostics;
+use Illuminate\Container\Container;
+use Illuminate\Contracts\Cache\Repository as Cache;
 use Illuminate\Database\Connection;
 use Illuminate\Database\Query\Builder;
 use Illuminate\Support\InteractsWithTime;
 use Illuminate\Support\Str;
 use PDO;
 use stdClass;
+use Throwable;
 
 /**
  * Collects run trees in the "refract_traces" table, one row per tree.
@@ -27,10 +30,12 @@ use stdClass;
  * and one batch the destination keeps failing never blocks the rest.
  *
  * The cap is on the bytes stored, checked before each insert: at the cap
- * a new tree is dropped and counted, and the stored trees are kept. The
- * sum reads an index on the bytes column, never the payloads, and the cap
- * bounds the rows it reads; a running total would drift on a manual delete
- * or a crash between two writes.
+ * a new tree is dropped and counted, and the stored trees are kept. A
+ * push reads a running total kept in the default cache, and sums the
+ * table (from an index on the bytes column, never the payloads) only when
+ * the total is missing or a minute old. Each claim and ack sets it right,
+ * so a manual delete or a crash between two writes drifts it for a
+ * minute at most.
  *
  * A push never runs inside an open transaction on the collector's
  * connection: it is skipped with one warning. Joined to the app's
@@ -57,6 +62,11 @@ class DatabaseCollector implements Collector, ReportsStats
      * The most trees one claim returns, so one claim never reads the whole table.
      */
     protected const CLAIM_LIMIT = 1_000;
+
+    /**
+     * The seconds the running total of stored bytes is trusted before a push sums the table again.
+     */
+    protected const TOTAL_FOR = 60;
 
     /**
      * The times a claim is tried when the database reports a deadlock or a locked database.
@@ -98,7 +108,9 @@ class DatabaseCollector implements Collector, ReportsStats
         }
 
         // Two pushes at once may both pass the check: the cap is exact to within one tree per process.
-        if ($this->storedBytes() + strlen($payload) > $this->maxBytes) {
+        $stored = $this->runningBytes();
+
+        if ($stored + strlen($payload) > $this->maxBytes) {
             Diagnostics::dropped('full', 1, 'collect.full', "The trace store is full ({$this->maxBytes} bytes): new run trees are dropped until the queue drain catches up.");
 
             return false;
@@ -111,11 +123,21 @@ class DatabaseCollector implements Collector, ReportsStats
             'reserved_at' => null,
         ]);
 
+        $this->cache(function (Cache $cache) use ($payload, $stored) {
+            // A total that ran out just now comes back as this tree alone, with no expiry: drop it, so the next push sums.
+            if ($cache->increment($this->totalKey(), strlen($payload)) === strlen($payload) && $stored > 0) {
+                $cache->forget($this->totalKey());
+            }
+        });
+
         return true;
     }
 
     public function claim(int $maxBytes, int $lease): array
     {
+        // A claim runs in a worker, off the request: it sums the table, so a row deleted behind the collector's back frees its bytes.
+        $this->cache(fn (Cache $cache) => $cache->put($this->totalKey(), $this->storedBytes(), self::TOTAL_FOR));
+
         $ids = $this->database->transaction(fn () => $this->reserve(max(1, $maxBytes), max(0, $lease)), self::CLAIM_ATTEMPTS);
 
         if ($ids === []) {
@@ -151,6 +173,9 @@ class DatabaseCollector implements Collector, ReportsStats
 
         if ($ids !== []) {
             $this->table()->whereIn('id', $ids)->delete();
+
+            // The deleted bytes are not known here: the next push sums the table again.
+            $this->cache(fn (Cache $cache) => $cache->forget($this->totalKey()));
         }
     }
 
@@ -286,6 +311,52 @@ class DatabaseCollector implements Collector, ReportsStats
         }
 
         return $ids;
+    }
+
+    /**
+     * Get the bytes of every stored tree, from the running total in the default cache, summing the table when the total is missing or older than TOTAL_FOR seconds.
+     *
+     * So a push does not sum the table each time. When the cache fails,
+     * every push sums it.
+     */
+    protected function runningBytes(): int
+    {
+        $total = $this->cache(fn (Cache $cache) => $cache->get($this->totalKey()));
+
+        if (is_numeric($total)) {
+            return (int) $total;
+        }
+
+        $bytes = $this->storedBytes();
+
+        $this->cache(fn (Cache $cache) => $cache->add($this->totalKey(), $bytes, self::TOTAL_FOR));
+
+        return $bytes;
+    }
+
+    /**
+     * Get the cache key of the running total of this collector's connection.
+     */
+    protected function totalKey(): string
+    {
+        return 'refract:database:bytes:'.$this->database->getName();
+    }
+
+    /**
+     * Run the given callback on the app's default cache, or get null when the cache fails.
+     *
+     * @template TValue
+     *
+     * @param  callable(Cache): TValue  $callback
+     * @return TValue|null
+     */
+    protected function cache(callable $callback): mixed
+    {
+        try {
+            return $callback(Container::getInstance()->make(Cache::class));
+        } catch (Throwable) {
+            return null;
+        }
     }
 
     /**

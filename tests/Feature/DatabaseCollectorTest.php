@@ -8,6 +8,7 @@ use Anantrp\Refract\Tests\Support\WarningLog;
 use Anantrp\Refract\Transport\Collectors\DatabaseCollector;
 use Anantrp\Refract\Transport\Drain;
 use Anantrp\Refract\Transport\DrainTraces;
+use Illuminate\Contracts\Cache\Repository;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Queue;
@@ -185,4 +186,63 @@ it('the migration is published under the refract-migrations tag', function () {
 
     expect(array_map(realpath(...), array_keys($paths)))->toBe([realpath(dirname(__DIR__, 2).'/database/migrations')])
         ->and(array_values($paths))->toBe([database_path('migrations')]);
+});
+
+it('a push does not sum the table while the running total is fresh', function () {
+    $collector = databaseCollector();
+    $sums = 0;
+
+    DB::listen(function ($query) use (&$sums) {
+        $sums += str_contains(strtolower($query->sql), 'sum(') ? 1 : 0;
+    });
+
+    foreach (range(1, 10) as $i) {
+        $collector->push(storedTree("tree {$i}"));
+    }
+
+    expect($sums)->toBe(1)
+        ->and($collector->size())->toBe(10);
+});
+
+it('the running total is summed again after 60 seconds', function () {
+    $collector = databaseCollector();
+    $sums = 0;
+
+    DB::listen(function ($query) use (&$sums) {
+        $sums += str_contains(strtolower($query->sql), 'sum(') ? 1 : 0;
+    });
+
+    $collector->push(storedTree('one'));
+    $this->travel(61)->seconds();
+    $collector->push(storedTree('two'));
+
+    expect($sums)->toBe(2);
+});
+
+it('the total is reconciled on claim, so a row deleted behind the collector\'s back frees its bytes', function () {
+    $one = storedTree('one', str_repeat('x', 1_000));
+    $collector = databaseCollector(maxBytes: 2 * storedBytes($one) + 10);
+
+    $collector->push($one);
+    $collector->push(storedTree('two', str_repeat('x', 1_000)));
+    DB::table(DatabaseCollector::TABLE)->orderBy('id')->limit(1)->delete();
+
+    // The total still counts the deleted row.
+    expect($collector->push(storedTree('three', str_repeat('x', 1_000))))->toBeFalse();
+
+    $collector->release(array_keys($collector->claim(4_000_000, 60)), 0);
+
+    expect($collector->push(storedTree('four', str_repeat('x', 1_000))))->toBeTrue();
+});
+
+it('with the cache down, the cap still holds, summing each push', function () {
+    $cache = Mockery::mock(Repository::class);
+    $cache->shouldReceive(Mockery::any())->andThrow(new RuntimeException('down'));
+    app()->instance(Repository::class, $cache);
+
+    $one = storedTree('one', str_repeat('x', 1_000));
+    $collector = databaseCollector(maxBytes: storedBytes($one) + 10);
+
+    expect($collector->push($one))->toBeTrue()
+        ->and($collector->push(storedTree('two', str_repeat('x', 1_000))))->toBeFalse();
 });

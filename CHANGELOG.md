@@ -32,6 +32,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - The queue drain no longer sends trees again that an earlier request of the same drain delivered, when a later request fails with a network error, 408, 429 or 5xx.
 
+- The database collector keeps a running total of its stored bytes in the default cache, so a push no longer sums the table each time: it sums at most once a minute, and every claim and ack sets the total right.
+- The Redis collector takes over expired leases 100 at a time instead of one by one, and hands back at once the ones a full claim did not take.
+
 ### Removed
 
 - `DatabaseCollector::dropped()`. The drop count is now kept for every process, in the default cache store.
