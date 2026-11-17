@@ -6,12 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-17
+
+0.3 makes the sync drain fail fast: a destination that is down costs a request or a queue job at most one bounded export, then nothing until it comes back.
+
 ### Changed
 
 - With `REFRACT_DRAIN=sync`, an export takes at most 5 s in all, however many requests it makes; trees it could not send in time are dropped with one warning. Before, each request had its own 5 s.
 - Connecting to the destination times out after 1 s with `sync` (5 s from the queue drain), so a destination that never answers a connection costs a run 1 s, not 5 s.
 - With `REFRACT_DRAIN=sync`, a failed export (network error, timeout, 408, 429 or 5xx) pauses exports for 30 s, doubling on each failure in a row up to 5 minutes. While paused, trees are dropped without a request, with one warning; then one export, in one process, tries again, and an answer ends the pause everywhere. The pause is shared through the default cache store, so PHP-FPM requests and queue workers share it too.
-- Exports go through an HTTP client of Refract's own (`refract.http` in the container), not the `Http` facade: the app's global HTTP middleware and options, `Http::fake()` and request events (Telescope, Pulse, Nightwatch) no longer see them.
+- Exports go through an HTTP client of Refract's own (`refract.http` in the container), not the `Http` facade: the app's global HTTP middleware and options, `Http::fake()` and request events (Telescope, Pulse, Nightwatch) no longer see them. **Upgrading:** a test that faked exports with `Http::fake()` should fake `app('refract.http')` instead, and headers or proxy options added through global HTTP middleware no longer reach the destination.
 
 ## [0.2.0] - 2026-11-16
 
@@ -74,6 +78,7 @@ First release.
 - Refract is never tied to the app's database transactions. An app rollback does not remove spans.
 - A send in the process while a console process runs keeps its spans when the destination fails, and tries them again later. Once a part cannot connect, the later parts of that send wait for the next try.
 
-[Unreleased]: https://github.com/anantrp/laravel-refract/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/anantrp/laravel-refract/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/anantrp/laravel-refract/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/anantrp/laravel-refract/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/anantrp/laravel-refract/releases/tag/v0.1.0
