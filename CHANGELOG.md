@@ -12,6 +12,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - With `REFRACT_DRAIN=queue`, a push warns when the oldest due tree in the store has waited over 10 minutes: no worker reads the `refract` queue. Both collectors implement a new `Anantrp\Refract\Contracts\ReportsStats` contract (trees, bytes, cap, oldest due age, drops at the cap).
 
+- `php artisan refract:status` (`--json`) shows the destination, drain, store, drops by reason, pause or backoff, and the last export success and failure. It exits 1 when the store has a tree waiting over 10 minutes, traces were dropped since its last run, or exports have failed for 10 minutes with no success.
+
 ### Changed
 
 - A warning is logged at most once per kind every 10 minutes, shared through the default cache store, and the next one says how many were held back (`(42 more since the last warning)`). Before, each process logged a kind once, ever, and stopped after 10 kinds: a long-lived queue worker went quiet during a long outage.

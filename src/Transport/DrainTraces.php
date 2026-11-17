@@ -6,6 +6,7 @@ use Anantrp\Refract\Contracts\Collector;
 use Anantrp\Refract\Contracts\Exporter;
 use Anantrp\Refract\Contracts\ExportResult;
 use Anantrp\Refract\Support\Diagnostics;
+use Anantrp\Refract\Support\Stats;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Cache\Repository as Cache;
 use Illuminate\Contracts\Container\Container;
@@ -14,6 +15,7 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\Jobs\SyncJob;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\InteractsWithTime;
 use Throwable;
 
@@ -247,6 +249,10 @@ class DrainTraces implements ShouldBeUniqueUntilProcessing, ShouldQueue
             }
 
             if ($result->isUnfinished()) {
+                if ($result->done > 0) {
+                    Stats::exported();
+                }
+
                 $this->keepProgress($collector, $ids, $result);
                 $this->next(0);
 
@@ -254,6 +260,7 @@ class DrainTraces implements ShouldBeUniqueUntilProcessing, ShouldQueue
             }
 
             $collector->ack($ids);
+            Stats::exported();
 
             if ($failures > 0) {
                 $cache->forget(self::BACKOFF_KEY);
@@ -316,12 +323,14 @@ class DrainTraces implements ShouldBeUniqueUntilProcessing, ShouldQueue
         try {
             $result = $exporter->export($trees, max(0.0, $within));
         } catch (Throwable $e) {
+            Stats::failed();
             Diagnostics::dropped('error', count($trees), 'export.error', 'Spans could not be exported ('.$e::class.'). The batch was dropped.');
 
             return ExportResult::rejected();
         }
 
         if ($result->isRejected()) {
+            Stats::failed();
             // The exporter warned with the destination's answer.
             Diagnostics::dropped('rejected', count($trees));
         }
@@ -339,6 +348,7 @@ class DrainTraces implements ShouldBeUniqueUntilProcessing, ShouldQueue
         $delay = $this->failureDelay($cache, $result);
 
         $collector->release($ids, $delay);
+        Stats::failed();
 
         Diagnostics::warn('drain.retry', "Spans could not be exported: the destination could not be reached or answered 408, 429 or 5xx. They are tried again in {$delay} seconds.");
 
@@ -360,6 +370,17 @@ class DrainTraces implements ShouldBeUniqueUntilProcessing, ShouldQueue
         $cache->put(self::BACKOFF_KEY, ['until' => $this->currentTime() + $delay, 'failures' => $failures], $delay + self::LOCK_MARGIN);
 
         return $delay;
+    }
+
+    /**
+     * Get when the drain may export again after failed exports, as a Unix time, or null when it is not backing off.
+     */
+    public static function backoffUntil(Cache $cache): ?int
+    {
+        $backoff = $cache->get(self::BACKOFF_KEY);
+        $until = is_array($backoff) ? ($backoff['until'] ?? null) : null;
+
+        return is_int($until) && $until > Carbon::now()->getTimestamp() ? $until : null;
     }
 
     /**

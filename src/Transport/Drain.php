@@ -6,6 +6,7 @@ use Anantrp\Refract\Contracts\Collector;
 use Anantrp\Refract\Contracts\Exporter;
 use Anantrp\Refract\Contracts\ReportsStats;
 use Anantrp\Refract\Support\Diagnostics;
+use Anantrp\Refract\Support\Stats;
 use Illuminate\Contracts\Cache\Repository as Cache;
 use Illuminate\Contracts\Container\Container;
 use Throwable;
@@ -89,6 +90,7 @@ class Drain
         try {
             $result = $this->container->make(Exporter::class)->export($trees, self::TIMEOUT);
         } catch (Throwable $e) {
+            Stats::failed();
             Diagnostics::dropped('error', count($trees), 'export.error', 'Spans could not be exported ('.$e::class.'). The batch was dropped.');
 
             return;
@@ -96,6 +98,7 @@ class Drain
 
         if ($result->isRetryable()) {
             $pause = $breaker->failed();
+            Stats::failed();
 
             Diagnostics::dropped('unavailable', count($trees), 'export.unavailable', "Spans could not be exported: the destination could not be reached or answered 408, 429 or 5xx. The batch was dropped (an export in this process is not retried), and exports pause for {$pause} seconds.");
 
@@ -105,11 +108,14 @@ class Drain
         $breaker->answered();
 
         if ($result->isRejected()) {
+            Stats::failed();
             // The exporter warned with the destination's answer.
             Diagnostics::dropped('rejected', count($trees));
 
             return;
         }
+
+        Stats::exported();
 
         if ($result->isUnfinished()) {
             $dropped = count($trees) - $result->done;

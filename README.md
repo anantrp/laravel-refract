@@ -234,6 +234,36 @@ Event::listen(function (TracesDropped $event) {
 
 A listener that throws is ignored, and a drop inside a listener does not fire the event again.
 
+### Checking Delivery
+
+`php artisan refract:status` shows where traces go and whether they get there:
+
+```
+  Destination ....................................................... langfuse
+  Drain ................................................................ queue
+  Collector ............................................................ redis
+  Stored ........................................ 12 trees, 48211 of 67108864 bytes
+  Oldest due tree ........................................... waited 4 seconds
+  Backing off until ......................................................... no
+  Dropped ................................................................ none
+  Last success ................................................ 2026-11-18 09:41:07
+  Last failure ...................................................... never
+```
+
+It exits with 1 when traces are being lost:
+
+- the oldest due tree in the store has waited over 10 minutes (no worker reads the `refract` queue),
+- traces were dropped since the last time the command ran, or
+- no export has succeeded for 10 minutes since one failed.
+
+So a scheduler, a cron job or a deploy check can alert on it:
+
+```bash
+php artisan refract:status || your-alert-command "Refract is losing traces"
+```
+
+`--json` prints the same as one JSON object. The counts live in your default cache store. With the `array` store, or when the cache fails, each process keeps its own, and the command says so.
+
 ## Collecting and Draining
 
 With `REFRACT_DRAIN=queue`, a finished run tree is not exported where it ran. It is pushed to a collector, a bounded store, and a `DrainTraces` job exports it from your own queue workers. There is no extra daemon.
