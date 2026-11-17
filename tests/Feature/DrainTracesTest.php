@@ -3,15 +3,20 @@
 use Anantrp\Refract\Contracts\Collector;
 use Anantrp\Refract\Contracts\Exporter;
 use Anantrp\Refract\Contracts\ExportResult;
+use Anantrp\Refract\Events\TracesDropped;
 use Anantrp\Refract\Support\Diagnostics;
+use Anantrp\Refract\Support\Stats;
 use Anantrp\Refract\Tests\Support\MemoryCollector;
+use Anantrp\Refract\Tests\Support\Otlp;
 use Anantrp\Refract\Tests\Support\WarningLog;
 use Anantrp\Refract\Transport\Drain;
 use Anantrp\Refract\Transport\DrainTraces;
 use Illuminate\Bus\UniqueLock;
 use Illuminate\Contracts\Cache\Repository;
+use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Queue;
@@ -540,4 +545,256 @@ it('on a database queue a worker runs the drain once it is due, and nothing reac
     expect(drainedNames())->toBe(['one'])
         ->and(DB::table('jobs')->count())->toBe(0)
         ->and(DB::table('failed_jobs')->count())->toBe(0);
+});
+
+it('a 503 on the second request acks the trees the first one delivered', function () {
+    // The real exporter, not the memory one, so the trees go out in requests.
+    $this->memoryExporter = null;
+    bootExport(['refract.drain' => 'queue']);
+    app()->instance(Collector::class, $collector = new MemoryCollector);
+    Queue::fake();
+
+    // Each tree is about 2.5 MB of OTLP JSON, so two do not fit one 4 MB request; it is text, so both fit one claim, gzipped.
+    $text = fn (string $traceId) => str_repeat("The release ships on Friday {$traceId}. ", 40_000);
+    $tree = fn (string $traceId) => [[
+        ...drainTree($traceId)[0],
+        'trace_id' => $traceId,
+        'content' => ['output' => [['role' => 'assistant', 'parts' => [['type' => 'text', 'content' => $text($traceId)]]]]],
+    ]];
+    $first = str_repeat('1', 32);
+    $second = str_repeat('2', 32);
+
+    $collector->push($tree($first));
+    $collector->push($tree($second));
+
+    Http::fake(['*' => Http::sequence()->push('', 200)->push('', 503)->whenEmpty(Http::response('', 200))]);
+
+    drainNow();
+
+    expect($collector->size())->toBe(1);
+
+    $this->travel(11)->seconds();
+    drainNow();
+
+    $bodies = Http::recorded()->map(fn (array $pair) => Otlp::body($pair[0]))->values()->all();
+
+    expect($bodies)->toHaveCount(3)
+        ->and($bodies[2])->toContain($second)->not->toContain($first)
+        ->and($collector->size())->toBe(0);
+});
+
+/**
+ * Use the real exporter on the queue drain (the test sets memoryExporter to null first), with a destination that answers 503 to any request carrying the given trace id, or to every request while it is down.
+ */
+function poisonDestination(string $poison, bool &$down = false): MemoryCollector
+{
+    bootExport(['refract.drain' => 'queue']);
+    app()->instance(Collector::class, $collector = new MemoryCollector);
+    Queue::fake();
+
+    Http::fake(function (Request $request) use ($poison, &$down) {
+        return $down || str_contains(Otlp::body($request), $poison) ? Http::response('', 503) : Http::response('', 200);
+    });
+
+    return $collector;
+}
+
+/**
+ * Get the trace ids each request carried, in order.
+ *
+ * @return list<list<string>>
+ */
+function sentTraceIds(): array
+{
+    return Http::recorded()->map(function (array $pair) {
+        preg_match_all('/"traceId":"([0-9a-f]{32})"/', Otlp::body($pair[0]), $ids);
+
+        return array_values(array_unique($ids[1]));
+    })->values()->all();
+}
+
+/**
+ * A tree of one span in the given trace.
+ *
+ * @return list<array<string, mixed>>
+ */
+function traceTree(string $traceId): array
+{
+    return [[...drainTree($traceId)[0], 'trace_id' => $traceId]];
+}
+
+it('the other trees in its batch are delivered once it is sent alone', function () {
+    $poison = str_repeat('9', 32);
+    $this->memoryExporter = null;
+    $collector = poisonDestination($poison);
+
+    $collector->push(traceTree(str_repeat('1', 32)));
+    $collector->push(traceTree($poison));
+    $collector->push(traceTree(str_repeat('2', 32)));
+
+    // Three failed batches, each with the tree in it.
+    foreach (range(1, 3) as $drain) {
+        drainNow();
+        $this->travel(301)->seconds();
+    }
+
+    expect($collector->size())->toBe(3);
+
+    drainNow();
+
+    expect($collector->size())->toBe(1)
+        ->and(array_values($collector->entries)[0]['tree'][0]['trace_id'])->toBe($poison);
+});
+
+it('a tree that keeps failing is sent alone after 3 attempts and dropped after 10', function () {
+    $poison = str_repeat('9', 32);
+    $this->memoryExporter = null;
+    $collector = poisonDestination($poison);
+    Event::fake([TracesDropped::class]);
+
+    $collector->push(traceTree($poison));
+
+    // A new run each time, so the destination is seen to answer.
+    foreach (range(1, 10) as $drain) {
+        $collector->push(traceTree(str_pad((string) $drain, 32, '0', STR_PAD_LEFT)));
+        drainNow();
+        $this->travel(301)->seconds();
+    }
+
+    $alone = array_filter(sentTraceIds(), fn (array $ids) => $ids === [$poison]);
+
+    // Once it failed 3 times, it is tried with the other repeat failures, then alone, each drain: 7 times alone.
+    expect($collector->size())->toBe(0)
+        ->and($alone)->toHaveCount(7)
+        ->and(Stats::read()['dropped'])->toBe(['poison' => 1]);
+
+    Event::assertDispatched(TracesDropped::class, fn ($e) => $e->reason === 'poison' && $e->count === 1);
+});
+
+it('a long outage drops nothing: a tree is dropped as poison only while the destination answers others', function () {
+    $down = true;
+    $this->memoryExporter = null;
+    $collector = poisonDestination(str_repeat('9', 32), $down);
+
+    foreach (range(1, 3) as $tree) {
+        $collector->push(traceTree(str_repeat((string) $tree, 32)));
+    }
+
+    foreach (range(1, 20) as $drain) {
+        drainNow();
+        $this->travel(301)->seconds();
+    }
+
+    expect($collector->size())->toBe(3)
+        ->and(Stats::read()['dropped'])->toBe([]);
+
+    $down = false;
+    drainNow();
+
+    expect($collector->size())->toBe(0);
+});
+
+it('after a long outage, one transient failure of an old tree drops nothing', function () {
+    $this->memoryExporter = null;
+    bootExport(['refract.drain' => 'queue']);
+    app()->instance(Collector::class, $collector = new MemoryCollector);
+    Queue::fake();
+
+    $down = true;
+    $failOnce = null;
+
+    Http::fake(function (Request $request) use (&$down, &$failOnce) {
+        if ($failOnce !== null && str_contains(Otlp::body($request), $failOnce)) {
+            $failOnce = null;
+
+            return Http::response('', 503);
+        }
+
+        return $down ? Http::response('', 503) : Http::response('', 200);
+    });
+
+    foreach (range(1, 3) as $tree) {
+        $collector->push(traceTree(str_repeat((string) $tree, 32)));
+    }
+
+    foreach (range(1, 20) as $drain) {
+        drainNow();
+        $this->travel(301)->seconds();
+    }
+
+    // Back up, but the first old tree meets one 503, while a new run goes through.
+    $down = false;
+    $failOnce = str_repeat('1', 32);
+    $collector->push(traceTree(str_repeat('4', 32)));
+
+    foreach (range(1, 3) as $drain) {
+        drainNow();
+        $this->travel(301)->seconds();
+    }
+
+    expect(Stats::read()['dropped'])->toBe([])
+        ->and($collector->size())->toBe(0);
+});
+
+it('a 429 while trees are sent alone stops the drain, waits its Retry-After and counts no attempt', function () {
+    $this->memoryExporter = null;
+    bootExport(['refract.drain' => 'queue']);
+    app()->instance(Collector::class, $collector = new MemoryCollector);
+    Queue::fake();
+    Http::fake(['*' => Http::response('', 429, ['Retry-After' => '120'])]);
+
+    foreach (range(1, 3) as $tree) {
+        $collector->push(traceTree(str_repeat((string) $tree, 32)));
+    }
+
+    foreach ($collector->entries as $id => $entry) {
+        $collector->entries[$id]['attempts'] = 5;
+    }
+
+    drainNow();
+
+    expect(count(Http::recorded()))->toBe(1)
+        ->and(array_column($collector->entries, 'attempts'))->toBe([5, 5, 5])
+        ->and(pushedDrains())->toBe([120]);
+});
+
+it('after recovery, trees that failed often go out together, not one per request', function () {
+    $down = true;
+    $this->memoryExporter = null;
+    $collector = poisonDestination(str_repeat('9', 32), $down);
+
+    foreach (range(1, 20) as $tree) {
+        $collector->push(traceTree(str_pad((string) $tree, 32, '0', STR_PAD_LEFT)));
+    }
+
+    foreach (range(1, 6) as $drain) {
+        drainNow();
+        $this->travel(301)->seconds();
+    }
+
+    $down = false;
+    $before = count(Http::recorded());
+    drainNow();
+
+    expect($collector->size())->toBe(0)
+        ->and(count(Http::recorded()) - $before)->toBeLessThanOrEqual(2);
+});
+
+it('a bad tree at the head of a claim does not hold back the healthy trees behind it', function () {
+    $poison = str_repeat('9', 32);
+    $this->memoryExporter = null;
+    $collector = poisonDestination($poison);
+
+    $collector->push(traceTree($poison));
+    $collector->push(traceTree(str_repeat('1', 32)));
+    $collector->push(traceTree(str_repeat('2', 32)));
+
+    foreach ($collector->entries as $id => $entry) {
+        $collector->entries[$id]['attempts'] = 3;
+    }
+
+    drainNow();
+
+    expect($collector->size())->toBe(1)
+        ->and(array_values($collector->entries)[0]['attempts'])->toBe(4);
 });

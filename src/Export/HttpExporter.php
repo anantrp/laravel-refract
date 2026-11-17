@@ -110,7 +110,7 @@ class HttpExporter implements Exporter
             $sent = $this->post($spans, $timeout);
 
             if ($sent->isRetryable()) {
-                return $sent;
+                return ExportResult::retryable($sent->retryAfter, $done, $this->unsent($trees[$done] ?? [], $answered[$done] ?? []));
             }
 
             if ($sent->isRejected()) {

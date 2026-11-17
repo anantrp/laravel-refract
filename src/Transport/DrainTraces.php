@@ -6,6 +6,7 @@ use Anantrp\Refract\Contracts\Collector;
 use Anantrp\Refract\Contracts\Exporter;
 use Anantrp\Refract\Contracts\ExportResult;
 use Anantrp\Refract\Support\Diagnostics;
+use Anantrp\Refract\Support\Stats;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Cache\Repository as Cache;
 use Illuminate\Contracts\Container\Container;
@@ -14,6 +15,7 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\Jobs\SyncJob;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\InteractsWithTime;
 use Throwable;
 
@@ -63,9 +65,9 @@ class DrainTraces implements ShouldBeUniqueUntilProcessing, ShouldQueue
     public const CONNECT_TIMEOUT = 5;
 
     /**
-     * The most bytes of stored trees one claim takes, about one request.
+     * The most bytes of stored trees one claim takes. Trees are stored gzipped: for text, about one 4 MB request of JSON.
      */
-    public const CLAIM_BYTES = 4_000_000;
+    public const CLAIM_BYTES = 1_000_000;
 
     /**
      * The seconds a claim holds its trees: twice the job's timeout, so a drain still running never loses its trees to another.
@@ -111,6 +113,21 @@ class DrainTraces implements ShouldBeUniqueUntilProcessing, ShouldQueue
      * The seconds the unique lock outlives the drain's delay, so a lost drain job never blocks the next one for good.
      */
     protected const LOCK_MARGIN = 60;
+
+    /**
+     * The failed attempts after which a tree is sent alone, so it cannot hold back the trees claimed with it.
+     */
+    public const SEND_ALONE = 3;
+
+    /**
+     * The failed attempts after which a tree sent alone is dropped, when the destination took other trees in the same drain.
+     */
+    public const DROP_AFTER = 10;
+
+    /**
+     * The seconds a tree that failed alone waits, while the destination takes others.
+     */
+    protected const ALONE_DELAY = 60;
 
     /**
      * The cache key of the backoff shared by every drain: when the next export may be tried, and the failures in a row.
@@ -237,23 +254,38 @@ class DrainTraces implements ShouldBeUniqueUntilProcessing, ShouldQueue
                 return;
             }
 
-            $ids = array_keys($trees);
-            $result = $this->export($exporter, array_values($trees), static::LIMIT - $this->elapsed($started));
+            [$batch, $suspects] = $this->split($collector, $trees);
+            $answered = false;
 
-            if ($result->isRetryable()) {
-                $this->retryLater($collector, $cache, $ids, $result);
+            if ($batch !== []) {
+                $result = $this->export($exporter, $this->only($trees, $batch), static::LIMIT - $this->elapsed($started));
 
-                return;
+                if ($result->isRetryable()) {
+                    // A busy destination (429, Retry-After) says nothing about the trees: no attempt is counted.
+                    $this->retryLater($collector, $cache, $batch, $result, $suspects, failed: $result->retryAfter === null);
+
+                    return;
+                }
+
+                if ($result->isUnfinished()) {
+                    $this->keepProgress($collector, $batch, $result, 0);
+                    $this->release($collector, $suspects, 0);
+                    $this->next(0);
+
+                    return;
+                }
+
+                $collector->ack($batch);
+                $answered = true;
+
+                if ($result->isOk()) {
+                    Stats::exported();
+                }
             }
 
-            if ($result->isUnfinished()) {
-                $this->keepProgress($collector, $ids, $result);
-                $this->next(0);
-
+            if (! $this->exportSuspects($collector, $exporter, $cache, $trees, $suspects, $answered, $started)) {
                 return;
             }
-
-            $collector->ack($ids);
 
             if ($failures > 0) {
                 $cache->forget(self::BACKOFF_KEY);
@@ -267,7 +299,7 @@ class DrainTraces implements ShouldBeUniqueUntilProcessing, ShouldQueue
     }
 
     /**
-     * Ack the trees an unfinished export got through, and give the rest back, due at once, for the next drain.
+     * Ack the trees an export got through before it stopped, and give the rest back, due after the given seconds.
      *
      * A tree cut part way through its requests is acked too, and only its
      * unsent spans are stored again, as a tree of their own: sending it
@@ -279,8 +311,12 @@ class DrainTraces implements ShouldBeUniqueUntilProcessing, ShouldQueue
      *
      * @param  list<array-key>  $ids
      */
-    protected function keepProgress(Collector $collector, array $ids, ExportResult $result): void
+    protected function keepProgress(Collector $collector, array $ids, ExportResult $result, int $delay, bool $failed = false): void
     {
+        if ($result->done > 0 || $result->rest !== []) {
+            Stats::exported();
+        }
+
         $done = array_slice($ids, 0, $result->done);
         $rest = array_slice($ids, $result->done);
 
@@ -295,7 +331,171 @@ class DrainTraces implements ShouldBeUniqueUntilProcessing, ShouldQueue
         }
 
         $collector->ack($done);
-        $collector->release($rest, 0);
+        $this->release($collector, $rest, $delay, $failed);
+    }
+
+    /**
+     * Give the given trees back, unless there are none.
+     *
+     * @param  list<array-key>  $ids
+     */
+    protected function release(Collector $collector, array $ids, int $delay, bool $failed = false): void
+    {
+        if ($ids !== []) {
+            $collector->release($ids, $delay, $failed);
+        }
+    }
+
+    /**
+     * Split the claimed trees into the batch sent together and the trees that failed often enough to be sent apart.
+     *
+     * @param  array<array-key, list<array<string, mixed>>>  $trees
+     * @return array{list<array-key>, list<array-key>}
+     */
+    protected function split(Collector $collector, array $trees): array
+    {
+        try {
+            $attempts = $collector->attempts(array_keys($trees));
+        } catch (Throwable) {
+            $attempts = [];
+        }
+
+        $batch = [];
+        $suspects = [];
+
+        foreach (array_keys($trees) as $id) {
+            if (($attempts[$id] ?? 0) >= self::SEND_ALONE) {
+                $suspects[] = $id;
+            } else {
+                $batch[] = $id;
+            }
+        }
+
+        return [$batch, $suspects];
+    }
+
+    /**
+     * Get the given trees, in the given order.
+     *
+     * @param  array<array-key, list<array<string, mixed>>>  $trees
+     * @param  list<array-key>  $ids
+     * @return list<list<array<string, mixed>>>
+     */
+    protected function only(array $trees, array $ids): array
+    {
+        return array_map(fn (int|string $id) => $trees[$id], $ids);
+    }
+
+    /**
+     * Export the trees that failed SEND_ALONE times, so one bad tree cannot hold the others back, and get whether the drain goes on.
+     *
+     * Once the destination answered in this drain, they are first sent
+     * together: after an outage every stored tree has failed often, and
+     * sending each alone would take a request per tree. When that fails,
+     * or before anything answered, each is sent alone. A tree that fails
+     * alone while the destination answers others gets an attempt, and is
+     * dropped at DROP_AFTER. One that fails before anything answered is
+     * held while the next one is tried: if that one goes through, the
+     * first is the bad one; if it fails too, the destination is down, and
+     * the drain backs off without counting attempts. A busy destination
+     * (Retry-After) stops the drain and counts nothing.
+     *
+     * @param  array<array-key, list<array<string, mixed>>>  $trees
+     * @param  list<array-key>  $suspects
+     */
+    protected function exportSuspects(Collector $collector, Exporter $exporter, Cache $cache, array $trees, array $suspects, bool $answered, int|float $started): bool
+    {
+        $held = null;
+        $triedTogether = false;
+
+        while ($suspects !== []) {
+            $together = $answered && ! $triedTogether && count($suspects) > 1;
+            $triedTogether = $triedTogether || $together;
+            $ids = $together ? $suspects : [$suspects[0]];
+            $result = $this->export($exporter, $this->only($trees, $ids), static::LIMIT - $this->elapsed($started));
+            $later = array_values(array_diff($suspects, $ids));
+
+            if ($result->isUnfinished()) {
+                $this->keepProgress($collector, $ids, $result, 0);
+                $this->release($collector, [...$later, ...($held === null ? [] : [$held])], 0);
+                $this->next(0);
+
+                return false;
+            }
+
+            if ($result->isRetryable() && ($result->retryAfter !== null || ($held !== null && ! $answered))) {
+                $this->retryLater($collector, $cache, [...($held === null ? [] : [$held]), ...$ids], $result, $later, failed: false);
+
+                return false;
+            }
+
+            if ($result->isRetryable() && count($ids) > 1) {
+                // Together they failed: each goes alone.
+                continue;
+            }
+
+            if ($result->isRetryable()) {
+                $suspects = $later;
+
+                if ($answered) {
+                    $this->failedAlone($collector, $ids[0], $this->attemptsOf($collector, $ids[0]));
+                } else {
+                    $held = $ids[0];
+                }
+
+                continue;
+            }
+
+            $collector->ack($ids);
+            $suspects = $later;
+            $answered = true;
+
+            if ($result->isOk()) {
+                Stats::exported();
+            }
+
+            if ($held !== null) {
+                $this->failedAlone($collector, $held, $this->attemptsOf($collector, $held));
+                $held = null;
+            }
+        }
+
+        if ($held !== null) {
+            // The only tree tried failed, and nothing answered: the destination may be down.
+            $this->retryLater($collector, $cache, [$held], ExportResult::retryable(), [], failed: false);
+
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * Get the failed attempts of the given stored tree.
+     */
+    protected function attemptsOf(Collector $collector, int|string $id): int
+    {
+        try {
+            return $collector->attempts([$id])[$id] ?? 0;
+        } catch (Throwable) {
+            return 0;
+        }
+    }
+
+    /**
+     * Count a failed export of a tree sent alone while the destination answers others: give it back for later, or drop it once it failed DROP_AFTER times.
+     */
+    protected function failedAlone(Collector $collector, int|string $id, int $attempts): void
+    {
+        if ($attempts + 1 >= self::DROP_AFTER) {
+            $collector->ack([$id]);
+
+            Diagnostics::dropped('poison', 1, 'drain.poison', 'A run tree kept failing while the destination took other trees, and was dropped after '.self::DROP_AFTER.' failed exports.');
+
+            return;
+        }
+
+        $collector->release([$id], self::ALONE_DELAY, failed: true);
     }
 
     /**
@@ -314,24 +514,37 @@ class DrainTraces implements ShouldBeUniqueUntilProcessing, ShouldQueue
     protected function export(Exporter $exporter, array $trees, float $within): ExportResult
     {
         try {
-            return $exporter->export($trees, max(0.0, $within));
+            $result = $exporter->export($trees, max(0.0, $within));
         } catch (Throwable $e) {
-            Diagnostics::warn('export.error', 'Spans could not be exported ('.$e::class.'). The batch was dropped.');
+            Stats::failed();
+            Diagnostics::dropped('error', count($trees), 'export.error', 'Spans could not be exported ('.$e::class.'). The batch was dropped.');
 
             return ExportResult::rejected();
         }
+
+        if ($result->isRejected()) {
+            Stats::failed();
+            // The exporter warned with the destination's answer.
+            Diagnostics::dropped('rejected', count($trees));
+        }
+
+        return $result;
     }
 
     /**
-     * Release the given trees, record the backoff for every drain, and dispatch the drain that tries them again.
+     * Release the given trees, each with one more failed attempt unless told otherwise, and the untried ones, record the backoff for every drain, and dispatch the drain that tries them again.
      *
      * @param  list<array-key>  $ids
+     * @param  list<array-key>  $untried
      */
-    protected function retryLater(Collector $collector, Cache $cache, array $ids, ExportResult $result): void
+    protected function retryLater(Collector $collector, Cache $cache, array $ids, ExportResult $result, array $untried = [], bool $failed = true): void
     {
         $delay = $this->failureDelay($cache, $result);
 
-        $collector->release($ids, $delay);
+        // The trees the requests before the failing one delivered are not sent again.
+        $this->keepProgress($collector, $ids, $result, $delay, $failed);
+        $this->release($collector, $untried, $delay);
+        Stats::failed();
 
         Diagnostics::warn('drain.retry', "Spans could not be exported: the destination could not be reached or answered 408, 429 or 5xx. They are tried again in {$delay} seconds.");
 
@@ -353,6 +566,17 @@ class DrainTraces implements ShouldBeUniqueUntilProcessing, ShouldQueue
         $cache->put(self::BACKOFF_KEY, ['until' => $this->currentTime() + $delay, 'failures' => $failures], $delay + self::LOCK_MARGIN);
 
         return $delay;
+    }
+
+    /**
+     * Get when the drain may export again after failed exports, as a Unix time, or null when it is not backing off.
+     */
+    public static function backoffUntil(Cache $cache): ?int
+    {
+        $backoff = $cache->get(self::BACKOFF_KEY);
+        $until = is_array($backoff) ? ($backoff['until'] ?? null) : null;
+
+        return is_int($until) && $until > Carbon::now()->getTimestamp() ? $until : null;
     }
 
     /**

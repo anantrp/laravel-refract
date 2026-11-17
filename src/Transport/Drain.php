@@ -4,7 +4,10 @@ namespace Anantrp\Refract\Transport;
 
 use Anantrp\Refract\Contracts\Collector;
 use Anantrp\Refract\Contracts\Exporter;
+use Anantrp\Refract\Contracts\ReportsStats;
 use Anantrp\Refract\Support\Diagnostics;
+use Anantrp\Refract\Support\Stats;
+use Illuminate\Contracts\Cache\Repository as Cache;
 use Illuminate\Contracts\Container\Container;
 use Throwable;
 
@@ -30,6 +33,21 @@ class Drain
      * The seconds an export in this process waits to connect to the destination, so a host that never answers costs 1 second, not 5.
      */
     public const CONNECT_TIMEOUT = 1;
+
+    /**
+     * The seconds the oldest due tree in the store may wait before a push warns that no worker drains it.
+     */
+    public const STALL_AFTER = 600;
+
+    /**
+     * The seconds between two looks at the store for a stall, across processes.
+     */
+    protected const STALL_EVERY = 60;
+
+    /**
+     * The cache key that spaces out the looks at the store for a stall.
+     */
+    protected const STALL_CHECKED = 'refract:stall:checked';
 
     /**
      * Create a new drain instance, "sync" or "queue". The exporter or collector is made on the first send.
@@ -64,7 +82,7 @@ class Drain
         $breaker = new ExportBreaker($this->container);
 
         if ($breaker->isOpen()) {
-            Diagnostics::warn('export.paused', 'Spans were dropped without trying the destination: it failed recently, so exports are paused for a while.');
+            Diagnostics::dropped('paused', count($trees), 'export.paused', 'Spans were dropped without trying the destination: it failed recently, so exports are paused for a while.');
 
             return;
         }
@@ -72,25 +90,69 @@ class Drain
         try {
             $result = $this->container->make(Exporter::class)->export($trees, self::TIMEOUT);
         } catch (Throwable $e) {
-            Diagnostics::warn('export.error', 'Spans could not be exported ('.$e::class.'). The batch was dropped.');
+            Stats::failed();
+            Diagnostics::dropped('error', count($trees), 'export.error', 'Spans could not be exported ('.$e::class.'). The batch was dropped.');
 
             return;
         }
 
         if ($result->isRetryable()) {
             $pause = $breaker->failed();
+            Stats::failed();
 
-            Diagnostics::warn('export.unavailable', "Spans could not be exported: the destination could not be reached or answered 408, 429 or 5xx. The batch was dropped (an export in this process is not retried), and exports pause for {$pause} seconds.");
+            Diagnostics::dropped('unavailable', count($trees) - $result->done, 'export.unavailable', "Spans could not be exported: the destination could not be reached or answered 408, 429 or 5xx. The batch was dropped (an export in this process is not retried), and exports pause for {$pause} seconds.");
 
             return;
         }
 
         $breaker->answered();
 
+        if ($result->isRejected()) {
+            Stats::failed();
+            // The exporter warned with the destination's answer.
+            Diagnostics::dropped('rejected', count($trees));
+
+            return;
+        }
+
+        if ($result->isOk() || $result->done > 0 || $result->rest !== []) {
+            Stats::exported();
+        }
+
         if ($result->isUnfinished()) {
             $dropped = count($trees) - $result->done;
 
-            Diagnostics::warn('export.unfinished', 'An export in this process took its whole '.self::TIMEOUT." seconds: {$dropped} of ".count($trees).' run trees were not sent and were dropped.');
+            Diagnostics::dropped('unfinished', $dropped, 'export.unfinished', 'An export in this process took its whole '.self::TIMEOUT." seconds: {$dropped} of ".count($trees).' run trees were not sent and were dropped.');
+        }
+    }
+
+    /**
+     * Warn when the oldest due tree in the store has waited past STALL_AFTER: no worker is draining it.
+     *
+     * The store is looked at most once a minute across processes, so a
+     * push costs no more than it did. A store that cannot report is not
+     * looked at.
+     */
+    protected function checkStall(Collector $collector): void
+    {
+        if (! $collector instanceof ReportsStats) {
+            return;
+        }
+
+        try {
+            if (! $this->container->make(Cache::class)->add(self::STALL_CHECKED, true, self::STALL_EVERY)) {
+                return;
+            }
+
+            $age = $collector->stats()['oldest_age'];
+        } catch (Throwable) {
+            return;
+        }
+
+        if ($age !== null && $age > self::STALL_AFTER) {
+            $minutes = intdiv($age, 60);
+
+            Diagnostics::warn('drain.stalled', "No worker is draining the refract queue: the oldest stored tree has waited {$minutes} minutes. Run queue:work with --queue=default,refract, or add refract to your workers' queues.");
         }
     }
 
@@ -109,7 +171,7 @@ class Drain
         try {
             $collector = $this->container->make(Collector::class);
         } catch (Throwable $e) {
-            Diagnostics::warn('collect.error', 'Run trees could not be stored for the queue drain ('.$e::class.'). They were dropped.');
+            Diagnostics::dropped('error', count($trees), 'collect.error', 'Run trees could not be stored for the queue drain ('.$e::class.'). They were dropped.');
 
             return;
         }
@@ -120,13 +182,15 @@ class Drain
             try {
                 $stored += $collector->push($tree) ? 1 : 0;
             } catch (Throwable $e) {
-                Diagnostics::warn('collect.error', 'Run trees could not be stored for the queue drain ('.$e::class.'). They were dropped.');
+                Diagnostics::dropped('error', 1, 'collect.error', 'Run trees could not be stored for the queue drain ('.$e::class.'). They were dropped.');
             }
         }
 
         if ($stored === 0) {
             return;
         }
+
+        $this->checkStall($collector);
 
         try {
             DrainTraces::dispatch();

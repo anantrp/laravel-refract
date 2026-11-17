@@ -5,6 +5,8 @@ namespace Anantrp\Refract\Tests;
 use Anantrp\Refract\Contracts\Exporter;
 use Anantrp\Refract\Export\HttpExporter;
 use Anantrp\Refract\RefractServiceProvider;
+use Anantrp\Refract\Support\Diagnostics;
+use Anantrp\Refract\Support\Stats;
 use Anantrp\Refract\Tests\Support\MemoryExporter;
 use Anantrp\Refract\Transport\ExportBreaker;
 use Closure;
@@ -125,6 +127,10 @@ abstract class TestCase extends Orchestra
 
         // A pause after a failed export is kept in the process: never carry one from a test to the next.
         ExportBreaker::reset();
+
+        // Counts and warnings this process could not save are kept in it: never carry them from a test to the next.
+        Stats::reset();
+        Diagnostics::reset();
 
         // The app environment comes from APP_ENV, which config('app.env') stands in for here.
         $environment = $this->environmentConfig['app.env'] ?? null;

@@ -97,6 +97,16 @@ class ExportBreaker
     }
 
     /**
+     * Get when the pause ends, as a Unix time, or null when exports are not paused.
+     */
+    public function pausedUntil(): ?int
+    {
+        $until = $this->state()['until'];
+
+        return $until > $this->currentTime() ? $until : null;
+    }
+
+    /**
      * Record one more failed export in a row, and get the seconds exports now pause for.
      */
     public function failed(): int

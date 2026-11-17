@@ -55,9 +55,9 @@ class Recorder
     protected array $finished = [];
 
     /**
-     * The keys of the spans dropped at the per-run cap and not ended yet, so their children are dropped too.
+     * The keys of the spans dropped at the per-run cap and not ended yet, so their children are dropped too, with their run's top-level span id.
      *
-     * @var array<string, true>
+     * @var array<string, string>
      */
     protected array $dropped = [];
 
@@ -69,9 +69,9 @@ class Recorder
     protected array $sizes = [];
 
     /**
-     * The span ids of the top-level spans whose trees reached the per-run cap, marked truncated when they end.
+     * The span ids of the top-level spans whose trees reached the per-run cap, marked truncated when they end, with the spans they dropped.
      *
-     * @var array<string, true>
+     * @var array<string, int>
      */
     protected array $truncated = [];
 
@@ -122,7 +122,12 @@ class Recorder
         }
 
         if ($parentKey !== null && isset($this->dropped[$parentKey])) {
-            $this->dropped[$key] = true;
+            $root = $this->dropped[$parentKey];
+            $this->dropped[$key] = $root;
+
+            if (isset($this->truncated[$root])) {
+                $this->truncated[$root]++;
+            }
 
             return;
         }
@@ -130,10 +135,8 @@ class Recorder
         $parent = $parentKey === null ? null : ($this->open[$parentKey] ?? null);
 
         if ($parent !== null && ($this->sizes[$parent['root']] ?? 0) >= self::MAX_RUN_SPANS) {
-            Diagnostics::warn('run.truncated', 'A run reached '.self::MAX_RUN_SPANS.' spans, the most one run records. Its new spans are dropped and the run is marked laravel.ai.truncated.');
-
-            $this->truncated[$parent['root']] = true;
-            $this->dropped[$key] = true;
+            $this->truncated[$parent['root']] = ($this->truncated[$parent['root']] ?? 0) + 1;
+            $this->dropped[$key] = $parent['root'];
 
             return;
         }
@@ -249,9 +252,12 @@ class Recorder
         unset($this->open[$key]);
 
         if ($span['root'] === $span['span_id']) {
-            $call = [...$call, ...(isset($this->truncated[$span['root']]) ? ['truncated' => true] : [])];
+            $dropped = $this->truncated[$span['root']] ?? 0;
+            $call = [...$call, ...($dropped > 0 ? ['truncated' => true] : [])];
 
             unset($this->sizes[$span['root']], $this->truncated[$span['root']]);
+
+            Diagnostics::dropped('run_cap', $dropped, 'run.truncated', 'A run reached '.self::MAX_RUN_SPANS." spans, the most one run records. Its {$dropped} later spans were dropped and the run is marked laravel.ai.truncated.");
         }
 
         $this->finished[] = [
