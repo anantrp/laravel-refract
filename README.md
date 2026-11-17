@@ -224,6 +224,7 @@ Every run tree Refract drops is counted by reason, in your default cache store, 
 | `transaction` | `queue`: the database collector was asked to write inside a transaction open on its connection |
 | `encode`, `decode` | `queue`: a tree could not be stored, or a stored tree could not be read |
 | `run_cap` | One run passed 1,000 spans. Here `count` is the spans it dropped, not trees. |
+| `poison` | `queue`: a tree failed 10 exports, sent alone, while the destination took others |
 
 ```php
 use Anantrp\Refract\Events\TracesDropped;
@@ -291,7 +292,7 @@ How it works:
 - The first push after the store went idle dispatches one drain job, 5 seconds later, so a burst of runs leaves together. Later pushes do not dispatch another while it waits.
 - The drain claims about 1 MB of stored trees (about 4 MB of JSON for text), exports them in one request, removes them from the store, and repeats until the store is empty. It starts no new claim after 20 seconds, and hands over to a new drain job.
 - The drain ends within 45 seconds, inside its 60 second job `timeout`, which is itself inside the 90 second `retry_after` of Laravel's default queue connections. Each request waits at most what is left of the 45 seconds, and a request is not started with less than a second left: the trees not sent go back to the store for the next drain, which is dispatched at once. A big tree cut part way through its requests keeps its progress: only its unsent spans go back, so the next drain picks up where this one stopped. Keep your queue connection's `retry_after` above 60 seconds.
-- On a network error, 408, 429 or 5xx, the drain keeps what earlier requests delivered, gives the rest of the claimed trees back, and stops. The next drain waits 10, then 60, then 300 seconds after each failure in a row, or the `Retry-After` of the answer when it is longer, at most 300 seconds. A tree is tried again until it is sent: there is no attempt limit. The store cap bounds what waits.
+- On a network error, 408, 429 or 5xx, the drain keeps what earlier requests delivered, gives the rest of the claimed trees back, and stops. The next drain waits 10, then 60, then 300 seconds after each failure in a row, or the `Retry-After` of the answer when it is longer, at most 300 seconds. Each tree counts its failed exports. One that failed 3 times is sent alone, after the others, so it cannot hold them back. One sent alone that fails while the destination takes the other trees of the same drain is dropped after its 10th failure, as `poison`. During an outage nothing is taken, so nothing is dropped this way: the store cap bounds what waits.
 - If the destination settings are missing or invalid in the worker, the drain logs one warning and, while trees are stored, tries again with the same backoff. On an empty store it dispatches nothing.
 - The drain job never throws, and it has no attempt limit (`$tries = 0`), so nothing reaches `failed_jobs`: a drain whose worker dies, or that is killed at its timeout, is given to a worker again after the connection's `retry_after`.
 - A claimed tree is leased for 120 seconds, twice the job `timeout`, so a running drain never loses its trees to another. If the worker dies, the tree is claimed again when the lease runs out.
@@ -325,6 +326,8 @@ Trees are kept in a `refract_traces` table. Publish the migration and run it:
 php artisan vendor:publish --tag=refract-migrations
 php artisan migrate
 ```
+
+Upgrading from 0.3, run both again: 0.4 adds an `attempts` column. Until it is there, every tree counts as never failed, so none is sent alone or dropped as `poison`.
 
 - The migration and the collector use your default database connection, or the one named in `collectors.database.connection` in the published config.
 - Give the collector a connection of its own. Refract never stores a tree inside a transaction that is open on the collector's connection: it would be rolled back with your work, and an error there could abort it. A run that ends inside a transaction is handed on after it (see [Sending](#sending)); a tree that still meets an open transaction on that connection is dropped with one warning.

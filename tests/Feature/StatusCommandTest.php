@@ -55,6 +55,7 @@ it('healthy queue drain exits 0', function () {
         ->expectsOutputToContain('queue')
         ->expectsOutputToContain('database')
         ->expectsOutputToContain('1 trees')
+        ->expectsOutputToContain('Most failed attempts')
         ->expectsOutputToContain('Healthy')
         ->assertExitCode(0);
 });
@@ -145,9 +146,10 @@ it('--json is one parseable object', function () {
 
     $status = statusJson();
 
-    expect($status)->toHaveKeys(['destination', 'drain', 'collector', 'trees', 'bytes', 'max_bytes', 'oldest_age', 'dropped', 'paused_until', 'backoff_until', 'last_success', 'last_failure', 'durable', 'healthy', 'problems'])
+    expect($status)->toHaveKeys(['destination', 'drain', 'collector', 'trees', 'bytes', 'max_bytes', 'oldest_age', 'max_attempts', 'dropped', 'paused_until', 'backoff_until', 'last_success', 'last_failure', 'durable', 'healthy', 'problems'])
         ->and($status['drain'])->toBe('queue')
         ->and($status['trees'])->toBe(1)
+        ->and($status['max_attempts'])->toBe(0)
         ->and($status['dropped'])->toBe(['full' => 1])
         ->and($status['healthy'])->toBeFalse()
         ->and($status['durable'])->toBeTrue()

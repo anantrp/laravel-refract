@@ -48,9 +48,21 @@ interface Collector
     /**
      * Give the given claimed trees back, to be claimed again after the given seconds.
      *
+     * When the trees are given back because an export of them failed, each
+     * one's failed attempts go up by one. A tree keeps its count until it
+     * is acked.
+     *
      * @param  list<array-key>  $ids
      */
-    public function release(array $ids, int $delay): void;
+    public function release(array $ids, int $delay, bool $failed = false): void;
+
+    /**
+     * Get the failed attempts of each of the given stored trees, keyed by id. Trees not stored are left out.
+     *
+     * @param  list<array-key>  $ids
+     * @return array<array-key, int>
+     */
+    public function attempts(array $ids): array;
 
     /**
      * Get the number of trees in the store: waiting, claimed or released.

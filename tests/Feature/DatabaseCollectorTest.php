@@ -42,7 +42,7 @@ itBehavesLikeAStoredCollector(fn (int $maxBytes) => databaseCollector($maxBytes)
 
 it('the migration creates the refract_traces table', function () {
     expect(Schema::getColumnListing(DatabaseCollector::TABLE))
-        ->toEqualCanonicalizing(['id', 'payload', 'bytes', 'available_at', 'reserved_at']);
+        ->toEqualCanonicalizing(['id', 'payload', 'bytes', 'available_at', 'reserved_at', 'attempts']);
 });
 
 it('a row that is not a tree is dropped with one warning when claimed, and the others are claimed', function () {

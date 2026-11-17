@@ -23,7 +23,7 @@ beforeEach(function () {
 it('the database collector reports trees, bytes and the oldest due age', function () {
     $collector = new DatabaseCollector(DB::connection(), 1_000_000);
 
-    expect($collector->stats())->toBe(['trees' => 0, 'bytes' => 0, 'max_bytes' => 1_000_000, 'oldest_age' => null, 'dropped' => null]);
+    expect($collector->stats())->toBe(['trees' => 0, 'bytes' => 0, 'max_bytes' => 1_000_000, 'oldest_age' => null, 'dropped' => null, 'max_attempts' => 0]);
 
     $collector->push($one = storedTree('one'));
     $this->travel(30)->seconds();
@@ -36,6 +36,7 @@ it('the database collector reports trees, bytes and the oldest due age', functio
         'max_bytes' => 1_000_000,
         'oldest_age' => 90,
         'dropped' => null,
+        'max_attempts' => 0,
     ]);
 });
 

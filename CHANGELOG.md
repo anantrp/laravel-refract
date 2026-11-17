@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
-- Every dropped run tree is counted by reason in the default cache store and fires an `Anantrp\Refract\Events\TracesDropped` event (`count`, `reason`). The reasons are `paused`, `unavailable`, `rejected`, `unfinished`, `error`, `full`, `transaction`, `encode`, `decode` and `run_cap` (whose count is spans).
+- Every dropped run tree is counted by reason in the default cache store and fires an `Anantrp\Refract\Events\TracesDropped` event (`count`, `reason`). The reasons are `paused`, `unavailable`, `rejected`, `unfinished`, `error`, `full`, `transaction`, `encode`, `decode` and `run_cap` (whose count is spans), and `poison`.
 
 - With `REFRACT_DRAIN=queue`, a push warns when the oldest due tree in the store has waited over 10 minutes: no worker reads the `refract` queue. Both collectors implement a new `Anantrp\Refract\Contracts\ReportsStats` contract (trees, bytes, cap, oldest due age, drops at the cap).
 
@@ -27,6 +27,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - The queue drain's collectors store trees gzipped (`gz1:` and base64, so still plain text in the database), so the 64 MB cap holds several times more traces. Trees stored by 0.3 still read. A drain claims 1 MB of stored trees at a time, about one 4 MB request of JSON. Requires `ext-zlib`. **Upgrading:** a tree stored by 0.4 cannot be read by 0.3, so rolling back with trees still stored drops them, each with a `decode` warning.
 
 ### Fixed
+
+- With `REFRACT_DRAIN=queue`, one tree that a destination keeps failing on (a 5xx for that payload) no longer holds back the trees claimed with it. Each tree counts its failed exports: after 3 it is sent alone, after the others, and after 10, sent alone while the destination took other trees, it is dropped as `poison`. A long outage drops nothing. `refract:status` shows the most failed attempts of a stored tree. **Upgrading:** the database collector needs a new migration: run `php artisan vendor:publish --tag=refract-migrations` and `php artisan migrate`. `Collector::release()` takes a third `$failed` argument and the contract adds `attempts()`: a collector of your own must add both.
 
 - The queue drain no longer sends trees again that an earlier request of the same drain delivered, when a later request fails with a network error, 408, 429 or 5xx.
 

@@ -26,7 +26,7 @@ class MemoryCollector implements Collector
     /**
      * The stored trees by id: the tree, when it may be claimed, and when it was claimed.
      *
-     * @var array<int, array{tree: list<array<string, mixed>>, available_at: int, claimed_at: ?int}>
+     * @var array<int, array{tree: list<array<string, mixed>>, available_at: int, claimed_at: ?int, attempts?: int}>
      */
     public array $entries = [];
 
@@ -98,7 +98,7 @@ class MemoryCollector implements Collector
         }
     }
 
-    public function release(array $ids, int $delay): void
+    public function release(array $ids, int $delay, bool $failed = false): void
     {
         $this->failIfTold();
 
@@ -108,8 +108,24 @@ class MemoryCollector implements Collector
             if (isset($this->entries[$id])) {
                 $this->entries[$id]['available_at'] = Date::now()->getTimestamp() + $delay;
                 $this->entries[$id]['claimed_at'] = null;
+                $this->entries[$id]['attempts'] = ($this->entries[$id]['attempts'] ?? 0) + ($failed ? 1 : 0);
             }
         }
+    }
+
+    public function attempts(array $ids): array
+    {
+        $this->failIfTold();
+
+        $attempts = [];
+
+        foreach ($ids as $id) {
+            if (isset($this->entries[$id])) {
+                $attempts[$id] = $this->entries[$id]['attempts'] ?? 0;
+            }
+        }
+
+        return $attempts;
     }
 
     public function size(): int

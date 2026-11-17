@@ -59,6 +59,43 @@ function storedBytes(array $tree): int
  */
 function itBehavesLikeAStoredCollector(Closure $make): void
 {
+    it('counts failed attempts per tree: a failed release adds one, a plain release none, and a tree that moves keeps its count', function () use ($make) {
+        $collector = $make(64 * 1024 * 1024);
+
+        $collector->push(storedTree('one'));
+        $collector->push(storedTree('two'));
+
+        $ids = array_keys($collector->claim(4_000_000, 60));
+
+        expect(array_values($collector->attempts($ids)))->toBe([0, 0]);
+
+        $collector->release([$ids[0]], 0, failed: true);
+        $collector->release([$ids[1]], 0);
+
+        $again = $collector->claim(4_000_000, 60);
+        expect(array_combine(storedNames($again), array_values($collector->attempts(array_keys($again)))))->toBe(['one' => 1, 'two' => 0]);
+
+        $collector->release(array_keys($again), 0, failed: true);
+        $third = $collector->claim(4_000_000, 60);
+
+        expect(array_combine(storedNames($third), array_values($collector->attempts(array_keys($third)))))->toBe(['one' => 2, 'two' => 1]);
+
+        $collector->ack(array_keys($third));
+
+        expect($collector->attempts(array_keys($third)))->toBe([]);
+    });
+
+    it('reports the most attempts of a stored tree', function () use ($make) {
+        $collector = $make(64 * 1024 * 1024);
+
+        $collector->push(storedTree('one'));
+        expect($collector->stats()['max_attempts'])->toBe(0);
+
+        $collector->release(array_keys($collector->claim(4_000_000, 60)), 0, failed: true);
+
+        expect($collector->stats()['max_attempts'])->toBe(1);
+    });
+
     it('claims pushed trees oldest first, keyed by id, and acked trees leave the store', function () use ($make) {
         $collector = $make(64 * 1024 * 1024);
 

@@ -3,7 +3,9 @@
 use Anantrp\Refract\Contracts\Collector;
 use Anantrp\Refract\Contracts\Exporter;
 use Anantrp\Refract\Contracts\ExportResult;
+use Anantrp\Refract\Events\TracesDropped;
 use Anantrp\Refract\Support\Diagnostics;
+use Anantrp\Refract\Support\Stats;
 use Anantrp\Refract\Tests\Support\MemoryCollector;
 use Anantrp\Refract\Tests\Support\Otlp;
 use Anantrp\Refract\Tests\Support\WarningLog;
@@ -11,8 +13,10 @@ use Anantrp\Refract\Transport\Drain;
 use Anantrp\Refract\Transport\DrainTraces;
 use Illuminate\Bus\UniqueLock;
 use Illuminate\Contracts\Cache\Repository;
+use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Queue;
@@ -577,4 +581,114 @@ it('a 503 on the second request acks the trees the first one delivered', functio
     expect($bodies)->toHaveCount(3)
         ->and($bodies[2])->toContain($second)->not->toContain($first)
         ->and($collector->size())->toBe(0);
+});
+
+/**
+ * Use the real exporter on the queue drain (the test sets memoryExporter to null first), with a destination that answers 503 to any request carrying the given trace id, or to every request while it is down.
+ */
+function poisonDestination(string $poison, bool &$down = false): MemoryCollector
+{
+    bootExport(['refract.drain' => 'queue']);
+    app()->instance(Collector::class, $collector = new MemoryCollector);
+    Queue::fake();
+
+    Http::fake(function (Request $request) use ($poison, &$down) {
+        return $down || str_contains(Otlp::body($request), $poison) ? Http::response('', 503) : Http::response('', 200);
+    });
+
+    return $collector;
+}
+
+/**
+ * Get the trace ids each request carried, in order.
+ *
+ * @return list<list<string>>
+ */
+function sentTraceIds(): array
+{
+    return Http::recorded()->map(function (array $pair) {
+        preg_match_all('/"traceId":"([0-9a-f]{32})"/', Otlp::body($pair[0]), $ids);
+
+        return array_values(array_unique($ids[1]));
+    })->values()->all();
+}
+
+/**
+ * A tree of one span in the given trace.
+ *
+ * @return list<array<string, mixed>>
+ */
+function traceTree(string $traceId): array
+{
+    return [[...drainTree($traceId)[0], 'trace_id' => $traceId]];
+}
+
+it('the other trees in its batch are delivered once it is sent alone', function () {
+    $poison = str_repeat('9', 32);
+    $this->memoryExporter = null;
+    $collector = poisonDestination($poison);
+
+    $collector->push(traceTree(str_repeat('1', 32)));
+    $collector->push(traceTree($poison));
+    $collector->push(traceTree(str_repeat('2', 32)));
+
+    // Three failed batches, each with the tree in it.
+    foreach (range(1, 3) as $drain) {
+        drainNow();
+        $this->travel(301)->seconds();
+    }
+
+    expect($collector->size())->toBe(3);
+
+    drainNow();
+
+    expect($collector->size())->toBe(1)
+        ->and(array_slice(sentTraceIds(), 3))->each->toHaveCount(1);
+});
+
+it('a tree that keeps failing is sent alone after 3 attempts and dropped after 10', function () {
+    $poison = str_repeat('9', 32);
+    $this->memoryExporter = null;
+    $collector = poisonDestination($poison);
+    Event::fake([TracesDropped::class]);
+
+    $collector->push(traceTree($poison));
+
+    // A new run each time, so the destination is seen to answer.
+    foreach (range(1, 10) as $drain) {
+        $collector->push(traceTree(str_pad((string) $drain, 32, '0', STR_PAD_LEFT)));
+        drainNow();
+        $this->travel(301)->seconds();
+    }
+
+    $alone = array_filter(sentTraceIds(), fn (array $ids) => in_array($poison, $ids, true));
+
+    expect($collector->size())->toBe(0)
+        ->and(array_slice(array_values($alone), 3))->each->toBe([$poison])
+        ->and(Stats::read()['dropped'])->toBe(['poison' => 1]);
+
+    Event::assertDispatched(TracesDropped::class, fn ($e) => $e->reason === 'poison' && $e->count === 1);
+});
+
+it('a long outage drops nothing: a tree is dropped as poison only while the destination answers others', function () {
+    $down = true;
+    $this->memoryExporter = null;
+    $collector = poisonDestination(str_repeat('9', 32), $down);
+
+    foreach (range(1, 3) as $tree) {
+        $collector->push(traceTree(str_repeat((string) $tree, 32)));
+    }
+
+    foreach (range(1, 20) as $drain) {
+        drainNow();
+        $this->travel(301)->seconds();
+    }
+
+    expect($collector->size())->toBe(3)
+        ->and(Stats::read()['dropped'])->toBe([]);
+
+    $down = false;
+    drainNow();
+
+    expect($collector->size())->toBe(0);
 });

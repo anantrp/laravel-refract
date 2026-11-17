@@ -64,6 +64,11 @@ class DatabaseCollector implements Collector, ReportsStats
     protected const CLAIM_ATTEMPTS = 3;
 
     /**
+     * Whether the table has the attempts column, once known.
+     */
+    protected ?bool $countsAttempts = null;
+
+    /**
      * The lock a claim reads due rows with, once known.
      */
     protected string|bool|null $lockForClaim = null;
@@ -149,7 +154,7 @@ class DatabaseCollector implements Collector, ReportsStats
         }
     }
 
-    public function release(array $ids, int $delay): void
+    public function release(array $ids, int $delay, bool $failed = false): void
     {
         $ids = $this->rowIds($ids);
 
@@ -157,8 +162,38 @@ class DatabaseCollector implements Collector, ReportsStats
             $this->table()->whereIn('id', $ids)->update([
                 'available_at' => $this->availableAt(max(0, $delay)),
                 'reserved_at' => null,
+                ...($failed && $this->countsAttempts() ? ['attempts' => $this->database->raw('attempts + 1')] : []),
             ]);
         }
+    }
+
+    public function attempts(array $ids): array
+    {
+        $ids = $this->rowIds($ids);
+
+        if ($ids === []) {
+            return [];
+        }
+
+        if (! $this->countsAttempts()) {
+            return array_fill_keys($this->table()->whereIn('id', $ids)->pluck('id')->map($this->number(...))->all(), 0);
+        }
+
+        $attempts = [];
+
+        foreach ($this->table()->whereIn('id', $ids)->get(['id', 'attempts']) as $row) {
+            $attempts[$this->number($row->id)] = $this->number($row->attempts);
+        }
+
+        return $attempts;
+    }
+
+    /**
+     * Determine whether the table has the attempts column, added in 0.4. Without it every tree has 0 attempts.
+     */
+    protected function countsAttempts(): bool
+    {
+        return $this->countsAttempts ??= $this->database->getSchemaBuilder()->hasColumn(self::TABLE, 'attempts');
     }
 
     public function size(): int
@@ -178,6 +213,7 @@ class DatabaseCollector implements Collector, ReportsStats
             'max_bytes' => $this->maxBytes,
             'oldest_age' => $oldest === null ? null : max(0, $now - $this->number($oldest)),
             'dropped' => null,
+            'max_attempts' => $this->countsAttempts() ? $this->number($this->table()->max('attempts')) : 0,
         ];
     }
 

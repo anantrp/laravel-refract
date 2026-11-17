@@ -88,11 +88,17 @@ class RedisCollector implements Collector, ReportsStats
             local tree = redis.call('hget', KEYS[5], id)
 
             if tree then
-                redis.call('xadd', KEYS[1], '*', 'tree', tree)
+                local added = redis.call('xadd', KEYS[1], '*', 'tree', tree)
+                local attempts = redis.call('hget', KEYS[6], id)
+
+                if attempts then
+                    redis.call('hset', KEYS[6], added, attempts)
+                end
             end
 
             redis.call('zrem', KEYS[4], id)
             redis.call('hdel', KEYS[5], id)
+            redis.call('hdel', KEYS[6], id)
         end
 
         local claimed, used = {}, 0
@@ -155,6 +161,7 @@ class RedisCollector implements Collector, ReportsStats
             local entry = redis.call('xrange', KEYS[1], ARGV[i], ARGV[i])
 
             redis.call('xack', KEYS[1], ARGV[1], ARGV[i])
+            redis.call('hdel', KEYS[6], ARGV[i])
 
             if #entry > 0 and redis.call('xdel', KEYS[1], ARGV[i]) == 1 then
                 for j = 1, #entry[1][2], 2 do
@@ -169,18 +176,22 @@ class RedisCollector implements Collector, ReportsStats
         LUA;
 
     /**
-     * Move the given entries out of the stream into the delayed trees, due after the given milliseconds. Their bytes stay counted.
+     * Move the given entries out of the stream into the delayed trees, due after the given milliseconds, adding a failed attempt when told to. Their bytes stay counted.
      */
     protected const RELEASE = <<<'LUA'
         local time = redis.call('time')
         local due = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000) + tonumber(ARGV[2])
 
-        for i = 3, #ARGV do
+        for i = 4, #ARGV do
             local entry = redis.call('xrange', KEYS[1], ARGV[i], ARGV[i])
 
             redis.call('xack', KEYS[1], ARGV[1], ARGV[i])
 
             if #entry > 0 then
+                if ARGV[3] == '1' then
+                    redis.call('hincrby', KEYS[6], ARGV[i], 1)
+                end
+
                 for j = 1, #entry[1][2], 2 do
                     if entry[1][2][j] == 'tree' then
                         redis.call('hset', KEYS[5], ARGV[i], entry[1][2][j + 1])
@@ -203,6 +214,22 @@ class RedisCollector implements Collector, ReportsStats
         LUA;
 
     /**
+     * Read the failed attempts of the given entries that are stored, in the stream or delayed, as id and count pairs.
+     */
+    protected const ATTEMPTS = <<<'LUA'
+        local found = {}
+
+        for i = 1, #ARGV do
+            if #redis.call('xrange', KEYS[1], ARGV[i], ARGV[i]) > 0 or redis.call('hexists', KEYS[5], ARGV[i]) == 1 then
+                table.insert(found, ARGV[i])
+                table.insert(found, tonumber(redis.call('hget', KEYS[6], ARGV[i]) or '0'))
+            end
+        end
+
+        return found
+        LUA;
+
+    /**
      * Read the number of trees dropped at the cap.
      */
     protected const DROPPED = <<<'LUA'
@@ -210,7 +237,7 @@ class RedisCollector implements Collector, ReportsStats
         LUA;
 
     /**
-     * Read the trees, their bytes, the milliseconds the oldest due tree has waited (-1 when none is due), and the trees dropped at the cap.
+     * Read the trees, their bytes, the milliseconds the oldest due tree has waited (-1 when none is due), the trees dropped at the cap, and the most failed attempts of a tree.
      *
      * A tree in the stream became due when it was added, at its id's time.
      * A delayed tree is due at its score.
@@ -232,11 +259,18 @@ class RedisCollector implements Collector, ReportsStats
             oldest = tonumber(due[2])
         end
 
+        local most = 0
+
+        for _, attempts in ipairs(redis.call('hvals', KEYS[6])) do
+            most = math.max(most, tonumber(attempts))
+        end
+
         return {
             redis.call('xlen', KEYS[1]) + redis.call('zcard', KEYS[4]),
             tonumber(redis.call('get', KEYS[2]) or '0'),
             oldest == nil and -1 or math.max(0, now - oldest),
             tonumber(redis.call('get', KEYS[3]) or '0'),
+            most,
         }
         LUA;
 
@@ -304,13 +338,33 @@ class RedisCollector implements Collector, ReportsStats
         }
     }
 
-    public function release(array $ids, int $delay): void
+    public function release(array $ids, int $delay, bool $failed = false): void
     {
         $ids = $this->entryIds($ids);
 
         if ($ids !== []) {
-            $this->run(self::RELEASE, self::GROUP, max(0, $delay) * 1000, ...$ids);
+            $this->run(self::RELEASE, self::GROUP, max(0, $delay) * 1000, $failed ? 1 : 0, ...$ids);
         }
+    }
+
+    public function attempts(array $ids): array
+    {
+        $ids = $this->entryIds($ids);
+
+        if ($ids === []) {
+            return [];
+        }
+
+        $found = $this->run(self::ATTEMPTS, ...$ids);
+        $attempts = [];
+
+        foreach (array_chunk(is_array($found) ? $found : [], 2) as [$id, $count]) {
+            if (is_string($id)) {
+                $attempts[$id] = is_numeric($count) ? (int) $count : 0;
+            }
+        }
+
+        return $attempts;
     }
 
     public function size(): int
@@ -321,7 +375,7 @@ class RedisCollector implements Collector, ReportsStats
     public function stats(): array
     {
         $stats = $this->run(self::STATS);
-        [$trees, $bytes, $age, $dropped] = array_map(fn (mixed $value) => is_numeric($value) ? (int) $value : 0, is_array($stats) ? array_pad($stats, 4, 0) : [0, 0, -1, 0]);
+        [$trees, $bytes, $age, $dropped, $attempts] = array_map(fn (mixed $value) => is_numeric($value) ? (int) $value : 0, is_array($stats) ? array_pad($stats, 5, 0) : [0, 0, -1, 0, 0]);
 
         return [
             'trees' => $trees,
@@ -329,6 +383,7 @@ class RedisCollector implements Collector, ReportsStats
             'max_bytes' => $this->maxBytes,
             'oldest_age' => $age < 0 ? null : intdiv($age, 1000),
             'dropped' => $dropped,
+            'max_attempts' => $attempts,
         ];
     }
 
@@ -373,7 +428,7 @@ class RedisCollector implements Collector, ReportsStats
      */
     protected function run(string $script, string|int ...$arguments): mixed
     {
-        $keys = [$this->key, "{$this->key}:bytes", "{$this->key}:dropped", "{$this->key}:delayed", "{$this->key}:delayed:trees"];
+        $keys = [$this->key, "{$this->key}:bytes", "{$this->key}:dropped", "{$this->key}:delayed", "{$this->key}:delayed:trees", "{$this->key}:attempts"];
 
         // phpredis takes EVAL's keys and arguments as one array, Predis as a list: PhpRedisConnection hides the difference.
         $result = $this->redis instanceof PhpRedisConnection

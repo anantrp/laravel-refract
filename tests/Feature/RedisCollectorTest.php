@@ -42,7 +42,7 @@ function redisCollector(int $maxBytes = RedisCollector::MAX_BYTES): RedisCollect
     $redis = redisConnection();
     $key = 'refract-test-'.bin2hex(random_bytes(6)).':{traces}';
 
-    test()->redisKeys = [$key, "{$key}:bytes", "{$key}:dropped", "{$key}:delayed", "{$key}:delayed:trees"];
+    test()->redisKeys = [$key, "{$key}:bytes", "{$key}:dropped", "{$key}:delayed", "{$key}:delayed:trees", "{$key}:attempts"];
 
     return new RedisCollector($redis, $key, $maxBytes);
 }
@@ -128,7 +128,7 @@ it('an invalid collector is the redis collector, with one warning', function () 
 it('the Redis collector reports trees, bytes and the oldest due age', function () {
     $collector = redisCollector(1_000_000);
 
-    expect($collector->stats())->toBe(['trees' => 0, 'bytes' => 0, 'max_bytes' => 1_000_000, 'oldest_age' => null, 'dropped' => 0]);
+    expect($collector->stats())->toBe(['trees' => 0, 'bytes' => 0, 'max_bytes' => 1_000_000, 'oldest_age' => null, 'dropped' => 0, 'max_attempts' => 0]);
 
     // An entry added 700 seconds ago, by its id.
     $id = (int) floor(microtime(true) * 1000) - 700_000;

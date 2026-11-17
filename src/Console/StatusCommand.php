@@ -57,7 +57,7 @@ class StatusCommand extends Command
     /**
      * Gather the status.
      *
-     * @return array{destination: string, drain: string, collector: ?string, trees: ?int, bytes: ?int, max_bytes: ?int, oldest_age: ?int, dropped: array<string, int>, paused_until: ?int, backoff_until: ?int, last_success: ?int, last_failure: ?int, durable: bool, cache: string, unavailable: array<string, string>, healthy: bool, problems: list<string>}
+     * @return array{destination: string, drain: string, collector: ?string, trees: ?int, bytes: ?int, max_bytes: ?int, oldest_age: ?int, max_attempts: ?int, dropped: array<string, int>, paused_until: ?int, backoff_until: ?int, last_success: ?int, last_failure: ?int, durable: bool, cache: string, unavailable: array<string, string>, healthy: bool, problems: list<string>}
      */
     protected function status(): array
     {
@@ -74,6 +74,7 @@ class StatusCommand extends Command
             'bytes' => null,
             'max_bytes' => null,
             'oldest_age' => null,
+            'max_attempts' => null,
             'dropped' => $stats['dropped'],
             'paused_until' => null,
             'backoff_until' => null,
@@ -94,7 +95,7 @@ class StatusCommand extends Command
                 if ($collector instanceof ReportsStats) {
                     $store = $collector->stats();
 
-                    $status = [...$status, 'trees' => $store['trees'], 'bytes' => $store['bytes'], 'max_bytes' => $store['max_bytes'], 'oldest_age' => $store['oldest_age']];
+                    $status = [...$status, 'trees' => $store['trees'], 'bytes' => $store['bytes'], 'max_bytes' => $store['max_bytes'], 'oldest_age' => $store['oldest_age'], 'max_attempts' => $store['max_attempts']];
                 }
             } catch (Throwable $e) {
                 $status['unavailable']['collector'] = $e::class;
@@ -168,7 +169,7 @@ class StatusCommand extends Command
     /**
      * Print the status as rows.
      *
-     * @param  array{destination: string, drain: string, collector: ?string, trees: ?int, bytes: ?int, max_bytes: ?int, oldest_age: ?int, dropped: array<string, int>, paused_until: ?int, backoff_until: ?int, last_success: ?int, last_failure: ?int, durable: bool, cache: string, unavailable: array<string, string>, healthy: bool, problems: list<string>}  $status
+     * @param  array{destination: string, drain: string, collector: ?string, trees: ?int, bytes: ?int, max_bytes: ?int, oldest_age: ?int, max_attempts: ?int, dropped: array<string, int>, paused_until: ?int, backoff_until: ?int, last_success: ?int, last_failure: ?int, durable: bool, cache: string, unavailable: array<string, string>, healthy: bool, problems: list<string>}  $status
      */
     protected function show(array $status): void
     {
@@ -187,6 +188,7 @@ class StatusCommand extends Command
             } elseif ($status['trees'] !== null) {
                 $row('Stored', "{$status['trees']} trees, {$status['bytes']} of {$status['max_bytes']} bytes");
                 $row('Oldest due tree', $status['oldest_age'] === null ? 'none' : "waited {$status['oldest_age']} seconds");
+                $row('Most failed attempts', (string) $status['max_attempts']);
             }
 
             $row('Backing off until', isset($unavailable['backoff']) ? "unavailable ({$unavailable['backoff']})" : $this->time($status['backoff_until']));
