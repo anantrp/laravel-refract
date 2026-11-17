@@ -48,7 +48,7 @@ class ExportBreaker
     protected const PROBE_KEY = 'refract:sync:probe';
 
     /**
-     * The seconds a claim to probe lasts: longer than an export, so a process that dies while probing does not block exports for long.
+     * The seconds a claim to probe lasts: longer than an export, shorter than any pause, so a process that dies while probing does not block exports for long.
      */
     protected const PROBE_SECONDS = 10;
 
@@ -109,9 +109,9 @@ class ExportBreaker
         self::$state = $state;
 
         // Kept past the pause, so a probe that fails again doubles it.
+        // The probe's claim is not given back: it runs out within the pause, so a
+        // process that read the old pause just before cannot claim it and probe.
         self::$unsaved = $this->cache(fn (Cache $cache) => $cache->put(self::KEY, $state, $pause + self::MAX_PAUSE)) !== true;
-
-        $this->cache(fn (Cache $cache) => $cache->forget(self::PROBE_KEY));
 
         return $pause;
     }

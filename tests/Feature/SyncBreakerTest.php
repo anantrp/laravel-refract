@@ -174,6 +174,26 @@ it('when another process closes the breaker, this process resumes at once instea
     Http::assertSentCount(2);
 });
 
+it('a process that read the pause just before another process\'s probe failed does not probe again', function () {
+    bootExport();
+    fakeDestination(503);
+
+    sendSpan();
+    $this->travel(31)->seconds();
+
+    // B probes, gets a quick 503, and starts a 60-second pause.
+    sendSpan();
+    Http::assertSentCount(2);
+
+    // A read the cache a moment before B's probe failed, so it still sees the expired pause.
+    ExportBreaker::reset();
+    CacheFacade::put('refract:sync:breaker', ['until' => now()->getTimestamp() - 1, 'failures' => 1], 600);
+
+    sendSpan();
+
+    Http::assertSentCount(2);
+});
+
 /*
  * Every way the cache can hold the pause, crossed with every way saving to
  * it can go. Whatever the cache does, a failed export pauses this process
@@ -188,20 +208,31 @@ it('a failed export pauses this process for the right time, whatever the cache h
     $fail = fn () => $save === 'throws' ? throw new RuntimeException('OOM command not allowed') : false;
 
     $cache = Mockery::mock(Cache::class);
-    $cache->shouldReceive('get')->andReturnUsing(function ($key) use (&$store, $holds) {
-        return $holds === 'throws' ? throw new RuntimeException('cache is down') : ($store[$key] ?? null);
+    $expires = [];
+    $cache->shouldReceive('get')->andReturnUsing(function ($key) use (&$store, &$expires, $holds) {
+        if ($holds === 'throws') {
+            throw new RuntimeException('cache is down');
+        }
+
+        if (isset($expires[$key]) && $expires[$key] <= now()->getTimestamp()) {
+            unset($store[$key], $expires[$key]);
+        }
+
+        return $store[$key] ?? null;
     });
     $cache->shouldReceive('put')->andReturnUsing(function ($key, $value) use (&$store, $save, $fail) {
         return $save === 'works' ? (bool) ($store[$key] = $value) : $fail();
     });
-    $cache->shouldReceive('add')->andReturnUsing(function ($key, $value) use (&$store, $save, $fail) {
+    $cache->shouldReceive('add')->andReturnUsing(function ($key, $value, $ttl) use (&$store, &$expires, $save, $fail) {
         if ($save !== 'works') {
             return $fail();
         }
 
-        if (isset($store[$key])) {
+        if (isset($store[$key]) && ($expires[$key] ?? PHP_INT_MAX) > now()->getTimestamp()) {
             return false;
         }
+
+        $expires[$key] = now()->getTimestamp() + $ttl;
 
         return (bool) ($store[$key] = $value);
     });
