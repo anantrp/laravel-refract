@@ -28,7 +28,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
-- With `REFRACT_DRAIN=queue`, one tree that a destination keeps failing on (a 5xx for that payload) no longer holds back the trees claimed with it. Each tree counts its failed exports: after 3 it is sent alone, after the others, and after 10, sent alone while the destination took other trees, it is dropped as `poison`. A long outage drops nothing. `refract:status` shows the most failed attempts of a stored tree. **Upgrading:** the database collector needs a new migration: run `php artisan vendor:publish --tag=refract-migrations` and `php artisan migrate`. `Collector::release()` takes a third `$failed` argument and the contract adds `attempts()`: a collector of your own must add both.
+- With `REFRACT_DRAIN=queue`, one tree that a destination keeps failing on (a 5xx for that payload) no longer holds back the trees claimed with it. Each tree counts its failed exports: after 3 it is sent apart from the others, and it is dropped as `poison` at 10, counting past 3 only failures while the destination took other trees. A long outage, or a destination answering `429`, drops nothing. `refract:status` shows the most failed attempts of a stored tree. **Upgrading:** the database collector needs a new migration: run `php artisan vendor:publish --tag=refract-migrations` and `php artisan migrate`. `Collector::release()` takes a third `$failed` argument and the contract adds `attempts()`: a collector of your own must add both.
 
 - The queue drain no longer sends trees again that an earlier request of the same drain delivered, when a later request fails with a network error, 408, 429 or 5xx.
 

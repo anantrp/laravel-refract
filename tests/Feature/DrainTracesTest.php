@@ -643,7 +643,7 @@ it('the other trees in its batch are delivered once it is sent alone', function 
     drainNow();
 
     expect($collector->size())->toBe(1)
-        ->and(array_slice(sentTraceIds(), 3))->each->toHaveCount(1);
+        ->and(array_values($collector->entries)[0]['tree'][0]['trace_id'])->toBe($poison);
 });
 
 it('a tree that keeps failing is sent alone after 3 attempts and dropped after 10', function () {
@@ -661,10 +661,11 @@ it('a tree that keeps failing is sent alone after 3 attempts and dropped after 1
         $this->travel(301)->seconds();
     }
 
-    $alone = array_filter(sentTraceIds(), fn (array $ids) => in_array($poison, $ids, true));
+    $alone = array_filter(sentTraceIds(), fn (array $ids) => $ids === [$poison]);
 
+    // Once it failed 3 times, it is tried with the other repeat failures, then alone, each drain: 7 times alone.
     expect($collector->size())->toBe(0)
-        ->and(array_slice(array_values($alone), 3))->each->toBe([$poison])
+        ->and($alone)->toHaveCount(7)
         ->and(Stats::read()['dropped'])->toBe(['poison' => 1]);
 
     Event::assertDispatched(TracesDropped::class, fn ($e) => $e->reason === 'poison' && $e->count === 1);
@@ -691,4 +692,109 @@ it('a long outage drops nothing: a tree is dropped as poison only while the dest
     drainNow();
 
     expect($collector->size())->toBe(0);
+});
+
+it('after a long outage, one transient failure of an old tree drops nothing', function () {
+    $this->memoryExporter = null;
+    bootExport(['refract.drain' => 'queue']);
+    app()->instance(Collector::class, $collector = new MemoryCollector);
+    Queue::fake();
+
+    $down = true;
+    $failOnce = null;
+
+    Http::fake(function (Request $request) use (&$down, &$failOnce) {
+        if ($failOnce !== null && str_contains(Otlp::body($request), $failOnce)) {
+            $failOnce = null;
+
+            return Http::response('', 503);
+        }
+
+        return $down ? Http::response('', 503) : Http::response('', 200);
+    });
+
+    foreach (range(1, 3) as $tree) {
+        $collector->push(traceTree(str_repeat((string) $tree, 32)));
+    }
+
+    foreach (range(1, 20) as $drain) {
+        drainNow();
+        $this->travel(301)->seconds();
+    }
+
+    // Back up, but the first old tree meets one 503, while a new run goes through.
+    $down = false;
+    $failOnce = str_repeat('1', 32);
+    $collector->push(traceTree(str_repeat('4', 32)));
+
+    foreach (range(1, 3) as $drain) {
+        drainNow();
+        $this->travel(301)->seconds();
+    }
+
+    expect(Stats::read()['dropped'])->toBe([])
+        ->and($collector->size())->toBe(0);
+});
+
+it('a 429 while trees are sent alone stops the drain, waits its Retry-After and counts no attempt', function () {
+    $this->memoryExporter = null;
+    bootExport(['refract.drain' => 'queue']);
+    app()->instance(Collector::class, $collector = new MemoryCollector);
+    Queue::fake();
+    Http::fake(['*' => Http::response('', 429, ['Retry-After' => '120'])]);
+
+    foreach (range(1, 3) as $tree) {
+        $collector->push(traceTree(str_repeat((string) $tree, 32)));
+    }
+
+    foreach ($collector->entries as $id => $entry) {
+        $collector->entries[$id]['attempts'] = 5;
+    }
+
+    drainNow();
+
+    expect(count(Http::recorded()))->toBe(1)
+        ->and(array_column($collector->entries, 'attempts'))->toBe([5, 5, 5])
+        ->and(pushedDrains())->toBe([120]);
+});
+
+it('after recovery, trees that failed often go out together, not one per request', function () {
+    $down = true;
+    $this->memoryExporter = null;
+    $collector = poisonDestination(str_repeat('9', 32), $down);
+
+    foreach (range(1, 20) as $tree) {
+        $collector->push(traceTree(str_pad((string) $tree, 32, '0', STR_PAD_LEFT)));
+    }
+
+    foreach (range(1, 6) as $drain) {
+        drainNow();
+        $this->travel(301)->seconds();
+    }
+
+    $down = false;
+    $before = count(Http::recorded());
+    drainNow();
+
+    expect($collector->size())->toBe(0)
+        ->and(count(Http::recorded()) - $before)->toBeLessThanOrEqual(2);
+});
+
+it('a bad tree at the head of a claim does not hold back the healthy trees behind it', function () {
+    $poison = str_repeat('9', 32);
+    $this->memoryExporter = null;
+    $collector = poisonDestination($poison);
+
+    $collector->push(traceTree($poison));
+    $collector->push(traceTree(str_repeat('1', 32)));
+    $collector->push(traceTree(str_repeat('2', 32)));
+
+    foreach ($collector->entries as $id => $entry) {
+        $collector->entries[$id]['attempts'] = 3;
+    }
+
+    drainNow();
+
+    expect($collector->size())->toBe(1)
+        ->and(array_values($collector->entries)[0]['attempts'])->toBe(4);
 });
