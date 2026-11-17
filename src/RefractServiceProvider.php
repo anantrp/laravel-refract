@@ -56,6 +56,7 @@ class RefractServiceProvider extends ServiceProvider
             $this->appName(),
             // With the queue drain, only the drain job exports.
             $this->drain() === 'queue' ? DrainTraces::TIMEOUT : Drain::TIMEOUT,
+            $this->drain() === 'queue' ? DrainTraces::CONNECT_TIMEOUT : Drain::CONNECT_TIMEOUT,
         ));
 
         $this->app->singleton(Collector::class, fn (Application $app) => match (Settings::choice('collector', ['redis', 'database'], 'redis')) {

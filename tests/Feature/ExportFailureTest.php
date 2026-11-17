@@ -1,7 +1,9 @@
 <?php
 
 use Anantrp\Refract\Contracts\Exporter;
+use Anantrp\Refract\Contracts\ExportResult;
 use Anantrp\Refract\Support\Diagnostics;
+use Anantrp\Refract\Tests\Support\MemoryExporter;
 use Anantrp\Refract\Tests\Support\Otlp;
 use Anantrp\Refract\Tests\Support\WarningLog;
 use Anantrp\Refract\Transport\Drain;
@@ -508,7 +510,43 @@ it('an export in this process waits at most 5 s for the destination', function (
 
     sendSpan();
 
-    expect($timeouts)->toBe([5]);
+    expect($timeouts)->toHaveCount(1)
+        ->and($timeouts[0])->toBeGreaterThan(4)->toBeLessThanOrEqual(5);
+});
+
+it('an export in this process is given one 5 s limit in all, however many requests it makes', function () {
+    bootExport();
+    app()->instance(Exporter::class, $exporter = new MemoryExporter);
+
+    sendSpan();
+
+    expect($exporter->limits)->toBe([5.0]);
+});
+
+it('an export waits at most 1 s to connect to the destination', function () {
+    bootExport();
+    $connects = [];
+    Http::fake(function ($request, array $options) use (&$connects) {
+        $connects[] = $options['connect_timeout'] ?? null;
+
+        return Http::response('', 200);
+    });
+
+    sendSpan();
+
+    expect($connects)->toBe([1]);
+});
+
+it('an export in this process that runs out of time drops the trees it did not finish, with one warning', function () {
+    $log = bootExport();
+    app()->instance(Exporter::class, $exporter = new MemoryExporter);
+    $exporter->results = [ExportResult::unfinished(1)];
+
+    app(Drain::class)->send([runTree(['a']), runTree(['b']), runTree(['c'])]);
+
+    expect($exporter->trees)->toHaveCount(1)
+        ->and($log->warnings)->toHaveCount(1)
+        ->and($log->warnings[0])->toContain('2 of 3 run trees')->toContain('5 seconds');
 });
 
 it('given a time limit, a request is never started with less than a second of it left, and the result counts the whole trees done', function () {

@@ -11,18 +11,24 @@ use Throwable;
 /**
  * Takes the finished run trees from capture and sends them on their way.
  *
- * The sync drain exports the trees in this process, once. It is best
- * effort: a batch the destination cannot take is dropped with one
- * warning. The queue drain puts them in the collector instead, and
- * dispatches a DrainTraces job to export them from the app's workers.
+ * The sync drain exports the trees in this process, once, within
+ * TIMEOUT seconds in all. It is best effort: a batch the destination
+ * cannot take, or cannot take in time, is dropped with one warning.
+ * The queue drain puts them in the collector instead, and dispatches
+ * a DrainTraces job to export them from the app's workers.
  * Nothing ever reaches the app.
  */
 class Drain
 {
     /**
-     * The seconds an export in this process waits for the destination.
+     * The seconds an export in this process takes at most, all its requests together.
      */
     public const TIMEOUT = 5;
+
+    /**
+     * The seconds an export in this process waits to connect to the destination, so a host that never answers costs 1 second, not 5.
+     */
+    public const CONNECT_TIMEOUT = 1;
 
     /**
      * Create a new drain instance, "sync" or "queue". The exporter or collector is made on the first send.
@@ -55,7 +61,7 @@ class Drain
     protected function export(array $trees): void
     {
         try {
-            $result = $this->container->make(Exporter::class)->export($trees);
+            $result = $this->container->make(Exporter::class)->export($trees, self::TIMEOUT);
         } catch (Throwable $e) {
             Diagnostics::warn('export.error', 'Spans could not be exported ('.$e::class.'). The batch was dropped.');
 
@@ -64,6 +70,12 @@ class Drain
 
         if ($result->isRetryable()) {
             Diagnostics::warn('export.unavailable', 'Spans could not be exported: the destination could not be reached or answered 408, 429 or 5xx. The batch was dropped (an export in this process is not retried).');
+        }
+
+        if ($result->isUnfinished()) {
+            $dropped = count($trees) - $result->done;
+
+            Diagnostics::warn('export.unfinished', 'An export in this process took its whole '.self::TIMEOUT." seconds: {$dropped} of ".count($trees).' run trees were not sent and were dropped.');
         }
     }
 
