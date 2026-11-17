@@ -2,67 +2,18 @@
 
 use Anantrp\Refract\Contracts\Exporter;
 use Anantrp\Refract\Contracts\ExportResult;
-use Anantrp\Refract\Support\Diagnostics;
 use Anantrp\Refract\Tests\Support\MemoryExporter;
 use Anantrp\Refract\Tests\Support\Otlp;
-use Anantrp\Refract\Tests\Support\WarningLog;
 use Anantrp\Refract\Transport\Drain;
 use Illuminate\Http\Client\RequestException;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
-use Illuminate\Support\Facades\Log;
 
 /*
  * An export in this process is best effort: a network error, 408, 429 or
  * 5xx stops it and drops the trees with one warning; every other status is
  * dropped with one warning too, and the later requests are still sent.
  */
-
-/**
- * Boot Refract with a working Langfuse destination, and record warnings.
- *
- * @param  array<string, mixed>  $config
- */
-function bootExport(array $config = []): WarningLog
-{
-    test()->refreshApplicationWithConfig([
-        'refract.destination' => 'langfuse',
-        'refract.destinations.langfuse.public_key' => 'pk-test',
-        'refract.destinations.langfuse.secret_key' => 'sk-test',
-        'refract.destinations.otlp.endpoint' => 'https://otlp.test/v1/traces',
-        ...$config,
-    ]);
-
-    Diagnostics::reset();
-    Log::swap($log = new WarningLog);
-
-    // No test here may reach a real destination.
-    Http::preventStrayRequests();
-
-    return $log;
-}
-
-/**
- * Send one run tree of one neutral run span through the drain.
- *
- * @param  array<string, mixed>  $call
- */
-function sendSpan(array $call = []): void
-{
-    app(Drain::class)->send([[[
-        'v' => 1, 'trace_id' => str_repeat('a', 32), 'span_id' => bin2hex(random_bytes(8)), 'parent_span_id' => null,
-        'kind' => 'invoke_agent', 'start' => 1, 'end' => 2, 'status' => 'ok', 'status_message' => null,
-        'call' => ['agent' => 'TimeAgent', ...$call], 'content' => [], 'context' => [], 'events' => [],
-    ]]]);
-}
-
-/**
- * Fake every request to the destination with the given status, or a failed connection for "network".
- */
-function fakeDestination(int|string $status, string $body = ''): void
-{
-    Http::fake(fn () => $status === 'network' ? Http::failedConnection() : Http::response($body, (int) $status));
-}
 
 dataset('retryable', ['408' => 408, '429' => 429, '500' => 500, '503' => 503, 'network error' => 'network']);
 dataset('rejected', ['400' => 400, '401' => 401, '403' => 403, '404' => 404]);
@@ -217,7 +168,7 @@ it('a 408, 500 or network error carries no Retry-After, and a 2xx or 4xx is not 
     '400' => [400, false],
 ]);
 
-it('a 408, 429, 5xx or network error is not retried and logs one warning', function (int|string $status) {
+it('a 408, 429, 5xx or network error is not retried, logs one warning and pauses later exports', function (int|string $status) {
     $log = bootExport();
     fakeDestination($status);
 
@@ -228,9 +179,11 @@ it('a 408, 429, 5xx or network error is not retried and logs one warning', funct
         ->and($log->warnings[0])->toContain('dropped');
 
     sendSpan();
+    sendSpan();
 
-    Http::assertSentCount(2);
-    expect($log->warnings)->toHaveCount(1);
+    Http::assertSentCount(1);
+    expect($log->warnings)->toHaveCount(2)
+        ->and($log->warnings[1])->toContain('dropped without trying');
 })->with('retryable');
 
 it('a 401 and then an outage in one process give two different warnings', function () {

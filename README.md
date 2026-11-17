@@ -186,7 +186,10 @@ A sync-driver job or an `Artisan::call()` inside a web request does not hand on 
 Where a run tree goes depends on `REFRACT_DRAIN`:
 
 - **`sync`** (the default): the tree is exported in the same process, once. It is best effort: the export takes at most 5 seconds in all, however many requests it makes, and a tree that cannot be exported in that time is dropped with one warning. It is never tried again. There is nothing to set up.
+  After an export fails (network error, timeout, 408, 429 or 5xx), exports pause: for 30 seconds, doubling on each failure in a row up to 5 minutes. While paused, trees are dropped at once, without a request, with one warning. Then one export tries the destination again, and an answer ends the pause. The pause is kept in the process and in your default cache store, so PHP-FPM requests and queue workers share it. If the cache fails, each process keeps its own.
 - **`queue`**: the tree is stored in a collector, and your queue workers export it, with retries. See [Collecting and Draining](#collecting-and-draining).
+
+Refract sends with an HTTP client of its own, not the `Http` facade. Your global HTTP middleware and options never apply to it, `Http::fake()` in your tests never sees it, and Telescope, Pulse and Nightwatch never record an export.
 
 ### Export Failures
 
@@ -419,8 +422,8 @@ Context::add('trigger', 'schedule');
 - With a morph map, the participant type is the full class name. So it does not match the `participant_type` column of the `agent_conversations` table, which holds the alias.
 - With no `mask` set, a secret inside captured content is sent as is.
 - Only agent runs are traced. Embeddings, images, audio and other SDK operations are not.
-- With `sync`, the export after the response still runs in the same PHP-FPM worker. A destination that does not answer a connection keeps that worker busy for 1 second per export. One that accepts the connection and then hangs keeps it busy for up to 5 seconds per export.
-- With `sync`, exports inside a queue job run under that job's `timeout`. A destination that does not answer a connection adds 1 second per run the job makes, and one that accepts it and then hangs adds up to 5 seconds per run. Give jobs that run agents room in their `timeout`, or use `REFRACT_DRAIN=queue`.
+- With `sync`, the export after the response still runs in the same PHP-FPM worker. When the destination goes down, the first export to find out keeps its worker busy for up to 5 seconds (1 second if the host does not answer a connection). Exports then pause, and cost nothing until the pause ends.
+- With `sync`, exports inside a queue job run under that job's `timeout`. When the destination goes down, the first failed export adds up to 5 seconds to the job; later runs add nothing while exports pause.
 - With `sync`, a destination that is down or slow loses the traces sent meanwhile: nothing is tried again. Use `REFRACT_DRAIN=queue` to keep them.
 - Spans not yet handed on are lost when the worker kills a job at its `timeout`. They are also lost when a command ends by a signal, `exit()` or `dd()`.
 - With `REFRACT_DRAIN=queue`, a tree can be sent twice (see [Collecting and Draining](#collecting-and-draining)). Backends that do not deduplicate by span id show it twice.

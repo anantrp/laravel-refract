@@ -25,6 +25,7 @@ use Illuminate\Contracts\Events\Dispatcher;
 use Illuminate\Contracts\Foundation\Application;
 use Illuminate\Contracts\Redis\Factory as Redis;
 use Illuminate\Database\DatabaseManager as Database;
+use Illuminate\Http\Client\Factory as HttpFactory;
 use Illuminate\Support\ServiceProvider;
 use RuntimeException;
 
@@ -57,7 +58,11 @@ class RefractServiceProvider extends ServiceProvider
             // With the queue drain, only the drain job exports.
             $this->drain() === 'queue' ? DrainTraces::TIMEOUT : Drain::TIMEOUT,
             $this->drain() === 'queue' ? DrainTraces::CONNECT_TIMEOUT : Drain::CONNECT_TIMEOUT,
+            $app->make(HttpExporter::CLIENT),
         ));
+
+        // No event dispatcher: Telescope, Pulse and Nightwatch never record an export.
+        $this->app->singleton(HttpExporter::CLIENT, fn () => new HttpFactory);
 
         $this->app->singleton(Collector::class, fn (Application $app) => match (Settings::choice('collector', ['redis', 'database'], 'redis')) {
             'database' => new DatabaseCollector($app->make(Database::class)->connection(Settings::string('collectors.database.connection') ?: null)),

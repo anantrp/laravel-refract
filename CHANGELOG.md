@@ -10,6 +10,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - With `REFRACT_DRAIN=sync`, an export takes at most 5 s in all, however many requests it makes; trees it could not send in time are dropped with one warning. Before, each request had its own 5 s.
 - Connecting to the destination times out after 1 s with `sync` (5 s from the queue drain), so a destination that never answers a connection costs a run 1 s, not 5 s.
+- With `REFRACT_DRAIN=sync`, a failed export (network error, timeout, 408, 429 or 5xx) pauses exports for 30 s, doubling on each failure in a row up to 5 minutes. While paused, trees are dropped without a request, with one warning; then one export tries again. The pause is shared through the default cache store, so PHP-FPM requests share it too.
+- Exports go through an HTTP client of Refract's own (`refract.http` in the container), not the `Http` facade: the app's global HTTP middleware and options, `Http::fake()` and request events (Telescope, Pulse, Nightwatch) no longer see them.
 
 ## [0.2.0] - 2026-11-16
 

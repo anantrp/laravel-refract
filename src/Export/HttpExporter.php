@@ -7,9 +7,9 @@ use Anantrp\Refract\Contracts\ExportResult;
 use Anantrp\Refract\Support\Diagnostics;
 use Anantrp\Refract\Support\Guard;
 use Illuminate\Http\Client\ConnectionException;
+use Illuminate\Http\Client\Factory;
 use Illuminate\Http\Client\RequestException;
 use Illuminate\Http\Client\Response;
-use Illuminate\Support\Facades\Http;
 use Throwable;
 
 /**
@@ -29,6 +29,11 @@ class HttpExporter implements Exporter
      * The most bytes of OTLP JSON in one request, before gzip.
      */
     public const PART_LIMIT = 4_000_000;
+
+    /**
+     * The container key of the HTTP client exports are sent with: a client of Refract's own, so the app's global middleware, fakes and request events never see an export.
+     */
+    public const CLIENT = 'refract.http';
 
     /**
      * The characters of a rejected response's body, or of a partial success message, put in the warning.
@@ -61,6 +66,7 @@ class HttpExporter implements Exporter
         protected string $serviceName,
         protected int $timeout,
         protected ?int $connectTimeout = null,
+        protected Factory $http = new Factory,
     ) {}
 
     /**
@@ -281,7 +287,7 @@ class HttpExporter implements Exporter
             }
 
             // A redirect is never followed: it would send the headers to another host or turn the POST into a GET.
-            $request = Http::withHeaders($headers)
+            $request = $this->http->withHeaders($headers)
                 ->withoutRedirecting()
                 ->timeout($timeout);
 

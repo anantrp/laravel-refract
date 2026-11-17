@@ -3,8 +3,10 @@
 namespace Anantrp\Refract\Tests;
 
 use Anantrp\Refract\Contracts\Exporter;
+use Anantrp\Refract\Export\HttpExporter;
 use Anantrp\Refract\RefractServiceProvider;
 use Anantrp\Refract\Tests\Support\MemoryExporter;
+use Anantrp\Refract\Transport\ExportBreaker;
 use Closure;
 use Illuminate\Foundation\Application;
 use Illuminate\Http\Client\Factory as HttpFactory;
@@ -24,6 +26,11 @@ abstract class TestCase extends Orchestra
      * The exporter that receives the run trees instead of the configured one.
      */
     protected ?MemoryExporter $memoryExporter = null;
+
+    /**
+     * Whether Refract sends through the app's HTTP client, so Http::fake() sees its requests. In the app it has its own.
+     */
+    protected bool $shareAppHttpClient = true;
 
     /**
      * The services to replace before the providers boot, as extenders keyed by service.
@@ -108,8 +115,16 @@ abstract class TestCase extends Orchestra
 
         $app['config']->set($this->environmentConfig);
 
-        // No test may reach a real destination: a request not faked throws.
+        // No test may reach a real destination: a request not faked throws. Refract's own client is an HttpFactory too.
         $app->resolving(HttpFactory::class, fn (HttpFactory $http) => $http->preventStrayRequests());
+
+        if ($this->shareAppHttpClient) {
+            // An extender outlives a register() run again on the booted app, as ConfigTest does.
+            $app->extend(HttpExporter::CLIENT, fn ($own, $app) => $app->make(HttpFactory::class));
+        }
+
+        // A pause after a failed export is kept in the process: never carry one from a test to the next.
+        ExportBreaker::reset();
 
         // The app environment comes from APP_ENV, which config('app.env') stands in for here.
         $environment = $this->environmentConfig['app.env'] ?? null;

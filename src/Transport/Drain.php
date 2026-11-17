@@ -14,6 +14,7 @@ use Throwable;
  * The sync drain exports the trees in this process, once, within
  * TIMEOUT seconds in all. It is best effort: a batch the destination
  * cannot take, or cannot take in time, is dropped with one warning.
+ * After a failed export, ExportBreaker pauses exports for a while.
  * The queue drain puts them in the collector instead, and dispatches
  * a DrainTraces job to export them from the app's workers.
  * Nothing ever reaches the app.
@@ -60,6 +61,14 @@ class Drain
      */
     protected function export(array $trees): void
     {
+        $breaker = new ExportBreaker($this->container);
+
+        if ($breaker->isOpen()) {
+            Diagnostics::warn('export.paused', 'Spans were dropped without trying the destination: it failed recently, so exports are paused for a while.');
+
+            return;
+        }
+
         try {
             $result = $this->container->make(Exporter::class)->export($trees, self::TIMEOUT);
         } catch (Throwable $e) {
@@ -69,8 +78,14 @@ class Drain
         }
 
         if ($result->isRetryable()) {
-            Diagnostics::warn('export.unavailable', 'Spans could not be exported: the destination could not be reached or answered 408, 429 or 5xx. The batch was dropped (an export in this process is not retried).');
+            $pause = $breaker->failed();
+
+            Diagnostics::warn('export.unavailable', "Spans could not be exported: the destination could not be reached or answered 408, 429 or 5xx. The batch was dropped (an export in this process is not retried), and exports pause for {$pause} seconds.");
+
+            return;
         }
+
+        $breaker->answered();
 
         if ($result->isUnfinished()) {
             $dropped = count($trees) - $result->done;

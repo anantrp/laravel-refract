@@ -1,10 +1,16 @@
 <?php
 
 use Anantrp\Refract\Contracts\Collector;
+use Anantrp\Refract\Support\Diagnostics;
+use Anantrp\Refract\Tests\Support\WarningLog;
+use Anantrp\Refract\Transport\Drain;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 
 /*
  * Helpers shared by the test files: the run trees the collector tests
- * store, and the behaviour every stored collector shares.
+ * store, the behaviour every stored collector shares, and booting an
+ * export against a faked destination.
  */
 
 /**
@@ -200,4 +206,50 @@ function itBehavesLikeAStoredCollector(Closure $make): void
         expect($collector->size())->toBe(1)
             ->and(storedNames($collector->claim(4_000_000, 60)))->toBe(['two']);
     });
+}
+
+/**
+ * Boot Refract with a working Langfuse destination, and record warnings.
+ *
+ * @param  array<string, mixed>  $config
+ */
+function bootExport(array $config = []): WarningLog
+{
+    test()->refreshApplicationWithConfig([
+        'refract.destination' => 'langfuse',
+        'refract.destinations.langfuse.public_key' => 'pk-test',
+        'refract.destinations.langfuse.secret_key' => 'sk-test',
+        'refract.destinations.otlp.endpoint' => 'https://otlp.test/v1/traces',
+        ...$config,
+    ]);
+
+    Diagnostics::reset();
+    Log::swap($log = new WarningLog);
+
+    // No test here may reach a real destination.
+    Http::preventStrayRequests();
+
+    return $log;
+}
+
+/**
+ * Send one run tree of one neutral run span through the drain.
+ *
+ * @param  array<string, mixed>  $call
+ */
+function sendSpan(array $call = []): void
+{
+    app(Drain::class)->send([[[
+        'v' => 1, 'trace_id' => str_repeat('a', 32), 'span_id' => bin2hex(random_bytes(8)), 'parent_span_id' => null,
+        'kind' => 'invoke_agent', 'start' => 1, 'end' => 2, 'status' => 'ok', 'status_message' => null,
+        'call' => ['agent' => 'TimeAgent', ...$call], 'content' => [], 'context' => [], 'events' => [],
+    ]]]);
+}
+
+/**
+ * Fake every request to the destination with the given status, or a failed connection for "network".
+ */
+function fakeDestination(int|string $status, string $body = ''): void
+{
+    Http::fake(fn () => $status === 'network' ? Http::failedConnection() : Http::response($body, (int) $status));
 }
