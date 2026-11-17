@@ -57,6 +57,7 @@ class RecordAgentRuns
         $events->listen(ToolFailed::class, $this->guarded($this->toolFailed(...)));
 
         $this->recorder->flushing(fn () => $this->failingOver = []);
+        $this->recorder->flushing(fn () => $this->content->forget());
     }
 
     /**

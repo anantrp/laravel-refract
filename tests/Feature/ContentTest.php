@@ -12,6 +12,7 @@ use Anantrp\Refract\Tests\Support\Ai\RecordingMask;
 use Anantrp\Refract\Tests\Support\Ai\ThrowingMask;
 use Anantrp\Refract\Tests\Support\Ai\TrapImage;
 use Anantrp\Refract\Tests\Support\Ai\TrapUpload;
+use Anantrp\Refract\Tests\Support\Ai\UniqueMask;
 use Anantrp\Refract\Tests\Support\Otlp;
 use Anantrp\Refract\Tests\Support\WarningLog;
 use Illuminate\Contracts\Support\Arrayable;
@@ -989,14 +990,70 @@ it('with capture on the end content of a span dropped at the cap, or under a dro
             'output' => [['role' => 'assistant', 'parts' => [['type' => 'text', 'content' => 'The release is on Friday.']]]],
         ]]);
 })->with([
-    // The start values are still masked (backlog): the prompt, each step's input, the tool's arguments.
+    // The start values are still masked (backlog): the prompt, each step's input, the tool's arguments, each value once per flush.
     'the run dropped at the cap, its steps and tool under it' => [999, [
-        'What is new?' => 3,
-        '{"topic":"release"}' => 2,
+        'What is new?' => 1,
+        '{"topic":"release"}' => 1,
     ]],
     'the run kept, its steps and tool dropped at the cap' => [998, [
-        'What is new?' => 3,
-        '{"topic":"release"}' => 2,
+        'What is new?' => 1,
+        '{"topic":"release"}' => 1,
         'The release is on Friday.' => 1,
     ]],
 ]);
+
+/*
+ * A run sends its whole history again at each step, so with a mask on,
+ * a value is masked once per request or job, however often it repeats.
+ */
+
+it('a 10-step run whose history holds 50 distinct messages calls the mask 50 times', function () {
+    RecordingMask::$seen = [];
+    $content = new Content(app(), enabled: true, maskClass: RecordingMask::class);
+    $history = [];
+
+    foreach (range(1, 10) as $step) {
+        foreach (range(1, 5) as $message) {
+            $history[] = new UserMessage("Step {$step}, message {$message}.");
+        }
+
+        $content->stepInput($history);
+    }
+
+    // Without the memo: 5 + 10 + ... + 50 = 275 calls.
+    expect(RecordingMask::$seen)->toHaveCount(50)
+        ->and(array_unique(RecordingMask::$seen))->toHaveCount(50);
+});
+
+it('the memo is cleared at each flush', function () {
+    $this->refreshApplicationWithConfig(contentConfig([
+        'refract.capture.content' => true,
+        'refract.capture.mask' => RecordingMask::class,
+    ]));
+    RecordingMask::$seen = [];
+
+    app(Content::class)->value('a secret');
+    app(Content::class)->value('a secret');
+    app(Recorder::class)->flush();
+    app(Content::class)->value('a secret');
+
+    expect(RecordingMask::$seen)->toBe(['a secret', 'a secret']);
+});
+
+it('a value is masked once per flush, even by a mask that is not pure', function () {
+    $content = new Content(app(), enabled: true, maskClass: UniqueMask::class);
+
+    $first = $content->value('the same value');
+
+    expect($content->value('the same value'))->toBe($first);
+
+    $content->forget();
+
+    expect($content->value('the same value'))->not->toBe($first);
+});
+
+it('without a mask nothing is remembered, and a value over the cap is still cut', function () {
+    $content = new Content(app(), enabled: true);
+
+    expect($content->value(str_repeat('a', Content::MAX_BYTES + 1)))->toEndWith('[cut, original size 131073 bytes]');
+});

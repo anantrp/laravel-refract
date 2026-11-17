@@ -358,6 +358,8 @@ class MaskSecrets
 
 The mask fails closed. When it throws or does not return a string, the value becomes `<fully masked due to failed mask function>` and one warning is logged. When the class cannot be made or is not invokable, every value is masked that way. The run always continues.
 
+A run sends its whole history to the model again at each step, so the same messages are captured again and again. The mask runs once per distinct value per request or job, and the result is reused, so it should give the same output for the same input. A mask that adds a timestamp or a random token gives every repeat the first result.
+
 The mask is not called for the output or tool result of a span dropped at the cap (see [Bounded Memory](#bounded-memory)). Its prompt, input and tool arguments still go through the mask.
 
 ## Participant

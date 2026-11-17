@@ -14,6 +14,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - A warning is logged at most once per kind every 10 minutes, shared through the default cache store, and the next one says how many were held back (`(42 more since the last warning)`). Before, each process logged a kind once, ever, and stopped after 10 kinds: a long-lived queue worker went quiet during a long outage.
 
+- With a content mask, each distinct value is masked once per request or job, not once per step it appears in: a 10-step run no longer masks its history 10 times. The mask should give the same output for the same input.
+
 ### Removed
 
 - `DatabaseCollector::dropped()`. The drop count is now kept for every process, in the default cache store.

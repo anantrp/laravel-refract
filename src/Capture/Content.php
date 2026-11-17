@@ -75,6 +75,11 @@ class Content
     public const MAX_BYTES = 131_072;
 
     /**
+     * The most bytes of masked values remembered until the next flush. Past it, the memo starts over.
+     */
+    public const MEMO_BYTES = 4_194_304;
+
+    /**
      * The JSON flags tool arguments and results are encoded with, the same the SDK uses.
      */
     protected const JSON_FLAGS = JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE | JSON_PRESERVE_ZERO_FRACTION;
@@ -85,6 +90,18 @@ class Content
      * @var callable|false|null
      */
     protected $mask = null;
+
+    /**
+     * The values masked since the last flush, keyed by the hash of the value before masking.
+     *
+     * @var array<string, string>
+     */
+    protected array $memo = [];
+
+    /**
+     * The bytes of the masked values remembered.
+     */
+    protected int $memoBytes = 0;
 
     /**
      * Create a new content capture instance.
@@ -179,10 +196,41 @@ class Content
 
     /**
      * Mask the given value, then cut it at the byte cap and mark it with its original size.
+     *
+     * With a mask, each distinct value is masked once until the next flush:
+     * a run sends its whole history again at each step, and masking it all
+     * every time would cost steps times history.
      */
     public function value(string $value): string
     {
-        return $this->cut($this->mask($value));
+        if ($this->maskClass === null || $this->maskClass === '') {
+            return $this->cut($value);
+        }
+
+        $key = hash('xxh128', $value);
+
+        if (isset($this->memo[$key])) {
+            return $this->memo[$key];
+        }
+
+        $masked = $this->cut($this->mask($value));
+
+        if ($this->memoBytes + strlen($masked) > self::MEMO_BYTES) {
+            $this->forget();
+        }
+
+        $this->memoBytes += strlen($masked);
+
+        return $this->memo[$key] = $masked;
+    }
+
+    /**
+     * Forget the values masked so far.
+     */
+    public function forget(): void
+    {
+        $this->memo = [];
+        $this->memoBytes = 0;
     }
 
     /**
