@@ -3,6 +3,7 @@
 namespace Anantrp\Refract\Capture;
 
 use Anantrp\Refract\Support\Guard;
+use Anantrp\Refract\Support\Stats;
 use Closure;
 use Illuminate\Contracts\Events\Dispatcher;
 use Laravel\Ai\Contracts\Agent;
@@ -66,6 +67,7 @@ class RecordAgentRuns
         $this->recorder->flushing(fn () => $this->failingOver = []);
         $this->recorder->flushing(fn () => $this->content->forget());
         $this->recorder->flushing(fn () => $this->budgets = []);
+        $this->recorder->flushing(fn () => Stats::flush());
     }
 
     /**

@@ -53,18 +53,49 @@ class Stats
     protected static array $times = [];
 
     /**
+     * The drops not written to the cache yet, by reason.
+     *
+     * @var array<string, int>
+     */
+    protected static array $pending = [];
+
+    /**
      * Count the given drops for their reason.
      */
     public static function dropped(string $reason, int $count): void
     {
-        $saved = self::cache(function (Cache $cache) use ($reason, $count) {
-            $cache->add(self::DROPPED.$reason, 0);
+        self::$pending[$reason] = (self::$pending[$reason] ?? 0) + $count;
 
-            return $cache->increment(self::DROPPED.$reason, $count) !== false;
-        });
+        self::flush();
+    }
 
-        if ($saved !== true) {
-            self::$dropped[$reason] = (self::$dropped[$reason] ?? 0) + $count;
+    /**
+     * Write the drops counted while the cache could not be used to it, when it can be now.
+     *
+     * Inside an open transaction on a database cache store, drops wait in
+     * the process, so a write never holds a lock the app's transaction
+     * waits on. They are written by the next count or read outside one,
+     * or at the next flush of the recorder.
+     */
+    public static function flush(): void
+    {
+        if (self::$pending === [] || ! Diagnostics::cacheIsSafe()) {
+            return;
+        }
+
+        $pending = self::$pending;
+        self::$pending = [];
+
+        foreach ($pending as $reason => $count) {
+            $saved = self::cache(function (Cache $cache) use ($reason, $count) {
+                $cache->add(self::DROPPED.$reason, 0);
+
+                return $cache->increment(self::DROPPED.$reason, $count) !== false;
+            });
+
+            if ($saved !== true) {
+                self::$dropped[$reason] = (self::$dropped[$reason] ?? 0) + $count;
+            }
         }
     }
 
@@ -91,7 +122,9 @@ class Stats
      */
     public static function read(): array
     {
-        $shared = self::cache(function (Cache $cache) {
+        self::flush();
+
+        $shared = ! Diagnostics::cacheIsSafe() ? null : self::cache(function (Cache $cache) {
             $values = $cache->many([...array_map(fn ($reason) => self::DROPPED.$reason, self::REASONS), self::LAST_SUCCESS, self::LAST_FAILURE]);
 
             return array_map(fn ($value) => is_numeric($value) ? (int) $value : null, $values);
@@ -100,14 +133,14 @@ class Stats
         $dropped = [];
 
         foreach (self::REASONS as $reason) {
-            $count = ($shared[self::DROPPED.$reason] ?? 0) + (self::$dropped[$reason] ?? 0);
+            $count = ($shared[self::DROPPED.$reason] ?? 0) + (self::$dropped[$reason] ?? 0) + (self::$pending[$reason] ?? 0);
 
             if ($count > 0) {
                 $dropped[$reason] = $count;
             }
         }
 
-        foreach (array_diff_key(self::$dropped, $dropped) as $reason => $count) {
+        foreach (array_diff_key([...self::$dropped, ...self::$pending], $dropped) as $reason => $count) {
             $dropped[$reason] = $count;
         }
 
@@ -124,6 +157,7 @@ class Stats
      */
     public static function reset(): void
     {
+        self::$pending = [];
         self::$dropped = [];
         self::$times = [];
     }
@@ -157,6 +191,12 @@ class Stats
     protected static function time(string $key): void
     {
         $now = self::now();
+
+        if (! Diagnostics::cacheIsSafe()) {
+            self::$times[$key] = $now;
+
+            return;
+        }
 
         if (self::cache(fn (Cache $cache) => $cache->forever($key, $now)) !== true) {
             self::$times[$key] = $now;
