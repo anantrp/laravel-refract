@@ -19,8 +19,9 @@ use Throwable;
 /**
  * Says whether traces are being lost and why, and exits 1 when they are.
  *
- * Unhealthy means: the oldest due tree in the store has waited past
- * Drain::STALL_AFTER (no worker drains it), traces were dropped since the
+ * Unhealthy means: the store of the queue drain cannot be read, the
+ * oldest due tree in it has waited past Drain::STALL_AFTER (no worker
+ * drains it), traces were dropped since the
  * last run of this command, or no export has succeeded for 10 minutes
  * since one failed. Every section that fails is shown as unavailable;
  * the command itself never throws.
@@ -117,6 +118,10 @@ class StatusCommand extends Command
         if (is_int($status['oldest_age']) && $status['oldest_age'] > Drain::STALL_AFTER) {
             $minutes = intdiv($status['oldest_age'], 60);
             $problems[] = "The oldest stored tree has waited {$minutes} minutes: no worker is draining the refract queue.";
+        }
+
+        if (isset($status['unavailable']['collector'])) {
+            $problems[] = "The trace store could not be read ({$status['unavailable']['collector']}): pushed traces may be lost.";
         }
 
         $newDrops = $this->newDrops(array_sum($stats['dropped']));

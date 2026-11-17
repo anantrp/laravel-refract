@@ -114,3 +114,13 @@ it('a listener that throws or records another drop does not break or recurse', f
     expect(Stats::read()['dropped'])->toMatchArray(['unavailable' => 1, 'paused' => 1])
         ->and(Stats::read()['dropped']['full'] ?? 0)->toBeLessThanOrEqual(2);
 });
+
+it('a sync export cut short before it sent anything is not a success', function () {
+    $exporter = $this->captureNeutralSpans();
+    $exporter->results = [ExportResult::unfinished(0)];
+
+    app(Drain::class)->send([storedTree('one')]);
+
+    expect(Stats::read()['last_success'])->toBeNull()
+        ->and(Stats::read()['dropped'])->toBe(['unfinished' => 1]);
+});

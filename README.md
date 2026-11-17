@@ -14,7 +14,7 @@ Install it, set a few environment variables, and you are done. There is no API t
 
 Refract uses `open-telemetry/api` only. It does not need the OpenTelemetry SDK.
 
-Laravel Octane is not supported in 0.3.
+Laravel Octane is not supported in 0.4.
 
 ## Installation
 
@@ -23,6 +23,12 @@ composer require anantrp/laravel-refract
 ```
 
 The service provider is discovered automatically. Refract does nothing until you tell it where to send traces. Until then it logs one warning (at most once every 10 minutes) and records nothing.
+
+### Upgrading to 0.4
+
+- **Database collector:** run `php artisan vendor:publish --tag=refract-migrations` and `php artisan migrate` again. 0.4 adds an `attempts` column to `refract_traces`.
+- **Rolling back to 0.3:** 0.4 stores trees gzipped (`gz1:...`), which 0.3 cannot read. If you roll back while trees are still stored, 0.3 drops them, each with a `decode` warning. Let the store drain first.
+- **A collector of your own:** the `Collector` contract adds `attempts(array $ids): array`, and `release()` takes a third argument, `bool $failed = false`. To show in `refract:status`, also implement `ReportsStats`.
 
 ## Quick Start
 
@@ -247,6 +253,7 @@ A listener that throws is ignored, and a drop inside a listener does not fire th
   Collector ............................................................ redis
   Stored ........................................ 12 trees, 48211 of 67108864 bytes
   Oldest due tree ........................................... waited 4 seconds
+  Most failed attempts ......................................................... 0
   Backing off until ......................................................... no
   Dropped ................................................................ none
   Last success ................................................ 2026-11-18 09:41:07
@@ -255,6 +262,7 @@ A listener that throws is ignored, and a drop inside a listener does not fire th
 
 It exits with 1 when traces are being lost:
 
+- the store of the queue drain cannot be read,
 - the oldest due tree in the store has waited over 10 minutes (no worker reads the `refract` queue),
 - traces were dropped since the last time the command ran, or
 - no export has succeeded for 10 minutes since one failed.

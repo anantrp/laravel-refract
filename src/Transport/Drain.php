@@ -115,7 +115,9 @@ class Drain
             return;
         }
 
-        Stats::exported();
+        if ($result->isOk() || $result->done > 0 || $result->rest !== []) {
+            Stats::exported();
+        }
 
         if ($result->isUnfinished()) {
             $dropped = count($trees) - $result->done;

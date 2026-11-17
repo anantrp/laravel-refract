@@ -10,9 +10,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Every dropped run tree is counted by reason in the default cache store and fires an `Anantrp\Refract\Events\TracesDropped` event (`count`, `reason`). The reasons are `paused`, `unavailable`, `rejected`, `unfinished`, `error`, `full`, `transaction`, `encode`, `decode` and `run_cap` (whose count is spans), and `poison`.
 
-- With `REFRACT_DRAIN=queue`, a push warns when the oldest due tree in the store has waited over 10 minutes: no worker reads the `refract` queue. Both collectors implement a new `Anantrp\Refract\Contracts\ReportsStats` contract (trees, bytes, cap, oldest due age, drops at the cap).
+- With `REFRACT_DRAIN=queue`, a push warns when the oldest due tree in the store has waited over 10 minutes: no worker reads the `refract` queue. Both collectors implement a new `Anantrp\Refract\Contracts\ReportsStats` contract (`stats()`: trees, bytes, cap, oldest due age, drops at the cap, most failed attempts).
 
-- `php artisan refract:status` (`--json`) shows the destination, drain, store, drops by reason, pause or backoff, and the last export success and failure. It exits 1 when the store has a tree waiting over 10 minutes, traces were dropped since its last run, or exports have failed for 10 minutes with no success.
+- `php artisan refract:status` (`--json`) shows the destination, drain, store, drops by reason, pause or backoff, and the last export success and failure. It exits 1 when the store cannot be read or has a tree waiting over 10 minutes, traces were dropped since its last run, or exports have failed for 10 minutes with no success.
 
 - `php artisan refract:test` sends one test trace straight to the destination, past the queue drain and any pause, and says whether it arrived, was rejected, or could not be sent.
 

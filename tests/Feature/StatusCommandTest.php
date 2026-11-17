@@ -121,14 +121,15 @@ it('status on the sync drain does not make a collector', function () {
         ->assertExitCode(0);
 });
 
-it('a collector that fails is shown as unavailable, and status still answers', function () {
+it('a collector that fails is shown as unavailable, and status still answers, unhealthy', function () {
     queueDrain();
     app()->instance(Collector::class, $collector = Mockery::mock(Collector::class, ReportsStats::class));
     $collector->shouldReceive('stats')->andThrow(new RuntimeException('down'));
 
     $this->artisan('refract:status')
         ->expectsOutputToContain('unavailable (RuntimeException)')
-        ->assertExitCode(0);
+        ->expectsOutputToContain('The trace store could not be read')
+        ->assertExitCode(1);
 });
 
 it('status warns that counters are per process when the cache is array', function () {
