@@ -36,6 +36,13 @@ class RecordAgentRuns
     protected array $failingOver = [];
 
     /**
+     * The step input each run recorded so far: its bytes, and the messages of its last step. Keyed by invocation id.
+     *
+     * @var array<string, array{bytes: int, messages: int}>
+     */
+    protected array $budgets = [];
+
+    /**
      * Create a new listener instance.
      */
     public function __construct(protected Recorder $recorder, protected RunContext $context, protected Content $content) {}
@@ -58,6 +65,7 @@ class RecordAgentRuns
 
         $this->recorder->flushing(fn () => $this->failingOver = []);
         $this->recorder->flushing(fn () => $this->content->forget());
+        $this->recorder->flushing(fn () => $this->budgets = []);
     }
 
     /**
@@ -182,6 +190,8 @@ class RecordAgentRuns
      */
     public function agentPrompted(AgentPrompted $event): void
     {
+        unset($this->budgets[$event->invocationId]);
+
         $key = $this->runKey($event->invocationId);
         $conversationId = $event->response->conversationId;
 
@@ -204,6 +214,8 @@ class RecordAgentRuns
      */
     public function agentFailed(AgentFailed $event): void
     {
+        unset($this->budgets[$event->invocationId]);
+
         $this->recorder->abandonChildren($this->runKey($event->invocationId));
         $this->recorder->end($this->runKey($event->invocationId), 'error', $event->exception::class);
     }
@@ -229,7 +241,45 @@ class RecordAgentRuns
             'model' => $event->model,
             'step' => $event->stepNumber,
             'final_step' => $event->isFinalStep,
-        ], content: $this->content->stepInput($event->messages));
+        ], content: $this->stepInput($event));
+    }
+
+    /**
+     * Get the input of a step, within its run's budget.
+     *
+     * A run sends its whole history again at each step. Once the run has
+     * recorded RUN_BUDGET bytes of step input, a step records only the
+     * messages new since the step before, after a marker, and the run is
+     * marked content_truncated. Step 1 is always recorded whole.
+     *
+     * @return array<string, mixed>
+     */
+    protected function stepInput(StartingStep $event): array
+    {
+        $messages = array_values($event->messages);
+        $budget = $this->budgets[$event->invocationId] ?? ['bytes' => 0, 'messages' => 0];
+        $this->budgets[$event->invocationId] = ['bytes' => $budget['bytes'], 'messages' => count($messages)];
+
+        if ($budget['bytes'] < Content::RUN_BUDGET || $budget['messages'] === 0) {
+            $content = $this->content->stepInput($messages);
+
+            $this->budgets[$event->invocationId]['bytes'] += strlen((string) json_encode($content['input'] ?? []));
+
+            return $content;
+        }
+
+        $content = $this->content->stepInput(array_slice($messages, $budget['messages']));
+
+        if (! isset($content['input']) || ! is_array($content['input'])) {
+            return $content;
+        }
+
+        $this->recorder->update($this->runKey($event->invocationId), ['content_truncated' => true]);
+
+        return ['input' => [
+            ['role' => 'system', 'parts' => [['type' => 'text', 'content' => "[{$budget['messages']} earlier messages omitted, see step 1]"]]],
+            ...$content['input'],
+        ]];
     }
 
     public function stepCompleted(StepCompleted $event): void

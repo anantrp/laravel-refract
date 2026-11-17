@@ -21,6 +21,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Http\Client\Request;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\LazyCollection;
@@ -29,11 +30,15 @@ use Laravel\Ai\Approvals\PendingApproval;
 use Laravel\Ai\Contracts\Files\HasContent;
 use Laravel\Ai\Contracts\Providers\TextProvider;
 use Laravel\Ai\Events\AddingFileToStore;
+use Laravel\Ai\Events\AgentPrompted;
 use Laravel\Ai\Events\CreatingStore;
 use Laravel\Ai\Events\FileAddedToStore;
 use Laravel\Ai\Events\FileDeleted;
 use Laravel\Ai\Events\FileRemovedFromStore;
+use Laravel\Ai\Events\PromptingAgent;
 use Laravel\Ai\Events\RemovingFileFromStore;
+use Laravel\Ai\Events\StartingStep;
+use Laravel\Ai\Events\StepCompleted;
 use Laravel\Ai\Events\StoreCreated;
 use Laravel\Ai\Exceptions\RateLimitedException;
 use Laravel\Ai\Files\Audio;
@@ -1056,4 +1061,157 @@ it('without a mask nothing is remembered, and a value over the cap is still cut'
     $content = new Content(app(), enabled: true);
 
     expect($content->value(str_repeat('a', Content::MAX_BYTES + 1)))->toEndWith('[cut, original size 131073 bytes]');
+});
+
+/*
+ * A run's step inputs are kept under a budget: once a run has recorded
+ * RUN_BUDGET bytes of step input, each later step records only the
+ * messages that are new since the step before, after one marker.
+ */
+
+/**
+ * Replay a run under the given invocation id, one step per history, from the events of one real run.
+ * The given callback runs after step 3, while the run is still open.
+ *
+ * @param  list<list<Message>>  $histories
+ */
+function replayRun(string $id, array $histories, ?Closure $afterStep3 = null): void
+{
+    static $events = null;
+
+    if ($events === null) {
+        $events = [];
+        Event::listen('Laravel\Ai\Events\*', function (string $name, array $payload) use (&$events) {
+            $events[$payload[0]::class] = $payload[0];
+        });
+        TimeAgent::fake(['It is 12:00.']);
+        TimeAgent::make()->prompt('What time is it?');
+        app('events')->forget('Laravel\Ai\Events\*');
+        app(Recorder::class)->flush();
+    }
+
+    $dispatch = function (object $event, array $changes = []) use ($id) {
+        $copy = clone $event;
+        $copy->invocationId = $id;
+
+        foreach ($changes as $property => $value) {
+            $copy->{$property} = $value;
+        }
+
+        app('events')->dispatch($copy);
+    };
+
+    $dispatch($events[PromptingAgent::class]);
+
+    foreach ($histories as $i => $history) {
+        $dispatch($events[StartingStep::class], ['stepNumber' => $i + 1, 'messages' => $history]);
+        $dispatch($events[StepCompleted::class], ['stepNumber' => $i + 1]);
+
+        if ($i === 2 && $afterStep3 !== null) {
+            $afterStep3();
+        }
+    }
+
+    $dispatch($events[AgentPrompted::class]);
+}
+
+/**
+ * Get histories that grow by the given messages of the given bytes at each step, each message distinct.
+ *
+ * @return list<list<Message>>
+ */
+function growingHistories(int $steps, int $perStep, int $bytes, string $run = 'a'): array
+{
+    $histories = [];
+    $history = [];
+
+    foreach (range(1, $steps) as $step) {
+        foreach (range(1, $perStep) as $message) {
+            $history[] = new UserMessage(str_pad("{$run} step {$step} message {$message} ", $bytes, chr(ord('a') + $step)));
+        }
+
+        $histories[] = $history;
+    }
+
+    return $histories;
+}
+
+/**
+ * Get the recorded step inputs of the run with the given invocation id, in step order.
+ *
+ * @param  list<array<string, mixed>>  $spans
+ * @return list<list<array<string, mixed>>>
+ */
+function stepInputs(array $spans, string $id): array
+{
+    $run = array_values(array_filter($spans, fn (array $span) => ($span['call']['invocation_id'] ?? null) === $id))[0];
+    $steps = array_values(array_filter(ofKind($spans, 'chat'), fn (array $span) => $span['parent_span_id'] === $run['span_id']));
+    usort($steps, fn (array $a, array $b) => $a['call']['step'] <=> $b['call']['step']);
+
+    return array_map(fn (array $span) => $span['content']['input'] ?? [], $steps);
+}
+
+it('a run over the budget stays under it, marks content_truncated, and keeps step 1 whole', function () {
+    $this->environmentConfig = contentConfig(['refract.capture.content' => true]);
+    $memory = $this->captureNeutralSpans();
+
+    // 5 messages of 120 KB a step: 600 KB new each step, under the 128 KB cut.
+    replayRun('big', growingHistories(6, 5, 120_000));
+    app(Recorder::class)->flush();
+
+    $inputs = stepInputs($memory->spans, 'big');
+    [$run] = array_values(array_filter(ofKind($memory->spans, 'invoke_agent'), fn (array $span) => $span['call']['invocation_id'] === 'big'));
+
+    // Steps 1-3 record 600 KB + 1.2 MB + 1.8 MB: past 2 MB, so step 4 on is cut.
+    expect(array_map('count', $inputs))->toBe([5, 10, 15, 6, 6, 6])
+        ->and($inputs[3][0])->toBe(['role' => 'system', 'parts' => [['type' => 'text', 'content' => '[15 earlier messages omitted, see step 1]']]])
+        ->and($inputs[4][0]['parts'][0]['content'])->toBe('[20 earlier messages omitted, see step 1]')
+        ->and($inputs[3][1]['parts'][0]['content'])->toStartWith('a step 4 message 1 ')
+        ->and($run['call'])->toHaveKey('content_truncated', true);
+
+    $full = array_sum(array_map(fn (array $input) => strlen((string) json_encode($input)), array_slice($inputs, 0, 3)));
+
+    expect($full)->toBeLessThan(Content::RUN_BUDGET + strlen((string) json_encode($inputs[2])));
+});
+
+it('a run whose first step is over budget keeps step 1 whole', function () {
+    $this->environmentConfig = contentConfig(['refract.capture.content' => true]);
+    $memory = $this->captureNeutralSpans();
+
+    // 20 messages of 120 KB: 2.4 MB at step 1, as a long conversation loaded from the store.
+    replayRun('loaded', growingHistories(2, 20, 120_000));
+    app(Recorder::class)->flush();
+
+    $inputs = stepInputs($memory->spans, 'loaded');
+
+    expect(array_map('count', $inputs))->toBe([20, 21])
+        ->and($inputs[1][0]['parts'][0]['content'])->toBe('[20 earlier messages omitted, see step 1]');
+});
+
+it('a run under the budget is recorded exactly as before', function () {
+    $this->environmentConfig = contentConfig(['refract.capture.content' => true]);
+    $memory = $this->captureNeutralSpans();
+
+    $histories = growingHistories(4, 2, 1_000);
+    replayRun('small', $histories);
+    app(Recorder::class)->flush();
+
+    $content = app(Content::class);
+
+    $run = array_values(array_filter(ofKind($memory->spans, 'invoke_agent'), fn (array $span) => $span['call']['invocation_id'] === 'small'))[0];
+
+    expect(stepInputs($memory->spans, 'small'))->toBe(array_map(fn (array $history) => $content->stepInput($history)['input'], $histories))
+        ->and($run['call'])->not->toHaveKey('content_truncated');
+});
+
+it("a sub-agent's budget is its own", function () {
+    $this->environmentConfig = contentConfig(['refract.capture.content' => true]);
+    $memory = $this->captureNeutralSpans();
+
+    // A run started once the outer run is over budget, while it is open, is recorded whole.
+    replayRun('outer', growingHistories(4, 5, 120_000, 'outer'), fn () => replayRun('inner', growingHistories(3, 2, 1_000, 'inner')));
+    app(Recorder::class)->flush();
+
+    expect(array_map('count', stepInputs($memory->spans, 'outer')))->toBe([5, 10, 15, 6])
+        ->and(array_map('count', stepInputs($memory->spans, 'inner')))->toBe([2, 4, 6]);
 });

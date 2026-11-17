@@ -102,6 +102,7 @@ invoke_agent SupportAgent
 - **Tool approvals.** A run that pauses for approval has a `laravel.ai.tool_approval.requested` event per tool call, with the tool name and call id. A run resumed from approvals has a `laravel.ai.tool_approval.resolved` event per decision, with the call id, `laravel.ai.tool_approval.action` (`approve`, `reject` or `edit`) and `laravel.ai.tool_approval.approved`. The tool name is there when the call is in the messages the resumed prompt was given; a conversation the SDK loads from its store is not read. A decision for every other call has the call id `*`. A run resumed from approvals records no prompt, since none was sent.
 - **Streams.** A stream read to the end gives the same tree as `prompt()`. A stream read again after it stopped is a separate run.
 - **Abandoned spans.** A span still open when Refract exports (for example, a stream the app stopped reading) is closed as abandoned. It has no OTel status and the attribute `laravel.ai.abandoned=true`. Langfuse shows it as a warning with the message `abandoned`.
+- **Content over budget.** A run whose step inputs passed 2 MB has `laravel.ai.content_truncated=true`. See [Content Capture](#content-capture).
 - **Truncated runs.** One run records at most 1,000 spans, sub-agent runs included. Past that, its new spans are dropped with one warning, and the top-level run span gets `laravel.ai.truncated=true`. Other runs are not affected.
 - **Errors.** A run, model call or tool that throws gets status `error` and the attribute `error.type`, both the exception class. Your app gets the same exception. The exception message is never recorded.
 
@@ -318,6 +319,7 @@ How values are recorded:
 - **Byte cap.** Each value is cut at 128 KB, at a character border, and marked with its original size: `…[cut, original size N bytes]`.
 - **No files or media.** Attachments and files are never recorded, with capture on or off: no bytes, no name, no URL, no size. A file inside a value, for example a tool that returns an image, becomes `[file]`.
 - **Tool results in step history.** In a `chat` span's input messages, a tool result is only a reference (tool name and call id). The result itself is on the `execute_tool` span.
+- **Budget per run.** A run sends its whole history to the model again at each step, so a long run would record its history once per step. Once a run's `chat` inputs reach 2 MB, each later step records only the messages new since the step before, after one message `[N earlier messages omitted, see step 1]`, and the run span gets `laravel.ai.content_truncated=true`. The first step is always recorded whole. The run's prompt and output, the steps' outputs, and tool arguments and results are never cut this way.
 - **No built-in redaction.** Refract does not look for secrets. Use a `mask`.
 
 ### Tool Results

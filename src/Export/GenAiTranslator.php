@@ -9,7 +9,8 @@ use JsonException;
  *
  * A span closed at flush without its end event (status "abandoned") has
  * no OTel status and the laravel.ai.abandoned attribute. A run that
- * reached the per-run span cap has laravel.ai.truncated. A failed span
+ * reached the per-run span cap has laravel.ai.truncated, and one whose
+ * step inputs passed the content budget laravel.ai.content_truncated. A failed span
  * (status "error") has the error status and error.type, both the
  * exception class.
  *
@@ -85,6 +86,7 @@ class GenAiTranslator
             ...$this->context($context),
             'laravel.ai.abandoned' => $abandoned ?: null,
             'laravel.ai.truncated' => ($call['truncated'] ?? null) === true ?: null,
+            'laravel.ai.content_truncated' => ($call['content_truncated'] ?? null) === true ?: null,
             // The exception class, per the OTel conventions; "_OTHER" when it is not known.
             'error.type' => $error ? (is_string($message) && $message !== '' ? $message : self::OTHER_ERROR) : null,
         ];

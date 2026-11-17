@@ -16,6 +16,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - With a content mask, each distinct value is masked once per request or job, not once per step it appears in: a 10-step run no longer masks its history 10 times. The mask should give the same output for the same input.
 
+- With content capture on, a run records at most about 2 MB of step input in full. Past that, each step records only its new messages, after one `[N earlier messages omitted, see step 1]` message, and the run span gets `laravel.ai.content_truncated=true`. Step 1, the run's prompt and output, step outputs and tool content are never cut this way. A run under the budget records exactly what it did before.
+
 ### Removed
 
 - `DatabaseCollector::dropped()`. The drop count is now kept for every process, in the default cache store.

@@ -80,6 +80,11 @@ class Content
     public const MEMO_BYTES = 4_194_304;
 
     /**
+     * The bytes of step input one run records in full. Past it, each step records only its new messages.
+     */
+    public const RUN_BUDGET = 2_097_152;
+
+    /**
      * The JSON flags tool arguments and results are encoded with, the same the SDK uses.
      */
     protected const JSON_FLAGS = JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE | JSON_PRESERVE_ZERO_FRACTION;
