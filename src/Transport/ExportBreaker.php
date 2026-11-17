@@ -91,7 +91,9 @@ class ExportBreaker
             return false;
         }
 
-        return $this->cache(fn (Cache $cache) => $cache->add(self::PROBE_KEY, true, self::PROBE_SECONDS)) === false;
+        // A claim that fails while no other claim is there is a cache that cannot
+        // write: this process probes.
+        return $this->cache(fn (Cache $cache) => ! $cache->add(self::PROBE_KEY, true, self::PROBE_SECONDS) && $cache->get(self::PROBE_KEY) !== null) === true;
     }
 
     /**
@@ -142,7 +144,7 @@ class ExportBreaker
     }
 
     /**
-     * Get the pause in the cache, and keep a copy of it; or the last pause this process saw, while the cache fails or when the cache could not save it.
+     * Get the pause in the cache, and keep a copy of it; or this process's own pause, while the cache fails, or when the cache could not save it and holds nothing later.
      *
      * @return array{until: int, failures: int}
      */
@@ -153,12 +155,15 @@ class ExportBreaker
         if ($read !== null) {
             $shared = $read['shared'];
 
-            if (is_array($shared) && is_int($shared['until'] ?? null) && is_int($shared['failures'] ?? null)) {
-                self::$state = ['until' => $shared['until'], 'failures' => $shared['failures']];
+            $shared = is_array($shared) && is_int($shared['until'] ?? null) && is_int($shared['failures'] ?? null)
+                ? ['until' => $shared['until'], 'failures' => $shared['failures']]
+                : null;
+
+            // A pause the cache never took gives way only to a later one. Otherwise
+            // the cache is right: a pause missing from it was closed by a probe.
+            if (! self::$unsaved || ($shared !== null && $shared['until'] > (self::$state['until'] ?? 0))) {
+                self::$state = $shared;
                 self::$unsaved = false;
-            } elseif (! self::$unsaved) {
-                // The cache had the pause, and another process's probe closed it.
-                self::$state = null;
             }
         }
 

@@ -174,26 +174,68 @@ it('when another process closes the breaker, this process resumes at once instea
     Http::assertSentCount(2);
 });
 
-it('when the cache reads but cannot write (a full disk, a full Redis), the process keeps its own pause, and probes it itself', function (Closure $put) {
-    bootExport();
-    $cache = Mockery::mock(Cache::class);
-    $cache->shouldReceive('get')->andReturnNull();
-    $cache->shouldReceive('put')->andReturnUsing($put);
-    $cache->shouldReceive('add')->andReturnFalse();
-    $cache->shouldReceive('forget')->andReturnFalse();
-    app()->instance(Cache::class, $cache);
+/*
+ * Every way the cache can hold the pause, crossed with every way saving to
+ * it can go. Whatever the cache does, a failed export pauses this process
+ * for the right time, it sends nothing during the pause, and one export
+ * probes when it ends.
+ */
+it('a failed export pauses this process for the right time, whatever the cache holds and whether it can save', function (string $holds, string $save, int $pause) {
+    $log = bootExport();
     fakeDestination('network');
 
+    $store = $holds === 'an old pause' ? ['refract:sync:breaker' => ['until' => now()->getTimestamp() - 10, 'failures' => 1]] : [];
+    $fail = fn () => $save === 'throws' ? throw new RuntimeException('OOM command not allowed') : false;
+
+    $cache = Mockery::mock(Cache::class);
+    $cache->shouldReceive('get')->andReturnUsing(function ($key) use (&$store, $holds) {
+        return $holds === 'throws' ? throw new RuntimeException('cache is down') : ($store[$key] ?? null);
+    });
+    $cache->shouldReceive('put')->andReturnUsing(function ($key, $value) use (&$store, $save, $fail) {
+        return $save === 'works' ? (bool) ($store[$key] = $value) : $fail();
+    });
+    $cache->shouldReceive('add')->andReturnUsing(function ($key, $value) use (&$store, $save, $fail) {
+        if ($save !== 'works') {
+            return $fail();
+        }
+
+        if (isset($store[$key])) {
+            return false;
+        }
+
+        return (bool) ($store[$key] = $value);
+    });
+    $cache->shouldReceive('forget')->andReturnUsing(function ($key) use (&$store, $save, $fail) {
+        if ($save !== 'works') {
+            return $fail();
+        }
+
+        unset($store[$key]);
+
+        return true;
+    });
+    app()->instance(Cache::class, $cache);
+
     sendSpan();
+    expect($log->warnings[0])->toContain("pause for {$pause} seconds");
+
+    sendSpan();
+    $this->travel($pause - 1)->seconds();
     sendSpan();
     Http::assertSentCount(1);
 
-    $this->travel(31)->seconds();
+    $this->travel(2)->seconds();
     sendSpan();
-    sendSpan();
-
     Http::assertSentCount(2);
 })->with([
-    'put returns false' => [fn () => false],
-    'put throws' => [fn () => throw new RuntimeException('OOM command not allowed')],
+    // [what the cache holds, how saving goes, the pause]
+    ['nothing', 'works', 30],
+    ['nothing', 'returns false', 30],
+    ['nothing', 'throws', 30],
+    ['an old pause', 'works', 60],
+    ['an old pause', 'returns false', 60],
+    ['an old pause', 'throws', 60],
+    ['throws', 'works', 30],
+    ['throws', 'returns false', 30],
+    ['throws', 'throws', 30],
 ]);
