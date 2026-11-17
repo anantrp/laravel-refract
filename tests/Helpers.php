@@ -4,6 +4,7 @@ use Anantrp\Refract\Contracts\Collector;
 use Anantrp\Refract\Support\Diagnostics;
 use Anantrp\Refract\Support\Stats;
 use Anantrp\Refract\Tests\Support\WarningLog;
+use Anantrp\Refract\Transport\Collectors\TreePayload;
 use Anantrp\Refract\Transport\Drain;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
@@ -46,7 +47,7 @@ function storedNames(array $trees): array
  */
 function storedBytes(array $tree): int
 {
-    return strlen((string) json_encode($tree));
+    return strlen((string) TreePayload::encode($tree));
 }
 
 /**
@@ -82,12 +83,15 @@ function itBehavesLikeAStoredCollector(Closure $make): void
         $collector = $make(64 * 1024 * 1024);
 
         foreach (['one', 'two', 'three'] as $name) {
-            $collector->push(storedTree($name, str_repeat('x', 1_000)));
+            // Text that does not compress, so each tree stores at about the same size.
+            $collector->push(storedTree($name, bin2hex(random_bytes(500))));
         }
 
-        // Each tree is over 1,000 bytes: the second takes the claim past 1,500.
-        expect(storedNames($collector->claim(1_500, 60)))->toBe(['one', 'two'])
-            ->and(storedNames($collector->claim(1_500, 60)))->toBe(['three']);
+        $limit = intdiv(3 * storedBytes(storedTree('one', bin2hex(random_bytes(500)))), 2);
+
+        // The second tree takes the claim past one and a half trees.
+        expect(storedNames($collector->claim($limit, 60)))->toBe(['one', 'two'])
+            ->and(storedNames($collector->claim($limit, 60)))->toBe(['three']);
     });
 
     it('a tree whose lease ran out is claimed again, as a crashed worker would leave it', function () use ($make) {

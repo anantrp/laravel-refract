@@ -63,9 +63,9 @@ class DrainTraces implements ShouldBeUniqueUntilProcessing, ShouldQueue
     public const CONNECT_TIMEOUT = 5;
 
     /**
-     * The most bytes of stored trees one claim takes, about one request.
+     * The most bytes of stored trees one claim takes. Trees are stored gzipped: for text, about one 4 MB request of JSON.
      */
-    public const CLAIM_BYTES = 4_000_000;
+    public const CLAIM_BYTES = 1_000_000;
 
     /**
      * The seconds a claim holds its trees: twice the job's timeout, so a drain still running never loses its trees to another.

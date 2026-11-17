@@ -18,6 +18,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - With content capture on, a run records at most about 2 MB of step input in full. Past that, each step records only its new messages, after one `[N earlier messages omitted, see step 1]` message, and the run span gets `laravel.ai.content_truncated=true`. Step 1, the run's prompt and output, step outputs and tool content are never cut this way. A run under the budget records exactly what it did before.
 
+- The queue drain's collectors store trees gzipped (`gz1:` and base64, so still plain text in the database), so the 64 MB cap holds several times more traces. Trees stored by 0.3 still read. A drain claims 1 MB of stored trees at a time, about one 4 MB request of JSON. Requires `ext-zlib`. **Upgrading:** a tree stored by 0.4 cannot be read by 0.3, so rolling back with trees still stored drops them, each with a `decode` warning.
+
 ### Removed
 
 - `DatabaseCollector::dropped()`. The drop count is now kept for every process, in the default cache store.
