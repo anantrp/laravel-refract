@@ -14,7 +14,7 @@ Install it, set a few environment variables, and you are done. There is no API t
 
 Refract uses `open-telemetry/api` only. It does not need the OpenTelemetry SDK.
 
-Laravel Octane is not supported in 0.2.
+Laravel Octane is not supported in 0.3.
 
 ## Installation
 
