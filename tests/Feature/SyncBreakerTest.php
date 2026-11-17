@@ -6,6 +6,7 @@ use Illuminate\Contracts\Cache\Repository as Cache;
 use Illuminate\Http\Client\Events\RequestSending;
 use Illuminate\Http\Client\Factory as HttpFactory;
 use Illuminate\Http\Client\Request;
+use Illuminate\Support\Facades\Cache as CacheFacade;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
 
@@ -93,7 +94,7 @@ it('the pause is shared through the cache, so a fresh process (a new FPM request
 it('when the cache fails, the pause is kept in the process and the export is unaffected', function () {
     bootExport();
     $cache = Mockery::mock(Cache::class);
-    $cache->shouldReceive('get', 'put', 'forget')->andThrow(new RuntimeException('cache is down'));
+    $cache->shouldReceive('get', 'put', 'add', 'forget')->andThrow(new RuntimeException('cache is down'));
     app()->instance(Cache::class, $cache);
     fakeDestination('network');
 
@@ -119,4 +120,56 @@ it('Refract sends through its own HTTP client: the app\'s fakes, global middlewa
     $refract->assertSentCount(1);
     $refract->assertSent(fn (Request $request) => ! $request->hasHeader('X-App-Secret'));
     Http::assertNothingSent();
+});
+
+it('when the pause ends, only the process that claims the probe tries the destination; the others keep dropping', function () {
+    $log = bootExport();
+    fakeDestination('network');
+
+    sendSpan();
+    $this->travel(31)->seconds();
+
+    // Another process (a concurrent FPM request) claimed the probe and is still waiting on it.
+    CacheFacade::put('refract:sync:probe', true, 10);
+
+    sendSpan();
+    Http::assertSentCount(1);
+    expect($log->warnings[1])->toContain('dropped without trying');
+
+    // That process died before answering: its claim expires, and the next export probes.
+    $this->travel(11)->seconds();
+    sendSpan();
+
+    Http::assertSentCount(2);
+});
+
+it('a process keeps the pause it read from the cache, so a cache that fails during the pause does not let exports through', function () {
+    bootExport();
+    fakeDestination('network');
+
+    sendSpan();
+    ExportBreaker::reset();
+    sendSpan(); // reads the pause from the cache
+
+    $cache = Mockery::mock(Cache::class);
+    $cache->shouldReceive('get', 'put', 'add', 'forget')->andThrow(new RuntimeException('cache is down'));
+    app()->instance(Cache::class, $cache);
+
+    sendSpan();
+
+    Http::assertSentCount(1);
+});
+
+it('when another process closes the breaker, this process resumes at once instead of waiting out its own pause', function () {
+    bootExport();
+    Http::fake(['*' => Http::sequence()->pushFailedConnection()->whenEmpty(Http::response('', 200))]);
+
+    sendSpan();
+
+    // Another process probed, the destination answered, and the shared pause was cleared.
+    CacheFacade::forget('refract:sync:breaker');
+
+    sendSpan();
+
+    Http::assertSentCount(2);
 });

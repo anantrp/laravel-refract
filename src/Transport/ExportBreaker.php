@@ -12,13 +12,15 @@ use Throwable;
  *
  * After a failed export (a network error, a timeout, 408, 429 or 5xx),
  * exports are paused for FIRST_PAUSE seconds, doubling on each failure
- * in a row up to MAX_PAUSE. Once the pause is over, the next export is
- * tried: an answer closes the breaker, another failure pauses again.
+ * in a row up to MAX_PAUSE. Once the pause is over, one export probes
+ * the destination: an answer closes the breaker, another failure pauses
+ * again. Exports in other processes keep dropping while it probes.
  *
- * The pause is kept in the process, for queue workers and long commands,
- * and in the app's default cache, for PHP-FPM, where each request starts
- * with nothing. A cache that fails leaves the process state alone in
- * charge; it never fails the export.
+ * The pause lives in the app's default cache, so every process (each
+ * PHP-FPM request, each queue worker) sees the same one, and a probe in
+ * one process closes it for all. Each process keeps a copy of the last
+ * pause it saw, used only while the cache fails; a failing cache never
+ * fails the export.
  */
 class ExportBreaker
 {
@@ -40,7 +42,17 @@ class ExportBreaker
     protected const KEY = 'refract:sync:breaker';
 
     /**
-     * The pause known to this process, or null when exports are not paused.
+     * The cache key a process claims to probe the destination once the pause is over.
+     */
+    protected const PROBE_KEY = 'refract:sync:probe';
+
+    /**
+     * The seconds a claim to probe lasts: longer than an export, so a process that dies while probing does not block exports for long.
+     */
+    protected const PROBE_SECONDS = 10;
+
+    /**
+     * The last pause this process saw, or null when exports are not paused.
      *
      * @var array{until: int, failures: int}|null
      */
@@ -56,7 +68,20 @@ class ExportBreaker
      */
     public function isOpen(): bool
     {
-        return $this->state()['until'] > $this->currentTime();
+        $until = $this->state()['until'];
+
+        if ($until === 0) {
+            return false;
+        }
+
+        if ($until > $this->currentTime()) {
+            return true;
+        }
+
+        // The pause is over: one export probes. A cache that fails cannot share
+        // the claim, and lets the export through, as exports in one process
+        // run one at a time.
+        return $this->cache(fn (Cache $cache) => $cache->add(self::PROBE_KEY, true, self::PROBE_SECONDS)) === false;
     }
 
     /**
@@ -72,7 +97,10 @@ class ExportBreaker
         self::$state = $state;
 
         // Kept past the pause, so a probe that fails again doubles it.
-        $this->cache(fn (Cache $cache) => $cache->put(self::KEY, $state, $pause + self::MAX_PAUSE));
+        $this->cache(function (Cache $cache) use ($state, $pause) {
+            $cache->put(self::KEY, $state, $pause + self::MAX_PAUSE);
+            $cache->forget(self::PROBE_KEY);
+        });
 
         return $pause;
     }
@@ -88,7 +116,10 @@ class ExportBreaker
 
         self::$state = null;
 
-        $this->cache(fn (Cache $cache) => $cache->forget(self::KEY));
+        $this->cache(function (Cache $cache) {
+            $cache->forget(self::KEY);
+            $cache->forget(self::PROBE_KEY);
+        });
     }
 
     /**
@@ -100,20 +131,23 @@ class ExportBreaker
     }
 
     /**
-     * Get the latest pause known to this process or the cache.
+     * Get the pause in the cache, and keep a copy of it; or, while the cache fails, the last pause this process saw.
      *
      * @return array{until: int, failures: int}
      */
     protected function state(): array
     {
-        $local = self::$state ?? ['until' => 0, 'failures' => 0];
-        $shared = $this->cache(fn (Cache $cache) => $cache->get(self::KEY));
+        $read = $this->cache(fn (Cache $cache) => ['shared' => $cache->get(self::KEY)]);
 
-        if (! is_array($shared) || ! is_int($shared['until'] ?? null) || ! is_int($shared['failures'] ?? null)) {
-            return $local;
+        if ($read !== null) {
+            $shared = $read['shared'];
+
+            self::$state = is_array($shared) && is_int($shared['until'] ?? null) && is_int($shared['failures'] ?? null)
+                ? ['until' => $shared['until'], 'failures' => $shared['failures']]
+                : null;
         }
 
-        return $shared['until'] > $local['until'] ? ['until' => $shared['until'], 'failures' => $shared['failures']] : $local;
+        return self::$state ?? ['until' => 0, 'failures' => 0];
     }
 
     /**
