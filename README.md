@@ -22,7 +22,7 @@ Laravel Octane is not supported in 0.3.
 composer require anantrp/laravel-refract
 ```
 
-The service provider is discovered automatically. Refract does nothing until you tell it where to send traces. Until then it logs one warning per process and records nothing.
+The service provider is discovered automatically. Refract does nothing until you tell it where to send traces. Until then it logs one warning (at most once every 10 minutes) and records nothing.
 
 ## Quick Start
 
@@ -433,7 +433,7 @@ Context::add('trigger', 'schedule');
 - **Refract never breaks your app.** Every listener and lifecycle hook is guarded. A failure inside Refract logs one warning and the run goes on. Your app's own exceptions pass through unchanged.
 - **No extra calls.** Refract never calls agent methods that run your code (`instructions()`, `tools()`) and runs no queries while a run records. The only queries are the database collector's, after the response. A run is named without calling the agent's `name()`. To name a tool span, Refract reads the tool name the way the SDK does. This calls `name()` once per tool call, on a tool or on an agent used as a tool. The SDK makes the same call.
 - **Bounded retries.** With `REFRACT_DRAIN=queue`, the drain job never throws, so nothing reaches `failed_jobs`, and the store never grows past its cap.
-- **Warnings.** Each warning is logged at the `warning` level, prefixed `[refract]`, once per kind per process. After 10 different warnings, Refract stays silent.
+- **Warnings.** Each warning is logged at the `warning` level, prefixed `[refract]`, at most once per kind every 10 minutes, across every process that shares your default cache store. The next one ends with how many were held back meanwhile, as `(42 more since the last warning)`. So a long outage keeps reminding you without flooding your logs. If the cache fails, each process keeps its own 10 minutes. "One warning" elsewhere in this README means one per kind in such a window.
 
 ### Bounded Memory
 

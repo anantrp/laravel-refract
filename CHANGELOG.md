@@ -10,6 +10,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Every dropped run tree is counted by reason in the default cache store and fires an `Anantrp\Refract\Events\TracesDropped` event (`count`, `reason`). The reasons are `paused`, `unavailable`, `rejected`, `unfinished`, `error`, `full`, `transaction`, `encode`, `decode` and `run_cap` (whose count is spans).
 
+### Changed
+
+- A warning is logged at most once per kind every 10 minutes, shared through the default cache store, and the next one says how many were held back (`(42 more since the last warning)`). Before, each process logged a kind once, ever, and stopped after 10 kinds: a long-lived queue worker went quiet during a long outage.
+
 ### Removed
 
 - `DatabaseCollector::dropped()`. The drop count is now kept for every process, in the default cache store.
