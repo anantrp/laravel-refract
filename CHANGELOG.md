@@ -14,6 +14,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - `php artisan refract:status` (`--json`) shows the destination, drain, store, drops by reason, pause or backoff, and the last export success and failure. It exits 1 when the store has a tree waiting over 10 minutes, traces were dropped since its last run, or exports have failed for 10 minutes with no success.
 
+- `php artisan refract:test` sends one test trace straight to the destination, past the queue drain and any pause, and says whether it arrived, was rejected, or could not be sent.
+
 ### Changed
 
 - A warning is logged at most once per kind every 10 minutes, shared through the default cache store, and the next one says how many were held back (`(42 more since the last warning)`). Before, each process logged a kind once, ever, and stopped after 10 kinds: a long-lived queue worker went quiet during a long outage.

@@ -8,6 +8,7 @@ use Anantrp\Refract\Capture\RecordAgentRuns;
 use Anantrp\Refract\Capture\Recorder;
 use Anantrp\Refract\Capture\RunContext;
 use Anantrp\Refract\Console\StatusCommand;
+use Anantrp\Refract\Console\TestCommand;
 use Anantrp\Refract\Contracts\Collector;
 use Anantrp\Refract\Contracts\Exporter;
 use Anantrp\Refract\Export\GenAiTranslator;
@@ -150,7 +151,7 @@ class RefractServiceProvider extends ServiceProvider
 
             $this->publishesMigrations([__DIR__.'/../database/migrations' => database_path('migrations')], 'refract-migrations');
 
-            $this->commands([StatusCommand::class]);
+            $this->commands([StatusCommand::class, TestCommand::class]);
         }
 
         // A destination that cannot send has warned once: Refract stays off, as if disabled.

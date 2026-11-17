@@ -46,6 +46,8 @@ REFRACT_OTLP_HEADERS="x-api-key=your-key"
 
 `otlp` is the default destination, so the first line is optional. The endpoint is the full URL traces are posted to.
 
+Run `php artisan refract:test` to check the destination. It sends one test trace named `refract:test` and prints its trace id, or says whether the destination rejected it (check the keys and endpoint) or could not be reached.
+
 Run any agent. Each run is recorded as a tree of spans. A run starts a new trace, or joins your app's active OpenTelemetry trace when there is one. A sub-agent run nests inside the run that called it.
 
 Traces are sent from the process that ran the agent, after the response. To send them from your queue workers instead, with retries, see [Collecting and Draining](#collecting-and-draining).
