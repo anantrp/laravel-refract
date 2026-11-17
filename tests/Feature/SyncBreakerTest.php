@@ -173,3 +173,27 @@ it('when another process closes the breaker, this process resumes at once instea
 
     Http::assertSentCount(2);
 });
+
+it('when the cache reads but cannot write (a full disk, a full Redis), the process keeps its own pause, and probes it itself', function (Closure $put) {
+    bootExport();
+    $cache = Mockery::mock(Cache::class);
+    $cache->shouldReceive('get')->andReturnNull();
+    $cache->shouldReceive('put')->andReturnUsing($put);
+    $cache->shouldReceive('add')->andReturnFalse();
+    $cache->shouldReceive('forget')->andReturnFalse();
+    app()->instance(Cache::class, $cache);
+    fakeDestination('network');
+
+    sendSpan();
+    sendSpan();
+    Http::assertSentCount(1);
+
+    $this->travel(31)->seconds();
+    sendSpan();
+    sendSpan();
+
+    Http::assertSentCount(2);
+})->with([
+    'put returns false' => [fn () => false],
+    'put throws' => [fn () => throw new RuntimeException('OOM command not allowed')],
+]);

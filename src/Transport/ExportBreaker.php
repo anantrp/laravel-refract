@@ -19,8 +19,9 @@ use Throwable;
  * The pause lives in the app's default cache, so every process (each
  * PHP-FPM request, each queue worker) sees the same one, and a probe in
  * one process closes it for all. Each process keeps a copy of the last
- * pause it saw, used only while the cache fails; a failing cache never
- * fails the export.
+ * pause it saw, used while the cache fails, and kept over the cache's
+ * answer when the cache could not save it (a full disk, a full Redis).
+ * A failing cache never fails the export.
  */
 class ExportBreaker
 {
@@ -59,6 +60,11 @@ class ExportBreaker
     protected static ?array $state = null;
 
     /**
+     * Whether the pause in $state failed to reach the cache, so the cache does not know it.
+     */
+    protected static bool $unsaved = false;
+
+    /**
      * Create a new breaker instance.
      */
     public function __construct(protected Container $container) {}
@@ -78,9 +84,13 @@ class ExportBreaker
             return true;
         }
 
-        // The pause is over: one export probes. A cache that fails cannot share
-        // the claim, and lets the export through, as exports in one process
-        // run one at a time.
+        // The pause is over: one export probes. A pause the cache does not know,
+        // or a cache that fails, cannot share the claim: the export goes
+        // through, as exports in one process run one at a time.
+        if (self::$unsaved) {
+            return false;
+        }
+
         return $this->cache(fn (Cache $cache) => $cache->add(self::PROBE_KEY, true, self::PROBE_SECONDS)) === false;
     }
 
@@ -97,10 +107,9 @@ class ExportBreaker
         self::$state = $state;
 
         // Kept past the pause, so a probe that fails again doubles it.
-        $this->cache(function (Cache $cache) use ($state, $pause) {
-            $cache->put(self::KEY, $state, $pause + self::MAX_PAUSE);
-            $cache->forget(self::PROBE_KEY);
-        });
+        self::$unsaved = $this->cache(fn (Cache $cache) => $cache->put(self::KEY, $state, $pause + self::MAX_PAUSE)) !== true;
+
+        $this->cache(fn (Cache $cache) => $cache->forget(self::PROBE_KEY));
 
         return $pause;
     }
@@ -115,6 +124,7 @@ class ExportBreaker
         }
 
         self::$state = null;
+        self::$unsaved = false;
 
         $this->cache(function (Cache $cache) {
             $cache->forget(self::KEY);
@@ -128,10 +138,11 @@ class ExportBreaker
     public static function reset(): void
     {
         self::$state = null;
+        self::$unsaved = false;
     }
 
     /**
-     * Get the pause in the cache, and keep a copy of it; or, while the cache fails, the last pause this process saw.
+     * Get the pause in the cache, and keep a copy of it; or the last pause this process saw, while the cache fails or when the cache could not save it.
      *
      * @return array{until: int, failures: int}
      */
@@ -142,9 +153,13 @@ class ExportBreaker
         if ($read !== null) {
             $shared = $read['shared'];
 
-            self::$state = is_array($shared) && is_int($shared['until'] ?? null) && is_int($shared['failures'] ?? null)
-                ? ['until' => $shared['until'], 'failures' => $shared['failures']]
-                : null;
+            if (is_array($shared) && is_int($shared['until'] ?? null) && is_int($shared['failures'] ?? null)) {
+                self::$state = ['until' => $shared['until'], 'failures' => $shared['failures']];
+                self::$unsaved = false;
+            } elseif (! self::$unsaved) {
+                // The cache had the pause, and another process's probe closed it.
+                self::$state = null;
+            }
         }
 
         return self::$state ?? ['until' => 0, 'failures' => 0];
