@@ -156,3 +156,20 @@ it('--json is one parseable object', function () {
         ->and($status['durable'])->toBeTrue()
         ->and(DB::table(DatabaseCollector::TABLE)->count())->toBe(1);
 });
+
+it('exports failing again and again for over 10 minutes exit 1', function () {
+    queueDrain();
+    Stats::exported();
+
+    // A drain retries at most every 5 minutes: each failure is recent.
+    foreach (range(1, 3) as $retry) {
+        $this->travel(5)->minutes();
+        Stats::failed();
+    }
+
+    $this->travel(1)->minutes();
+
+    $this->artisan('refract:status')
+        ->expectsOutputToContain('No export has succeeded since')
+        ->assertExitCode(1);
+});

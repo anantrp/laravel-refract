@@ -798,3 +798,104 @@ it('a bad tree at the head of a claim does not hold back the healthy trees behin
     expect($collector->size())->toBe(1)
         ->and(array_values($collector->entries)[0]['attempts'])->toBe(4);
 });
+
+/**
+ * A tree in the given trace of two spans of about 2.5 MB of OTLP JSON each, so it is split over two requests.
+ *
+ * @return list<array<string, mixed>>
+ */
+function splitTree(string $traceId): array
+{
+    $span = fn (string $text) => [
+        ...drainTree($traceId)[0],
+        'trace_id' => $traceId,
+        'span_id' => bin2hex(random_bytes(8)),
+        'content' => ['output' => [['role' => 'assistant', 'parts' => [['type' => 'text', 'content' => str_repeat("{$text} {$traceId}. ", 60_000)]]]]],
+    ];
+
+    return [$span('The first half'), $span('The second half')];
+}
+
+/**
+ * Use the real exporter on the queue drain, answering each request with the given closure.
+ */
+function answeringDestination(Closure $answer): MemoryCollector
+{
+    bootExport(['refract.drain' => 'queue']);
+    app()->instance(Collector::class, $collector = new MemoryCollector);
+    Queue::fake();
+    Http::fake(fn (Request $request) => $answer(Otlp::body($request)));
+
+    return $collector;
+}
+
+it('a tree held after failing alone is never acked for the progress of the next one', function () {
+    $held = str_repeat('a', 32);
+    $split = str_repeat('b', 32);
+    $splitRequests = 0;
+    $this->memoryExporter = null;
+
+    $collector = answeringDestination(function (string $body) use ($held, $split, &$splitRequests) {
+        if (str_contains($body, $held)) {
+            return Http::response('', 503);
+        }
+
+        // The split tree's first request goes through, its second fails.
+        return str_contains($body, $split) && ++$splitRequests === 2 ? Http::response('', 503) : Http::response('', 200);
+    });
+
+    $collector->push(traceTree($held));
+    $collector->push(splitTree($split));
+
+    foreach ($collector->entries as $id => $entry) {
+        $collector->entries[$id]['attempts'] = 3;
+    }
+
+    drainNow();
+
+    $stored = array_map(fn (array $entry) => [$entry['tree'][0]['trace_id'], count($entry['tree'])], array_values($collector->entries));
+
+    // The held tree is kept whole, with one more attempt. The split tree's unsent span was stored and sent on its own
+    // in the same drain: three requests for it, its first half only once.
+    expect($stored)->toBe([[$held, 1]])
+        ->and(array_values($collector->entries)[0]['attempts'])->toBe(4)
+        ->and($splitRequests)->toBe(3);
+});
+
+it('trees that suspects sent together delivered are not sent again', function () {
+    $first = str_repeat('c', 32);
+    $second = str_repeat('d', 32);
+    $secondTries = 0;
+    $this->memoryExporter = null;
+
+    $collector = answeringDestination(function (string $body) use ($second, &$secondTries) {
+        return str_contains($body, $second) && ++$secondTries === 1 ? Http::response('', 503) : Http::response('', 200);
+    });
+
+    // A healthy tree, so the destination is seen to answer, then two repeat failures too big for one request together.
+    $collector->push(traceTree(str_repeat('e', 32)));
+    $collector->push([splitTree($first)[0]]);
+    $collector->push([splitTree($second)[0]]);
+
+    foreach (array_slice(array_keys($collector->entries), 1) as $id) {
+        $collector->entries[$id]['attempts'] = 3;
+    }
+
+    drainNow();
+
+    $carrying = array_filter(sentTraceIds(), fn (array $ids) => in_array($first, $ids, true));
+
+    // The second failed in a request of its own: it waits, with one more attempt.
+    expect($carrying)->toHaveCount(1)
+        ->and(array_map(fn (array $entry) => [$entry['tree'][0]['trace_id'], $entry['attempts'] ?? 0], array_values($collector->entries)))->toBe([[$second, 4]]);
+});
+
+it('a 429 without Retry-After counts no attempt', function () {
+    $this->memoryExporter = null;
+    $collector = answeringDestination(fn () => Http::response('', 429));
+
+    $collector->push(traceTree(str_repeat('1', 32)));
+    drainNow();
+
+    expect(array_column($collector->entries, 'attempts'))->toBe([0]);
+});

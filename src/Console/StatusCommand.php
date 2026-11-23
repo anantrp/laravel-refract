@@ -22,8 +22,8 @@ use Throwable;
  * Unhealthy means: the store of the queue drain cannot be read, the
  * oldest due tree in it has waited past Drain::STALL_AFTER (no worker
  * drains it), traces were dropped since the
- * last run of this command, or no export has succeeded for 10 minutes
- * since one failed. Every section that fails is shown as unavailable;
+ * last run of this command, or exports have failed for 10 minutes with
+ * no success. Every section that fails is shown as unavailable;
  * the command itself never throws.
  */
 class StatusCommand extends Command
@@ -130,10 +130,11 @@ class StatusCommand extends Command
             $problems[] = "{$newDrops} traces were dropped since the last check.";
         }
 
-        $failure = $stats['last_failure'];
+        // Measured from the first failure of the streak: each retry is a new, recent failure.
+        $since = $stats['failing_since'];
 
-        if ($failure !== null && ($stats['last_success'] ?? 0) < $failure && $now - $failure > self::FAILING_AFTER) {
-            $problems[] = 'No export has succeeded since '.$this->time($failure).', when one failed.';
+        if ($since !== null && ($stats['last_success'] ?? 0) < $since && $now - $since > self::FAILING_AFTER) {
+            $problems[] = 'No export has succeeded since '.$this->time($since).', when exports started failing.';
         }
 
         return [...$status, 'healthy' => $problems === [], 'problems' => $problems];

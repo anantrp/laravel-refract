@@ -25,6 +25,7 @@ final readonly class ExportResult
         public ?int $retryAfter = null,
         public int $done = 0,
         public array $rest = [],
+        public bool $busy = false,
     ) {}
 
     /**
@@ -40,13 +41,14 @@ final readonly class ExportResult
      *
      * When requests before the failing one were answered, the given number
      * of leading trees are done, and the unsent spans of a tree split over
-     * requests are given, as for an unfinished export.
+     * requests are given, as for an unfinished export. A busy destination
+     * (a 429) is marked, so the trees are not held to blame for it.
      *
      * @param  list<array<string, mixed>>  $rest  The unsent spans of the next tree, when some of its spans were sent.
      */
-    public static function retryable(?int $retryAfter = null, int $done = 0, array $rest = []): self
+    public static function retryable(?int $retryAfter = null, int $done = 0, array $rest = [], bool $busy = false): self
     {
-        return new self('retryable', $retryAfter, $done, $rest);
+        return new self('retryable', $retryAfter, $done, $rest, $busy);
     }
 
     /**
@@ -89,6 +91,14 @@ final readonly class ExportResult
     public function isUnfinished(): bool
     {
         return $this->status === 'unfinished';
+    }
+
+    /**
+     * Determine if the destination is busy, not failing: it answered 429, or asked to wait with a Retry-After.
+     */
+    public function isBusy(): bool
+    {
+        return $this->busy || $this->retryAfter !== null;
     }
 
     /**

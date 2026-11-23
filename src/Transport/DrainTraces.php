@@ -262,7 +262,7 @@ class DrainTraces implements ShouldBeUniqueUntilProcessing, ShouldQueue
 
                 if ($result->isRetryable()) {
                     // A busy destination (429, Retry-After) says nothing about the trees: no attempt is counted.
-                    $this->retryLater($collector, $cache, $batch, $result, $suspects, failed: $result->retryAfter === null);
+                    $this->retryLater($collector, $cache, $batch, $result, $suspects, failed: ! $result->isBusy());
 
                     return;
                 }
@@ -313,6 +313,20 @@ class DrainTraces implements ShouldBeUniqueUntilProcessing, ShouldQueue
      */
     protected function keepProgress(Collector $collector, array $ids, ExportResult $result, int $delay, bool $failed = false): void
     {
+        $this->release($collector, $this->progress($collector, $ids, $result), $delay, $failed);
+    }
+
+    /**
+     * Ack the trees of the given export that it got through, store the unsent spans of a tree it cut, and get the ids it did not get through.
+     *
+     * The ids must be exactly the trees of that export, in its order: its
+     * done count and unsent spans are about them.
+     *
+     * @param  list<array-key>  $ids
+     * @return list<array-key>
+     */
+    protected function progress(Collector $collector, array $ids, ExportResult $result): array
+    {
         if ($result->done > 0 || $result->rest !== []) {
             Stats::exported();
         }
@@ -330,8 +344,11 @@ class DrainTraces implements ShouldBeUniqueUntilProcessing, ShouldQueue
             }
         }
 
-        $collector->ack($done);
-        $this->release($collector, $rest, $delay, $failed);
+        if ($done !== []) {
+            $collector->ack($done);
+        }
+
+        return $rest;
     }
 
     /**
@@ -423,23 +440,36 @@ class DrainTraces implements ShouldBeUniqueUntilProcessing, ShouldQueue
                 return false;
             }
 
-            if ($result->isRetryable() && ($result->retryAfter !== null || ($held !== null && ! $answered))) {
-                $this->retryLater($collector, $cache, [...($held === null ? [] : [$held]), ...$ids], $result, $later, failed: false);
-
-                return false;
-            }
-
-            if ($result->isRetryable() && count($ids) > 1) {
-                // Together they failed: each goes alone.
-                continue;
-            }
-
             if ($result->isRetryable()) {
+                // What this export got through is kept first, so it is never sent again.
+                $partial = $result->done > 0 || $result->rest !== [];
+                $ids = $this->progress($collector, $ids, $result);
+                $answered = $answered || $partial;
+
+                if ($held !== null && $answered) {
+                    $this->failedAlone($collector, $held, $this->attemptsOf($collector, $held));
+                    $held = null;
+                }
+
+                // A held tree is still held only while nothing answered: two in a row failed, the destination is down.
+                if ($result->isBusy() || $held !== null) {
+                    $this->retryLater($collector, $cache, [...($held === null ? [] : [$held]), ...$ids], ExportResult::retryable($result->retryAfter, busy: $result->busy), $later, failed: false);
+
+                    return false;
+                }
+
+                if (count($ids) > 1) {
+                    // Together they failed: each goes alone.
+                    $suspects = [...$ids, ...$later];
+
+                    continue;
+                }
+
                 $suspects = $later;
 
-                if ($answered) {
+                if ($ids !== [] && $answered) {
                     $this->failedAlone($collector, $ids[0], $this->attemptsOf($collector, $ids[0]));
-                } else {
+                } elseif ($ids !== []) {
                     $held = $ids[0];
                 }
 

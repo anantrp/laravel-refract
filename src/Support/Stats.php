@@ -39,6 +39,11 @@ class Stats
     protected const LAST_FAILURE = 'refract:stats:last_failure';
 
     /**
+     * The cache key of the Unix time of the first failed export since the last success.
+     */
+    protected const FAILING_SINCE = 'refract:stats:failing_since';
+
+    /**
      * The drops by reason the cache could not take.
      *
      * @var array<string, int>
@@ -105,6 +110,12 @@ class Stats
     public static function exported(): void
     {
         self::time(self::LAST_SUCCESS);
+
+        unset(self::$times[self::FAILING_SINCE]);
+
+        if (Diagnostics::cacheIsSafe()) {
+            self::cache(fn (Cache $cache) => $cache->forget(self::FAILING_SINCE));
+        }
     }
 
     /**
@@ -113,19 +124,26 @@ class Stats
     public static function failed(): void
     {
         self::time(self::LAST_FAILURE);
+
+        // The first failure of a streak is kept, so a streak of retries is measured from its start.
+        $now = self::now();
+
+        if (! Diagnostics::cacheIsSafe() || self::cache(fn (Cache $cache) => $cache->add(self::FAILING_SINCE, $now) || $cache->has(self::FAILING_SINCE)) !== true) {
+            self::$times[self::FAILING_SINCE] ??= $now;
+        }
     }
 
     /**
-     * Get the drops by reason, the last success and failure times, and whether the counts are shared by every process.
+     * Get the drops by reason, the last success and failure times, when the failures since the last success began, and whether the counts are shared by every process.
      *
-     * @return array{dropped: array<string, int>, last_success: ?int, last_failure: ?int, durable: bool}
+     * @return array{dropped: array<string, int>, last_success: ?int, last_failure: ?int, failing_since: ?int, durable: bool}
      */
     public static function read(): array
     {
         self::flush();
 
         $shared = ! Diagnostics::cacheIsSafe() ? null : self::cache(function (Cache $cache) {
-            $values = $cache->many([...array_map(fn ($reason) => self::DROPPED.$reason, self::REASONS), self::LAST_SUCCESS, self::LAST_FAILURE]);
+            $values = $cache->many([...array_map(fn ($reason) => self::DROPPED.$reason, self::REASONS), self::LAST_SUCCESS, self::LAST_FAILURE, self::FAILING_SINCE]);
 
             return array_map(fn ($value) => is_numeric($value) ? (int) $value : null, $values);
         });
@@ -148,6 +166,7 @@ class Stats
             'dropped' => $dropped,
             'last_success' => self::latest($shared[self::LAST_SUCCESS] ?? null, self::$times[self::LAST_SUCCESS] ?? null),
             'last_failure' => self::latest($shared[self::LAST_FAILURE] ?? null, self::$times[self::LAST_FAILURE] ?? null),
+            'failing_since' => $shared[self::FAILING_SINCE] ?? self::$times[self::FAILING_SINCE] ?? null,
             'durable' => $shared !== null && self::$dropped === [] && self::$times === [] && self::durableStore(),
         ];
     }

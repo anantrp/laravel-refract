@@ -40,7 +40,7 @@ it('records the last success and failure times', function () {
 });
 
 it('reads nothing before anything happened', function () {
-    expect(Stats::read())->toBe(['dropped' => [], 'last_success' => null, 'last_failure' => null, 'durable' => true]);
+    expect(Stats::read())->toBe(['dropped' => [], 'last_success' => null, 'last_failure' => null, 'failing_since' => null, 'durable' => true]);
 });
 
 it('falls back to the process when the cache throws', function () {
@@ -61,4 +61,17 @@ it('is not durable on the array store', function () {
     Stats::dropped('full', 1);
 
     expect(Stats::read())->toMatchArray(['dropped' => ['full' => 1], 'durable' => false]);
+});
+
+it('keeps when the failures since the last success began, and a success clears it', function () {
+    $this->travelTo('2026-11-18 10:00:00');
+    Stats::failed();
+    $this->travelTo('2026-11-18 10:05:00');
+    Stats::failed();
+
+    expect(Stats::read()['failing_since'])->toBe(strtotime('2026-11-18 10:00:00'));
+
+    Stats::exported();
+
+    expect(Stats::read()['failing_since'])->toBeNull();
 });

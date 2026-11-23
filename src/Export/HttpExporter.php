@@ -110,7 +110,7 @@ class HttpExporter implements Exporter
             $sent = $this->post($spans, $timeout);
 
             if ($sent->isRetryable()) {
-                return ExportResult::retryable($sent->retryAfter, $done, $this->unsent($trees[$done] ?? [], $answered[$done] ?? []));
+                return ExportResult::retryable($sent->retryAfter, $done, $this->unsent($trees[$done] ?? [], $answered[$done] ?? []), $sent->busy);
             }
 
             if ($sent->isRejected()) {
@@ -349,7 +349,7 @@ class HttpExporter implements Exporter
         $status = $response->status();
 
         if ($status === 429 || $status === 503) {
-            return ExportResult::retryable($this->retryAfterSeconds($response->header('Retry-After')));
+            return ExportResult::retryable($this->retryAfterSeconds($response->header('Retry-After')), busy: $status === 429);
         }
 
         if ($status === 408 || $status >= 500) {

@@ -265,7 +265,7 @@ It exits with 1 when traces are being lost:
 - the store of the queue drain cannot be read,
 - the oldest due tree in the store has waited over 10 minutes (no worker reads the `refract` queue),
 - traces were dropped since the last time the command ran, or
-- no export has succeeded for 10 minutes since one failed.
+- exports have kept failing for 10 minutes, counted from the first failure, with no success.
 
 So a scheduler, a cron job or a deploy check can alert on it:
 
