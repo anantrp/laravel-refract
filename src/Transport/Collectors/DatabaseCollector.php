@@ -5,6 +5,7 @@ namespace Anantrp\Refract\Transport\Collectors;
 use Anantrp\Refract\Contracts\Collector;
 use Anantrp\Refract\Contracts\ReportsStats;
 use Anantrp\Refract\Support\Diagnostics;
+use Anantrp\Refract\Transport\DrainTraces;
 use Illuminate\Container\Container;
 use Illuminate\Contracts\Cache\Repository as Cache;
 use Illuminate\Database\Connection;
@@ -230,13 +231,24 @@ class DatabaseCollector implements Collector, ReportsStats
     {
         $now = $this->currentTime();
 
-        $oldest = $this->table()->whereNull('reserved_at')->where('available_at', '<=', $now)->min('available_at');
+        // A tree is due once it is available and unclaimed, or once the lease of the drain that claimed it ran
+        // out (every drain claims with DrainTraces::LEASE), as claim() takes it then: a worker that died holding
+        // it must not hide it.
+        $waiting = $this->table()->whereNull('reserved_at')->where('available_at', '<=', $now)->min('available_at');
+        $abandoned = $this->table()->where('reserved_at', '<=', $now - DrainTraces::LEASE)->min('reserved_at');
+
+        $due = array_filter([
+            $waiting === null ? null : $this->number($waiting),
+            $abandoned === null ? null : $this->number($abandoned) + DrainTraces::LEASE,
+        ], fn (?int $time) => $time !== null);
+
+        $oldest = $due === [] ? null : min($due);
 
         return [
             'trees' => $this->size(),
             'bytes' => $this->storedBytes(),
             'max_bytes' => $this->maxBytes,
-            'oldest_age' => $oldest === null ? null : max(0, $now - $this->number($oldest)),
+            'oldest_age' => $oldest === null ? null : max(0, $now - $oldest),
             'dropped' => null,
             'max_attempts' => $this->countsAttempts() ? $this->number($this->table()->max('attempts')) : 0,
         ];

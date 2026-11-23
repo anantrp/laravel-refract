@@ -173,3 +173,20 @@ it('exports failing again and again for over 10 minutes exit 1', function () {
         ->expectsOutputToContain('No export has succeeded since')
         ->assertExitCode(1);
 });
+
+it('a failure streak that starts in the second of the last success still exits 1 after 10 minutes', function () {
+    queueDrain();
+    $this->freezeSecond();
+
+    Stats::exported();
+    Stats::failed();
+
+    foreach (range(1, 3) as $retry) {
+        $this->travel(5)->minutes();
+        Stats::failed();
+    }
+
+    $this->artisan('refract:status')
+        ->expectsOutputToContain('No export has succeeded since')
+        ->assertExitCode(1);
+});

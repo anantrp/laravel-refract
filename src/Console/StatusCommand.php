@@ -130,10 +130,11 @@ class StatusCommand extends Command
             $problems[] = "{$newDrops} traces were dropped since the last check.";
         }
 
-        // Measured from the first failure of the streak: each retry is a new, recent failure.
+        // Measured from the first failure of the streak: each retry is a new, recent failure. A success clears
+        // the streak, so one still there began at or after the last success, maybe in the same second.
         $since = $stats['failing_since'];
 
-        if ($since !== null && ($stats['last_success'] ?? 0) < $since && $now - $since > self::FAILING_AFTER) {
+        if ($since !== null && ($stats['last_success'] ?? 0) <= $since && $now - $since > self::FAILING_AFTER) {
             $problems[] = 'No export has succeeded since '.$this->time($since).', when exports started failing.';
         }
 

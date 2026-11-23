@@ -4,6 +4,7 @@ use Anantrp\Refract\Contracts\Collector;
 use Anantrp\Refract\Tests\Support\WarningLog;
 use Anantrp\Refract\Transport\Collectors\DatabaseCollector;
 use Anantrp\Refract\Transport\Drain;
+use Anantrp\Refract\Transport\DrainTraces;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Queue;
@@ -84,4 +85,19 @@ it('a store drained in time never warns', function () {
     }
 
     expect($log->warnings)->toBe([]);
+});
+
+it('a tree whose worker died holding its lease counts as due once the lease runs out', function () {
+    $collector = new DatabaseCollector(DB::connection());
+
+    $collector->push(storedTree('one'));
+    $collector->claim(1_000_000, DrainTraces::LEASE);
+
+    $this->travel(DrainTraces::LEASE - 10)->seconds();
+
+    expect($collector->stats()['oldest_age'])->toBeNull();
+
+    $this->travel(90)->seconds();
+
+    expect($collector->stats()['oldest_age'])->toBe(80);
 });
