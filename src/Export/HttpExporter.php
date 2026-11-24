@@ -99,6 +99,8 @@ class HttpExporter implements Exporter
         $answered = [];
         // The positions of the trees a request was refused for good with.
         $refused = [];
+        // Whether the destination took any request.
+        $took = false;
 
         foreach ($requests as [$spans, $treesDone, $parts]) {
             $timeout = $this->timeout;
@@ -107,7 +109,7 @@ class HttpExporter implements Exporter
                 $left = $deadline - $this->seconds();
 
                 if ($left < self::MIN_REQUEST_SECONDS) {
-                    return ExportResult::unfinished($done, $this->unsent($trees[$done] ?? [], $answered[$done] ?? []), $this->refusedBefore($refused, $done));
+                    return ExportResult::unfinished($done, $this->unsent($trees[$done] ?? [], $answered[$done] ?? []), $this->refusedBefore($refused, $done), $took);
                 }
 
                 $timeout = min($timeout, $left);
@@ -118,12 +120,14 @@ class HttpExporter implements Exporter
 
             if ($sent->isRetryable() && $this->unreached && $this->timeout - $timeout >= self::MIN_REQUEST_SECONDS && $this->seconds() - $posted >= $timeout - self::MIN_REQUEST_SECONDS) {
                 // Given well under its own timeout, what was left of the time limit, the request waited it out: the export is cut short, not failed.
-                return ExportResult::unfinished($done, $this->unsent($trees[$done] ?? [], $answered[$done] ?? []), $this->refusedBefore($refused, $done));
+                return ExportResult::unfinished($done, $this->unsent($trees[$done] ?? [], $answered[$done] ?? []), $this->refusedBefore($refused, $done), $took);
             }
 
             if ($sent->isRetryable()) {
-                return ExportResult::retryable($sent->retryAfter, $done, $this->unsent($trees[$done] ?? [], $answered[$done] ?? []), $sent->busy, $this->refusedBefore($refused, $done));
+                return ExportResult::retryable($sent->retryAfter, $done, $this->unsent($trees[$done] ?? [], $answered[$done] ?? []), $sent->busy, $this->refusedBefore($refused, $done), $took);
             }
+
+            $took = $took || ! $sent->isRejected();
 
             foreach ($parts as [$position, $indexes]) {
                 $answered[$position] = [...$answered[$position] ?? [], ...$indexes];

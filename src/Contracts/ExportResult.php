@@ -20,6 +20,7 @@ final readonly class ExportResult
      *
      * @param  list<array<string, mixed>>  $rest  The neutral spans of the tree after the done ones that were not sent, when part of it was.
      * @param  int  $refused  The trees among the done ones that the destination refused for good, when it took others.
+     * @param  bool|null  $took  Whether the destination took any request, when the exporter knows; else whether some done tree was not refused.
      */
     private function __construct(
         protected string $status,
@@ -28,7 +29,15 @@ final readonly class ExportResult
         public array $rest = [],
         public bool $busy = false,
         public int $refused = 0,
-    ) {}
+        ?bool $took = null,
+    ) {
+        $this->took = $took ?? ($status === 'ok' || $done > $refused || $rest !== []);
+    }
+
+    /**
+     * Whether the destination took any of the trees: a refusal answers, but takes nothing.
+     */
+    public bool $took;
 
     /**
      * The destination took the trees, but for the given number it refused for good.
@@ -48,9 +57,9 @@ final readonly class ExportResult
      *
      * @param  list<array<string, mixed>>  $rest  The unsent spans of the next tree, when some of its spans were sent.
      */
-    public static function retryable(?int $retryAfter = null, int $done = 0, array $rest = [], bool $busy = false, int $refused = 0): self
+    public static function retryable(?int $retryAfter = null, int $done = 0, array $rest = [], bool $busy = false, int $refused = 0, ?bool $took = null): self
     {
-        return new self('retryable', $retryAfter, $done, $rest, $busy, $refused);
+        return new self('retryable', $retryAfter, $done, $rest, $busy, $refused, $took);
     }
 
     /**
@@ -66,9 +75,9 @@ final readonly class ExportResult
      *
      * @param  list<array<string, mixed>>  $rest  The unsent spans of the next tree, when some of its spans were sent.
      */
-    public static function unfinished(int $done, array $rest = [], int $refused = 0): self
+    public static function unfinished(int $done, array $rest = [], int $refused = 0, ?bool $took = null): self
     {
-        return new self('unfinished', done: $done, rest: $rest, refused: $refused);
+        return new self('unfinished', done: $done, rest: $rest, refused: $refused, took: $took);
     }
 
     /**

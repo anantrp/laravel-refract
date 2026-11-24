@@ -120,7 +120,7 @@ class Drain
             return;
         }
 
-        if ($result->isOk() ? $result->refused < count($trees) : $result->done > $result->refused || $result->rest !== []) {
+        if ($result->took) {
             Stats::exported();
         }
 

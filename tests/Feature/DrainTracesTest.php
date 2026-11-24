@@ -915,6 +915,24 @@ it('a split tree refused in part, whose rest is refused later, is counted as rej
         ->and(Stats::read()['dropped'])->toBe(['rejected' => 1]);
 });
 
+it('a tree failing after requests that were only refused is not blamed: a refusal is no sign the destination takes trees', function () {
+    $refused = str_repeat('1', 32);
+    $failing = str_repeat('2', 32);
+    $this->memoryExporter = null;
+    $collector = answeringDestination(fn (string $body) => str_contains($body, $refused) ? Http::response('bad', 400) : Http::response('', 503));
+
+    // Too big for one request together: the refused tree goes first, in a request of its own.
+    $collector->push([splitTree($refused)[0]]);
+    $collector->push([splitTree($failing)[0]]);
+
+    drainNow();
+
+    expect($collector->size())->toBe(1)
+        ->and(storedAttempts($collector))->toBe([0])
+        ->and(Stats::read()['dropped'])->toBe(['rejected' => 1])
+        ->and(Stats::read()['last_success'])->toBeNull();
+});
+
 it('a big bad tree claimed behind a request that went through is blamed, and dropped in the end', function () {
     $poison = str_repeat('9', 32);
     $this->memoryExporter = null;

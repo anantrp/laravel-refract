@@ -497,11 +497,13 @@ class DrainTraces implements ShouldBeUniqueUntilProcessing, ShouldQueue
 
         $sent = $this->send($collector, $exporter, $cache, $left, $started, $searching);
 
-        // The requests before them in the same export went through: the destination was up.
+        // When the requests before them in the same export were taken, the destination was up. A refusal is no sign of that.
         if ($sent === self::FAILED && count($left) > 1) {
-            $sent = $this->isolate($collector, $exporter, $cache, $left, $started, evidence: true);
-        } elseif ($sent === self::FAILED) {
+            $sent = $this->isolate($collector, $exporter, $cache, $left, $started, evidence: $result->took);
+        } elseif ($sent === self::FAILED && $result->took) {
             $this->blame($collector, $left[0]);
+        } elseif ($sent === self::FAILED) {
+            $this->unproven[] = $left[0];
         }
 
         return $sent === self::STOPPED ? self::STOPPED : self::PARTIAL;
@@ -709,7 +711,7 @@ class DrainTraces implements ShouldBeUniqueUntilProcessing, ShouldQueue
             $this->failuresInRow = 0;
         }
 
-        if ($result->isOk() ? $result->refused < count($trees) : $result->done > $result->refused || $result->rest !== []) {
+        if ($result->took) {
             $this->delivered = true;
             $this->claimDelivered = true;
             Stats::exported();
