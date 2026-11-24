@@ -9,6 +9,7 @@ use Anantrp\Refract\Support\Stats;
 use Anantrp\Refract\Tests\Support\MemoryCollector;
 use Anantrp\Refract\Tests\Support\Otlp;
 use Anantrp\Refract\Tests\Support\WarningLog;
+use Anantrp\Refract\Transport\Collectors\DatabaseCollector;
 use Anantrp\Refract\Transport\Drain;
 use Anantrp\Refract\Transport\DrainTraces;
 use Illuminate\Bus\UniqueLock;
@@ -364,6 +365,25 @@ it('when a full store drops the unsent spans of a cut tree, the whole tree waits
     expect($this->collector->releases)->toBe([[[2], 60]])
         ->and($this->collector->size())->toBe(1)
         ->and($this->collector->entries[2]['tree'][0]['call']['agent'])->toBe('two');
+});
+
+it('a full store that cannot take the unsent spans of a cut tree counts no drop: the whole tree is kept', function () {
+    Event::fake([TracesDropped::class]);
+    $this->loadMigrationsFrom(dirname(__DIR__, 2).'/database/migrations');
+    $tree = drainTree('two');
+    // Room for this tree only: its unsent spans do not fit beside it.
+    $collector = new DatabaseCollector(DB::connection(), storedBytes($tree) + 10);
+    app()->instance(Collector::class, $collector);
+
+    $collector->push($tree);
+    $this->exporter->results = [ExportResult::unfinished(0, drainTree('two, rest'))];
+
+    drainNow();
+
+    expect($collector->size())->toBe(1)
+        ->and(Stats::read()['dropped'])->toBe([]);
+
+    Event::assertNotDispatched(TracesDropped::class);
 });
 
 it('a drain killed by its worker is never failed: it is attempted again, however many times', function () {

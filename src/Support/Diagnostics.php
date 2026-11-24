@@ -43,13 +43,18 @@ class Diagnostics
     protected static bool $dispatching = false;
 
     /**
+     * Whether drops are not counted now: a write that may fail without losing anything is being tried.
+     */
+    protected static bool $uncounted = false;
+
+    /**
      * Record that traces were lost: count them by reason, fire TracesDropped, and warn under the given key.
      *
      * Without a key nothing is logged, for a loss whose warning was already logged where it happened.
      */
     public static function dropped(string $reason, int $count, ?string $key = null, ?string $message = null): void
     {
-        if ($count <= 0) {
+        if ($count <= 0 || self::$uncounted) {
             return;
         }
 
@@ -159,6 +164,26 @@ class Diagnostics
             return false;
         } catch (Throwable) {
             return null;
+        }
+    }
+
+    /**
+     * Run the given callback without counting the drops it reports: what it writes is kept elsewhere when the write fails.
+     *
+     * @template T
+     *
+     * @param  callable(): T  $callback
+     * @return T
+     */
+    public static function uncounted(callable $callback): mixed
+    {
+        $was = self::$uncounted;
+        self::$uncounted = true;
+
+        try {
+            return $callback();
+        } finally {
+            self::$uncounted = $was;
         }
     }
 

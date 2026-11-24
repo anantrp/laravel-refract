@@ -613,7 +613,8 @@ class DrainTraces implements ShouldBeUniqueUntilProcessing, ShouldQueue
             $cut = array_shift($rest);
 
             try {
-                $stored = $collector->push($result->rest);
+                // The whole tree stays stored when its unsent spans do not fit, so a full store loses nothing here.
+                $stored = Diagnostics::uncounted(fn () => $collector->push($result->rest));
             } catch (Throwable $e) {
                 $stored = false;
 
