@@ -20,6 +20,7 @@ use Illuminate\Support\Facades\Http;
 it('after a destination fails, exports make no request until 30 s pass, then one probe goes through and success resumes', function () {
     $log = bootExport();
     Http::fake(['*' => Http::sequence()->pushFailedConnection()->whenEmpty(Http::response('', 200))]);
+    $this->freezeSecond();
 
     sendSpan();
     Http::assertSentCount(1);
@@ -202,6 +203,8 @@ it('a process that read the pause just before another process\'s probe failed do
  */
 it('a failed export pauses this process for the right time, whatever the cache holds and whether it can save', function (string $holds, string $save, int $pause) {
     $log = bootExport();
+    // The pause is checked a second before and after it ends: a real second passing must not move it.
+    $this->freezeSecond();
     fakeDestination('network');
 
     $store = $holds === 'an old pause' ? ['refract:sync:breaker' => ['until' => now()->getTimestamp() - 10, 'failures' => 1]] : [];

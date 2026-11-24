@@ -33,8 +33,9 @@ it('fires with the right count for each reason', function (string $reason, int $
     expect(Stats::read()['dropped'])->toHaveKey($reason, $expected);
 })->with([
     'full' => ['full', 1, function () {
-        $collector = new DatabaseCollector(DB::connection(), storedBytes(storedTree('one')) + 10);
-        $collector->push(storedTree('one'));
+        $one = storedTree('one');
+        $collector = new DatabaseCollector(DB::connection(), storedBytes($one) + 10);
+        $collector->push($one);
         $collector->push(storedTree('two'));
     }],
     'decode' => ['decode', 1, function () {

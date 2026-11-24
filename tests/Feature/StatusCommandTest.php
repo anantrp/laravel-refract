@@ -62,6 +62,7 @@ it('healthy queue drain exits 0', function () {
 
 it('with no worker, status exits 1 once the oldest tree passes 10 minutes', function () {
     queueDrain();
+    $this->freezeSecond();
     app(Collector::class)->push(storedTree('one'));
 
     $this->travel(599)->seconds();

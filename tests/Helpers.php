@@ -202,12 +202,14 @@ function itBehavesLikeAStoredCollector(Closure $make): void
     });
 
     it('at the cap a new tree is dropped and counted with one warning, and the stored trees are kept', function () use ($make) {
-        $collector = $make(2 * storedBytes(storedTree('one', str_repeat('x', 1_000))) + 10);
+        $trees = array_map(fn (string $name) => storedTree($name, str_repeat('x', 1_000)), ['one', 'two', 'three', 'four']);
 
-        $collector->push(storedTree('one', str_repeat('x', 1_000)));
-        $collector->push(storedTree('two', str_repeat('x', 1_000)));
-        $collector->push(storedTree('three', str_repeat('x', 1_000)));
-        $collector->push(storedTree('four', str_repeat('x', 1_000)));
+        // Sized from the trees themselves: random span ids change the gzipped size by a few bytes.
+        $collector = $make(storedBytes($trees[0]) + storedBytes($trees[1]) + 10);
+
+        foreach ($trees as $tree) {
+            $collector->push($tree);
+        }
 
         expect($collector->size())->toBe(2)
             ->and(Stats::read()['dropped']['full'] ?? 0)->toBe(2)
@@ -226,9 +228,10 @@ function itBehavesLikeAStoredCollector(Closure $make): void
     });
 
     it('released trees still count against the cap until they are acked', function () use ($make) {
-        $collector = $make(storedBytes(storedTree('one', str_repeat('x', 1_000))) + 10);
+        $one = storedTree('one', str_repeat('x', 1_000));
+        $collector = $make(storedBytes($one) + 10);
 
-        $collector->push(storedTree('one', str_repeat('x', 1_000)));
+        $collector->push($one);
         $collector->release(array_keys($collector->claim(4_000_000, 60)), 300);
         $collector->push(storedTree('two', str_repeat('x', 1_000)));
 

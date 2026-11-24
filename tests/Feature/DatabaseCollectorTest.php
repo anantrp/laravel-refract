@@ -81,9 +81,10 @@ it('leases and delays follow the app clock', function () {
 });
 
 it('a tree dropped at the cap is counted for every process, by reason', function () {
-    $collector = databaseCollector(maxBytes: storedBytes(storedTree('one')) + 10);
+    $one = storedTree('one');
+    $collector = databaseCollector(maxBytes: storedBytes($one) + 10);
 
-    $collector->push(storedTree('one'));
+    $collector->push($one);
     $collector->push(storedTree('two'));
 
     expect(Stats::read()['dropped'])->toBe(['full' => 1]);
