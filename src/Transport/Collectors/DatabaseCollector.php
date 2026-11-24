@@ -3,13 +3,18 @@
 namespace Anantrp\Refract\Transport\Collectors;
 
 use Anantrp\Refract\Contracts\Collector;
+use Anantrp\Refract\Contracts\ReportsStats;
 use Anantrp\Refract\Support\Diagnostics;
+use Anantrp\Refract\Transport\DrainTraces;
+use Illuminate\Container\Container;
+use Illuminate\Contracts\Cache\Repository as Cache;
 use Illuminate\Database\Connection;
 use Illuminate\Database\Query\Builder;
 use Illuminate\Support\InteractsWithTime;
 use Illuminate\Support\Str;
 use PDO;
 use stdClass;
+use Throwable;
 
 /**
  * Collects run trees in the "refract_traces" table, one row per tree.
@@ -26,10 +31,12 @@ use stdClass;
  * and one batch the destination keeps failing never blocks the rest.
  *
  * The cap is on the bytes stored, checked before each insert: at the cap
- * a new tree is dropped and counted, and the stored trees are kept. The
- * sum reads an index on the bytes column, never the payloads, and the cap
- * bounds the rows it reads; a running total would drift on a manual delete
- * or a crash between two writes.
+ * a new tree is dropped and counted, and the stored trees are kept. A
+ * push reads a running total kept in the default cache, and sums the
+ * table (from an index on the bytes column, never the payloads) only when
+ * the total is missing or a minute old. Each claim and ack sets it right,
+ * so a manual delete or a crash between two writes drifts it for a
+ * minute at most.
  *
  * A push never runs inside an open transaction on the collector's
  * connection: it is skipped with one warning. Joined to the app's
@@ -38,7 +45,7 @@ use stdClass;
  * would abort or roll back the app's own work. Give the collector a
  * connection of its own.
  */
-class DatabaseCollector implements Collector
+class DatabaseCollector implements Collector, ReportsStats
 {
     use InteractsWithTime;
 
@@ -58,14 +65,19 @@ class DatabaseCollector implements Collector
     protected const CLAIM_LIMIT = 1_000;
 
     /**
+     * The seconds the running total of stored bytes is trusted before a push sums the table again.
+     */
+    protected const TOTAL_FOR = 60;
+
+    /**
      * The times a claim is tried when the database reports a deadlock or a locked database.
      */
     protected const CLAIM_ATTEMPTS = 3;
 
     /**
-     * The number of trees this process dropped at the cap.
+     * Whether the table has the attempts column, once known.
      */
-    protected int $dropped = 0;
+    protected ?bool $countsAttempts = null;
 
     /**
      * The lock a claim reads due rows with, once known.
@@ -83,7 +95,7 @@ class DatabaseCollector implements Collector
     public function push(array $tree): bool
     {
         if ($this->database->transactionLevel() > 0) {
-            Diagnostics::warn('collect.transaction', "A run tree ended inside an open database transaction on the trace store's connection [{$this->database->getName()}], and was dropped so it cannot affect that transaction. Give the database collector a connection of its own.");
+            Diagnostics::dropped('transaction', 1, 'collect.transaction', "A run tree ended inside an open database transaction on the trace store's connection [{$this->database->getName()}], and was dropped so it cannot affect that transaction. Give the database collector a connection of its own.");
 
             return false;
         }
@@ -91,16 +103,16 @@ class DatabaseCollector implements Collector
         $payload = TreePayload::encode($tree);
 
         if ($payload === null) {
-            Diagnostics::warn('collect.encode', 'A run tree could not be encoded for the store and was dropped.');
+            Diagnostics::dropped('encode', 1, 'collect.encode', 'A run tree could not be encoded for the store and was dropped.');
 
             return false;
         }
 
         // Two pushes at once may both pass the check: the cap is exact to within one tree per process.
-        if ($this->storedBytes() + strlen($payload) > $this->maxBytes) {
-            $this->dropped++;
+        $stored = $this->runningBytes();
 
-            Diagnostics::warn('collect.full', "The trace store is full ({$this->maxBytes} bytes): new run trees are dropped until the queue drain catches up.");
+        if ($stored + strlen($payload) > $this->maxBytes) {
+            Diagnostics::dropped('full', 1, 'collect.full', "The trace store is full ({$this->maxBytes} bytes): new run trees are dropped until the queue drain catches up.");
 
             return false;
         }
@@ -112,33 +124,43 @@ class DatabaseCollector implements Collector
             'reserved_at' => null,
         ]);
 
+        $this->cache(function (Cache $cache) use ($payload, $stored) {
+            // A total that ran out just now comes back as this tree alone, with no expiry: drop it, so the next push sums.
+            if ($cache->increment($this->totalKey(), strlen($payload)) === strlen($payload) && $stored > 0) {
+                $cache->forget($this->totalKey());
+            }
+        });
+
         return true;
     }
 
     public function claim(int $maxBytes, int $lease): array
     {
+        // A claim runs in a worker, off the request: it sums the table, so a row deleted behind the collector's back frees its bytes.
+        $this->cache(fn (Cache $cache) => $cache->put($this->totalKey(), $this->storedBytes(), self::TOTAL_FOR));
+
         $ids = $this->database->transaction(fn () => $this->reserve(max(1, $maxBytes), max(0, $lease)), self::CLAIM_ATTEMPTS);
 
         if ($ids === []) {
             return [];
         }
 
-        $trees = [];
-        $broken = [];
+        $rows = $this->table()->whereIn('id', $ids)->orderBy('available_at')->orderBy('id')->get(['id', 'payload']);
 
-        foreach ($this->table()->whereIn('id', $ids)->orderBy('available_at')->orderBy('id')->get(['id', 'payload']) as $row) {
-            $id = $this->number($row->id);
-            $tree = TreePayload::decode(is_string($row->payload) ? $row->payload : '');
+        [$trees, $broken, $over] = TreePayload::decodeClaim(
+            array_values($rows->map(fn (object $row) => [$this->number($row->id), is_string($row->payload) ? $row->payload : ''])->all()),
+            $maxBytes,
+        );
 
-            if ($tree === null) {
-                $broken[] = $id;
-            } else {
-                $trees[$id] = $tree;
-            }
+        // The trees past the bytes go back as they were: due, and in their place.
+        $over = $this->rowIds($over);
+
+        if ($over !== []) {
+            $this->table()->whereIn('id', $over)->update(['reserved_at' => null]);
         }
 
         if ($broken !== []) {
-            Diagnostics::warn('collect.decode', 'A stored run tree could not be decoded and was dropped.');
+            Diagnostics::dropped('decode', count($broken), 'collect.decode', 'A stored run tree could not be decoded and was dropped.');
 
             $this->ack($broken);
         }
@@ -152,10 +174,13 @@ class DatabaseCollector implements Collector
 
         if ($ids !== []) {
             $this->table()->whereIn('id', $ids)->delete();
+
+            // The deleted bytes are not known here: the next push sums the table again.
+            $this->cache(fn (Cache $cache) => $cache->forget($this->totalKey()));
         }
     }
 
-    public function release(array $ids, int $delay): void
+    public function release(array $ids, int $delay, bool $failed = false): void
     {
         $ids = $this->rowIds($ids);
 
@@ -163,8 +188,38 @@ class DatabaseCollector implements Collector
             $this->table()->whereIn('id', $ids)->update([
                 'available_at' => $this->availableAt(max(0, $delay)),
                 'reserved_at' => null,
+                ...($failed && $this->countsAttempts() ? ['attempts' => $this->database->raw('attempts + 1')] : []),
             ]);
         }
+    }
+
+    public function attempts(array $ids): array
+    {
+        $ids = $this->rowIds($ids);
+
+        if ($ids === []) {
+            return [];
+        }
+
+        if (! $this->countsAttempts()) {
+            return array_fill_keys($this->table()->whereIn('id', $ids)->pluck('id')->map($this->number(...))->all(), 0);
+        }
+
+        $attempts = [];
+
+        foreach ($this->table()->whereIn('id', $ids)->get(['id', 'attempts']) as $row) {
+            $attempts[$this->number($row->id)] = $this->number($row->attempts);
+        }
+
+        return $attempts;
+    }
+
+    /**
+     * Determine whether the table has the attempts column, added in 0.4. Without it every tree has 0 attempts.
+     */
+    protected function countsAttempts(): bool
+    {
+        return $this->countsAttempts ??= $this->database->getSchemaBuilder()->hasColumn(self::TABLE, 'attempts');
     }
 
     public function size(): int
@@ -172,12 +227,31 @@ class DatabaseCollector implements Collector
         return $this->table()->count();
     }
 
-    /**
-     * Get the number of trees this process dropped at the cap.
-     */
-    public function dropped(): int
+    public function stats(): array
     {
-        return $this->dropped;
+        $now = $this->currentTime();
+
+        // A tree is due once it is available and unclaimed, or once the lease of the drain that claimed it ran
+        // out (every drain claims with DrainTraces::LEASE), as claim() takes it then: a worker that died holding
+        // it must not hide it.
+        $waiting = $this->table()->whereNull('reserved_at')->where('available_at', '<=', $now)->min('available_at');
+        $abandoned = $this->table()->where('reserved_at', '<=', $now - DrainTraces::LEASE)->min('reserved_at');
+
+        $due = array_filter([
+            $waiting === null ? null : $this->number($waiting),
+            $abandoned === null ? null : $this->number($abandoned) + DrainTraces::LEASE,
+        ], fn (?int $time) => $time !== null);
+
+        $oldest = $due === [] ? null : min($due);
+
+        return [
+            'trees' => $this->size(),
+            'bytes' => $this->storedBytes(),
+            'max_bytes' => $this->maxBytes,
+            'oldest_age' => $oldest === null ? null : max(0, $now - $oldest),
+            'dropped' => null,
+            'max_attempts' => $this->countsAttempts() ? $this->number($this->table()->max('attempts')) : 0,
+        ];
     }
 
     /**
@@ -249,6 +323,52 @@ class DatabaseCollector implements Collector
         }
 
         return $ids;
+    }
+
+    /**
+     * Get the bytes of every stored tree, from the running total in the default cache, summing the table when the total is missing or older than TOTAL_FOR seconds.
+     *
+     * So a push does not sum the table each time. When the cache fails,
+     * every push sums it.
+     */
+    protected function runningBytes(): int
+    {
+        $total = $this->cache(fn (Cache $cache) => $cache->get($this->totalKey()));
+
+        if (is_numeric($total)) {
+            return (int) $total;
+        }
+
+        $bytes = $this->storedBytes();
+
+        $this->cache(fn (Cache $cache) => $cache->add($this->totalKey(), $bytes, self::TOTAL_FOR));
+
+        return $bytes;
+    }
+
+    /**
+     * Get the cache key of the running total of this collector's connection.
+     */
+    protected function totalKey(): string
+    {
+        return 'refract:database:bytes:'.$this->database->getName();
+    }
+
+    /**
+     * Run the given callback on the app's default cache, or get null when the cache fails.
+     *
+     * @template TValue
+     *
+     * @param  callable(Cache): TValue  $callback
+     * @return TValue|null
+     */
+    protected function cache(callable $callback): mixed
+    {
+        try {
+            return $callback(Container::getInstance()->make(Cache::class));
+        } catch (Throwable) {
+            return null;
+        }
     }
 
     /**

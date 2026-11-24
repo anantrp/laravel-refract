@@ -70,6 +70,11 @@ class HttpExporter implements Exporter
     ) {}
 
     /**
+     * Whether the last request could not reach the destination, or got no answer in time.
+     */
+    protected bool $unreached = false;
+
+    /**
      * Export the given trees, a request at a time, and stop at the first request the destination cannot take now.
      *
      * Given a time limit, each request waits at most what is left of it,
@@ -90,9 +95,12 @@ class HttpExporter implements Exporter
             return ExportResult::rejected();
         }
 
-        $result = ExportResult::ok();
         $done = 0;
         $answered = [];
+        // The positions of the trees a request was refused for good with.
+        $refused = [];
+        // Whether the destination took any request.
+        $took = false;
 
         foreach ($requests as [$spans, $treesDone, $parts]) {
             $timeout = $this->timeout;
@@ -101,30 +109,67 @@ class HttpExporter implements Exporter
                 $left = $deadline - $this->seconds();
 
                 if ($left < self::MIN_REQUEST_SECONDS) {
-                    return ExportResult::unfinished($done, $this->unsent($trees[$done] ?? [], $answered[$done] ?? []));
+                    return ExportResult::unfinished($done, $this->unsent($trees[$done] ?? [], $answered[$done] ?? [], isset($refused[$done])), $this->refusedTrees($refused, $trees), $took);
                 }
 
                 $timeout = min($timeout, $left);
             }
 
+            $posted = $this->seconds();
             $sent = $this->post($spans, $timeout);
 
-            if ($sent->isRetryable()) {
-                return $sent;
+            if ($sent->isRetryable() && $this->unreached && $this->timeout - $timeout >= self::MIN_REQUEST_SECONDS && $this->seconds() - $posted >= $timeout - self::MIN_REQUEST_SECONDS) {
+                // Given well under its own timeout, what was left of the time limit, the request waited it out: the export is cut short, not failed.
+                return ExportResult::unfinished($done, $this->unsent($trees[$done] ?? [], $answered[$done] ?? [], isset($refused[$done])), $this->refusedTrees($refused, $trees), $took);
             }
 
-            if ($sent->isRejected()) {
-                $result = $sent;
+            if ($sent->isRetryable()) {
+                return ExportResult::retryable($sent->retryAfter, $done, $this->unsent($trees[$done] ?? [], $answered[$done] ?? [], isset($refused[$done])), $sent->busy, $this->refusedTrees($refused, $trees), $took);
             }
+
+            $took = $took || ! $sent->isRejected();
 
             foreach ($parts as [$position, $indexes]) {
                 $answered[$position] = [...$answered[$position] ?? [], ...$indexes];
+
+                if ($sent->isRejected()) {
+                    $refused[$position] = true;
+                }
             }
 
             $done = $treesDone;
         }
 
-        return $result;
+        if ($refused === []) {
+            return ExportResult::ok();
+        }
+
+        return count($refused) === count($trees) ? ExportResult::rejected($took, $this->refusedTrees($refused, $trees)) : ExportResult::ok($this->refusedTrees($refused, $trees));
+    }
+
+    /**
+     * Get the number of the given refused trees not counted as refused before.
+     *
+     * A tree cut part way, with a request of it refused, counts now: its
+     * unsent spans are marked, so a later refusal of them is not counted
+     * again.
+     *
+     * @param  array<int, true>  $refused  The positions of the refused trees.
+     * @param  list<list<array<string, mixed>>>  $trees
+     */
+    protected function refusedTrees(array $refused, array $trees): int
+    {
+        return count(array_filter(array_keys($refused), fn (int $position) => ! $this->refusalCounted($trees[$position] ?? [])));
+    }
+
+    /**
+     * Determine whether the given tree is the unsent rest of a tree already counted as refused.
+     *
+     * @param  list<array<string, mixed>>  $tree
+     */
+    protected function refusalCounted(array $tree): bool
+    {
+        return ($tree[0][ExportResult::REFUSAL_COUNTED] ?? false) === true;
     }
 
     /**
@@ -132,11 +177,18 @@ class HttpExporter implements Exporter
      *
      * @param  list<array<string, mixed>>  $tree
      * @param  list<int>  $answered  The indexes in the tree of the spans an answered request carried.
+     * @param  bool  $refused  Whether a request of the tree was refused for good, so its unsent spans are marked as counted.
      * @return list<array<string, mixed>>
      */
-    protected function unsent(array $tree, array $answered): array
+    protected function unsent(array $tree, array $answered, bool $refused = false): array
     {
-        return $answered === [] ? [] : array_values(array_diff_key($tree, array_flip($answered)));
+        $unsent = $answered === [] ? [] : array_values(array_diff_key($tree, array_flip($answered)));
+
+        if ($refused || $this->refusalCounted($tree)) {
+            $unsent = array_map(fn (array $span) => [...$span, ExportResult::REFUSAL_COUNTED => true], $unsent);
+        }
+
+        return $unsent;
     }
 
     /**
@@ -274,6 +326,8 @@ class HttpExporter implements Exporter
      */
     protected function post(array $spans, int|float $timeout): ExportResult
     {
+        $this->unreached = false;
+
         try {
             $body = $this->encoder->encode($this->platform->prepare($spans), $this->resource());
 
@@ -299,6 +353,8 @@ class HttpExporter implements Exporter
                 ->withBody($body, 'application/json')
                 ->post($this->platform->endpoint());
         } catch (ConnectionException) {
+            $this->unreached = true;
+
             return ExportResult::retryable();
         } catch (RequestException $e) {
             $response = $e->response;
@@ -349,7 +405,7 @@ class HttpExporter implements Exporter
         $status = $response->status();
 
         if ($status === 429 || $status === 503) {
-            return ExportResult::retryable($this->retryAfterSeconds($response->header('Retry-After')));
+            return ExportResult::retryable($this->retryAfterSeconds($response->header('Retry-After')), busy: $status === 429);
         }
 
         if ($status === 408 || $status >= 500) {

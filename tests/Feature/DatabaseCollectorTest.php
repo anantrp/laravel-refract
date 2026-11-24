@@ -3,10 +3,12 @@
 use Anantrp\Refract\Contracts\Collector;
 use Anantrp\Refract\RefractServiceProvider;
 use Anantrp\Refract\Support\Diagnostics;
+use Anantrp\Refract\Support\Stats;
 use Anantrp\Refract\Tests\Support\WarningLog;
 use Anantrp\Refract\Transport\Collectors\DatabaseCollector;
 use Anantrp\Refract\Transport\Drain;
 use Anantrp\Refract\Transport\DrainTraces;
+use Illuminate\Contracts\Cache\Repository;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Queue;
@@ -41,7 +43,7 @@ itBehavesLikeAStoredCollector(fn (int $maxBytes) => databaseCollector($maxBytes)
 
 it('the migration creates the refract_traces table', function () {
     expect(Schema::getColumnListing(DatabaseCollector::TABLE))
-        ->toEqualCanonicalizing(['id', 'payload', 'bytes', 'available_at', 'reserved_at']);
+        ->toEqualCanonicalizing(['id', 'payload', 'bytes', 'available_at', 'reserved_at', 'attempts']);
 });
 
 it('a row that is not a tree is dropped with one warning when claimed, and the others are claimed', function () {
@@ -78,14 +80,14 @@ it('leases and delays follow the app clock', function () {
     expect(storedNames($collector->claim(4_000_000, 60)))->toBe(['one']);
 });
 
-it('the dropped count is kept per process, by the collector instance', function () {
-    $collector = databaseCollector(maxBytes: storedBytes(storedTree('one')) + 10);
+it('a tree dropped at the cap is counted for every process, by reason', function () {
+    $one = storedTree('one');
+    $collector = databaseCollector(maxBytes: intdiv(3 * storedBytes($one), 2));
 
-    $collector->push(storedTree('one'));
+    $collector->push($one);
     $collector->push(storedTree('two'));
 
-    expect($collector->dropped())->toBe(1)
-        ->and(databaseCollector()->dropped())->toBe(0);
+    expect(Stats::read()['dropped'])->toBe(['full' => 1]);
 });
 
 it('a push inside a transaction on its connection is skipped with one warning, and the transaction is untouched', function () {
@@ -185,4 +187,63 @@ it('the migration is published under the refract-migrations tag', function () {
 
     expect(array_map(realpath(...), array_keys($paths)))->toBe([realpath(dirname(__DIR__, 2).'/database/migrations')])
         ->and(array_values($paths))->toBe([database_path('migrations')]);
+});
+
+it('a push does not sum the table while the running total is fresh', function () {
+    $collector = databaseCollector();
+    $sums = 0;
+
+    DB::listen(function ($query) use (&$sums) {
+        $sums += str_contains(strtolower($query->sql), 'sum(') ? 1 : 0;
+    });
+
+    foreach (range(1, 10) as $i) {
+        $collector->push(storedTree("tree {$i}"));
+    }
+
+    expect($sums)->toBe(1)
+        ->and($collector->size())->toBe(10);
+});
+
+it('the running total is summed again after 60 seconds', function () {
+    $collector = databaseCollector();
+    $sums = 0;
+
+    DB::listen(function ($query) use (&$sums) {
+        $sums += str_contains(strtolower($query->sql), 'sum(') ? 1 : 0;
+    });
+
+    $collector->push(storedTree('one'));
+    $this->travel(61)->seconds();
+    $collector->push(storedTree('two'));
+
+    expect($sums)->toBe(2);
+});
+
+it('the total is reconciled on claim, so a row deleted behind the collector\'s back frees its bytes', function () {
+    $one = storedTree('one', str_repeat('x', 1_000));
+    $collector = databaseCollector(maxBytes: intdiv(5 * storedBytes($one), 2));
+
+    $collector->push($one);
+    $collector->push(storedTree('two', str_repeat('x', 1_000)));
+    DB::table(DatabaseCollector::TABLE)->orderBy('id')->limit(1)->delete();
+
+    // The total still counts the deleted row.
+    expect($collector->push(storedTree('three', str_repeat('x', 1_000))))->toBeFalse();
+
+    $collector->release(array_keys($collector->claim(4_000_000, 60)), 0);
+
+    expect($collector->push(storedTree('four', str_repeat('x', 1_000))))->toBeTrue();
+});
+
+it('with the cache down, the cap still holds, summing each push', function () {
+    $cache = Mockery::mock(Repository::class);
+    $cache->shouldReceive(Mockery::any())->andThrow(new RuntimeException('down'));
+    app()->instance(Repository::class, $cache);
+
+    $one = storedTree('one', str_repeat('x', 1_000));
+    $collector = databaseCollector(maxBytes: intdiv(3 * storedBytes($one), 2));
+
+    expect($collector->push($one))->toBeTrue()
+        ->and($collector->push(storedTree('two', str_repeat('x', 1_000))))->toBeFalse();
 });

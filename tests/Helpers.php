@@ -2,7 +2,9 @@
 
 use Anantrp\Refract\Contracts\Collector;
 use Anantrp\Refract\Support\Diagnostics;
+use Anantrp\Refract\Support\Stats;
 use Anantrp\Refract\Tests\Support\WarningLog;
+use Anantrp\Refract\Transport\Collectors\TreePayload;
 use Anantrp\Refract\Transport\Drain;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
@@ -21,7 +23,7 @@ use Illuminate\Support\Facades\Log;
 function storedTree(string $name, string $text = ''): array
 {
     return [[
-        'v' => 1, 'trace_id' => str_repeat('a', 32), 'span_id' => bin2hex(random_bytes(8)), 'parent_span_id' => null,
+        'v' => 1, 'trace_id' => str_repeat('a', 32), 'span_id' => hash('xxh64', $name), 'parent_span_id' => null,
         'kind' => 'invoke_agent', 'start' => 1, 'end' => 2, 'status' => 'ok', 'status_message' => null,
         'call' => ['agent' => $name], 'content' => $text === '' ? [] : ['output' => $text], 'context' => [], 'events' => [],
     ]];
@@ -45,19 +47,65 @@ function storedNames(array $trees): array
  */
 function storedBytes(array $tree): int
 {
-    return strlen((string) json_encode($tree));
+    return strlen((string) TreePayload::encode($tree));
+}
+
+/**
+ * Get the bytes of the given tree's JSON, as a claim counts them.
+ *
+ * @param  list<array<string, mixed>>  $tree
+ */
+function jsonBytes(array $tree): int
+{
+    return strlen((string) json_encode($tree, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE | JSON_PRESERVE_ZERO_FRACTION | JSON_PARTIAL_OUTPUT_ON_ERROR));
 }
 
 /**
  * Define the tests every stored collector passes, in the calling test file.
  *
- * The given closure makes an empty collector, capped at the given bytes,
- * whose dropped() counts the trees it dropped at the cap.
+ * The given closure makes an empty collector, capped at the given bytes.
  *
  * @param  Closure(int): Collector  $make
  */
 function itBehavesLikeAStoredCollector(Closure $make): void
 {
+    it('counts failed attempts per tree: a failed release adds one, a plain release none, and a tree that moves keeps its count', function () use ($make) {
+        $collector = $make(64 * 1024 * 1024);
+
+        $collector->push(storedTree('one'));
+        $collector->push(storedTree('two'));
+
+        $ids = array_keys($collector->claim(4_000_000, 60));
+
+        expect(array_values($collector->attempts($ids)))->toBe([0, 0]);
+
+        $collector->release([$ids[0]], 0, failed: true);
+        $collector->release([$ids[1]], 0);
+
+        $again = $collector->claim(4_000_000, 60);
+        expect(array_combine(storedNames($again), array_values($collector->attempts(array_keys($again)))))->toBe(['one' => 1, 'two' => 0]);
+
+        $collector->release(array_keys($again), 0, failed: true);
+        $third = $collector->claim(4_000_000, 60);
+
+        expect(array_combine(storedNames($third), array_values($collector->attempts(array_keys($third)))))->toBe(['one' => 2, 'two' => 1]);
+
+        $collector->ack(array_keys($third));
+
+        expect($collector->attempts(array_keys($third)))->toBe([]);
+    });
+
+    it('reports the most attempts of a stored tree', function () use ($make) {
+        $collector = $make(64 * 1024 * 1024);
+
+        $collector->push(storedTree('one'));
+        expect($collector->stats()['max_attempts'])->toBe(0);
+
+        $collector->release(array_keys($collector->claim(4_000_000, 60)), 0, failed: true);
+
+        expect($collector->stats()['max_attempts'])->toBe(1);
+    });
+
     it('claims pushed trees oldest first, keyed by id, and acked trees leave the store', function () use ($make) {
         $collector = $make(64 * 1024 * 1024);
 
@@ -78,16 +126,33 @@ function itBehavesLikeAStoredCollector(Closure $make): void
             ->and($collector->claim(4_000_000, 60))->toBe([]);
     });
 
-    it('a claim adds trees until it reaches the bytes, and the rest wait for the next claim', function () use ($make) {
+    it('a claim adds trees until their JSON reaches the bytes, and the rest wait for the next claim', function () use ($make) {
         $collector = $make(64 * 1024 * 1024);
 
         foreach (['one', 'two', 'three'] as $name) {
-            $collector->push(storedTree($name, str_repeat('x', 1_000)));
+            $collector->push(storedTree($name, bin2hex(random_bytes(500))));
         }
 
-        // Each tree is over 1,000 bytes: the second takes the claim past 1,500.
-        expect(storedNames($collector->claim(1_500, 60)))->toBe(['one', 'two'])
-            ->and(storedNames($collector->claim(1_500, 60)))->toBe(['three']);
+        $limit = intdiv(3 * jsonBytes(storedTree('one', bin2hex(random_bytes(500)))), 2);
+
+        // The second tree takes the claim past one and a half trees.
+        expect(storedNames($collector->claim($limit, 60)))->toBe(['one', 'two'])
+            ->and(storedNames($collector->claim($limit, 60)))->toBe(['three']);
+    });
+
+    it('a claim of trees that compress well still stops at the bytes of their JSON, and the rest wait for the next claim', function () use ($make) {
+        $collector = $make(64 * 1024 * 1024);
+
+        foreach (['one', 'two', 'three', 'four', 'five'] as $name) {
+            // About 100 KB of JSON that stores in well under 1 KB.
+            $collector->push(storedTree($name, str_repeat('The release ships on Friday. ', 3_500)));
+        }
+
+        $limit = intdiv(5 * jsonBytes(storedTree('one', str_repeat('The release ships on Friday. ', 3_500))), 2);
+
+        expect(storedNames($collector->claim($limit, 60)))->toBe(['one', 'two', 'three'])
+            ->and(storedNames($collector->claim($limit, 60)))->toBe(['four', 'five'])
+            ->and($collector->claim($limit, 60))->toBe([]);
     });
 
     it('a tree whose lease ran out is claimed again, as a crashed worker would leave it', function () use ($make) {
@@ -137,15 +202,17 @@ function itBehavesLikeAStoredCollector(Closure $make): void
     });
 
     it('at the cap a new tree is dropped and counted with one warning, and the stored trees are kept', function () use ($make) {
-        $collector = $make(2 * storedBytes(storedTree('one', str_repeat('x', 1_000))) + 10);
+        $trees = array_map(fn (string $name) => storedTree($name, str_repeat('x', 1_000)), ['one', 'two', 'three', 'four']);
 
-        $collector->push(storedTree('one', str_repeat('x', 1_000)));
-        $collector->push(storedTree('two', str_repeat('x', 1_000)));
-        $collector->push(storedTree('three', str_repeat('x', 1_000)));
-        $collector->push(storedTree('four', str_repeat('x', 1_000)));
+        // Room for two trees and half of a third: trees differ in gzipped size by a few bytes.
+        $collector = $make(intdiv(5 * storedBytes($trees[0]), 2));
+
+        foreach ($trees as $tree) {
+            $collector->push($tree);
+        }
 
         expect($collector->size())->toBe(2)
-            ->and($collector->dropped())->toBe(2)
+            ->and(Stats::read()['dropped']['full'] ?? 0)->toBe(2)
             ->and($this->log->warnings)->toHaveCount(1)
             ->and($this->log->warnings[0])->toContain('full');
 
@@ -161,14 +228,15 @@ function itBehavesLikeAStoredCollector(Closure $make): void
     });
 
     it('released trees still count against the cap until they are acked', function () use ($make) {
-        $collector = $make(storedBytes(storedTree('one', str_repeat('x', 1_000))) + 10);
+        $one = storedTree('one', str_repeat('x', 1_000));
+        $collector = $make(intdiv(3 * storedBytes($one), 2));
 
-        $collector->push(storedTree('one', str_repeat('x', 1_000)));
+        $collector->push($one);
         $collector->release(array_keys($collector->claim(4_000_000, 60)), 300);
         $collector->push(storedTree('two', str_repeat('x', 1_000)));
 
         expect($collector->size())->toBe(1)
-            ->and($collector->dropped())->toBe(1);
+            ->and(Stats::read()['dropped']['full'] ?? 0)->toBe(1);
     });
 
     it('a stored tree survives the trip: invalid UTF-8 is replaced, floats keep their fraction', function () use ($make) {

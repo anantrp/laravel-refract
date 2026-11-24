@@ -6,6 +6,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Every dropped run tree is counted by reason in the default cache store and fires an `Anantrp\Refract\Events\TracesDropped` event (`count`, `reason`). The reasons are `paused`, `unavailable`, `rejected`, `unfinished`, `error`, `full`, `transaction`, `encode`, `decode` and `run_cap` (whose count is spans), and `poison`.
+
+- With `REFRACT_DRAIN=queue`, a push warns when the oldest due tree in the store has waited over 10 minutes: no worker reads the `refract` queue. Both collectors implement a new `Anantrp\Refract\Contracts\ReportsStats` contract (`stats()`: trees, bytes, cap, oldest due age, drops at the cap, most failed attempts).
+
+- `php artisan refract:status` (`--json`) shows the destination, drain, store, drops by reason, pause or backoff, and the last export success and failure. It exits 1 when the store cannot be read or has a tree waiting over 10 minutes, traces were dropped since its last run, or exports have failed for 10 minutes with no success.
+
+- `php artisan refract:test` sends one test trace straight to the destination, past the queue drain and any pause, and says whether it arrived, was rejected, or could not be sent.
+
+### Changed
+
+- A warning is logged at most once per kind every 10 minutes, shared through the default cache store, and the next one says how many were held back (`(42 more since the last warning)`). Before, each process logged a kind once, ever, and stopped after 10 kinds: a long-lived queue worker went quiet during a long outage.
+
+- With a content mask, each distinct value is masked once per request or job, not once per step it appears in: a 10-step run no longer masks its history 10 times. The mask should give the same output for the same input.
+
+- With content capture on, a run records at most about 2 MB of step input in full. Past that, each step records only its new messages, after one `[N earlier messages omitted, see step 1]` message, and the run span gets `laravel.ai.content_truncated=true`. Step 1, the run's prompt and output, step outputs and tool content are never cut this way. A run under the budget records exactly what it did before.
+
+- The queue drain's collectors store trees gzipped (`gz1:` and base64, so still plain text in the database), so the 64 MB cap holds several times more traces. Trees stored by 0.3 still read. A drain still claims about 4 MB of trees at a time, counted as JSON, so a claim of trees that compress well never takes more memory than in 0.3. Requires `ext-zlib`. **Upgrading:** a tree stored by 0.4 cannot be read by 0.3, so rolling back with trees still stored drops them, each with a `decode` warning.
+
+### Fixed
+
+- With `REFRACT_DRAIN=queue`, one tree that a destination keeps failing on (a 5xx for that payload) no longer holds back the trees claimed with it. A batch that fails without delivering anything is split in halves, both sent, and each failing half split again until the trees it fails on are alone. A tree counts a failed export only when it failed alone while the destination was seen to take other trees right next to it, and it is dropped as `poison` at 10. Five failed requests in a row mean the destination is down. An outage, a flaky destination, or a destination answering `429` counts and drops nothing. `refract:status` shows the most failed attempts of a stored tree. **Upgrading:** the database collector needs a new migration: run `php artisan vendor:publish --tag=refract-migrations` and `php artisan migrate`. `Collector::release()` takes a third `$failed` argument and the contract adds `attempts()`: a collector of your own must add both.
+
+- The queue drain no longer sends trees again that an earlier request of the same drain delivered, when a later request fails with a network error, 408, 429 or 5xx.
+
+- A request refused for good (4xx) in an export of several requests counts only its own trees as `rejected`. Before, the whole batch was counted, or, when a later request failed, the refused trees were not counted at all.
+
+- The database collector keeps a running total of its stored bytes in the default cache, so a push no longer sums the table each time: it sums at most once a minute, and every claim and ack sets the total right.
+- The Redis collector takes over expired leases 100 at a time instead of one by one, and hands back at once the ones a full claim did not take.
+
+### Removed
+
+- `DatabaseCollector::dropped()`. The drop count is now kept for every process, in the default cache store.
+
 ## [0.3.0] - 2026-11-17
 
 0.3 makes the sync drain fail fast: a destination that is down costs a request or a queue job at most one bounded export, then nothing until it comes back.

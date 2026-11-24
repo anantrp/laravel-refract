@@ -7,6 +7,8 @@ use Anantrp\Refract\Capture\FlushPoints;
 use Anantrp\Refract\Capture\RecordAgentRuns;
 use Anantrp\Refract\Capture\Recorder;
 use Anantrp\Refract\Capture\RunContext;
+use Anantrp\Refract\Console\StatusCommand;
+use Anantrp\Refract\Console\TestCommand;
 use Anantrp\Refract\Contracts\Collector;
 use Anantrp\Refract\Contracts\Exporter;
 use Anantrp\Refract\Export\GenAiTranslator;
@@ -31,6 +33,13 @@ use RuntimeException;
 
 class RefractServiceProvider extends ServiceProvider
 {
+    /**
+     * The destinations Refract can send to.
+     *
+     * @var list<string>
+     */
+    public const DESTINATIONS = ['otlp', 'langfuse'];
+
     public function register(): void
     {
         $this->mergeConfigFrom(__DIR__.'/../config/refract.php', 'refract');
@@ -89,7 +98,7 @@ class RefractServiceProvider extends ServiceProvider
      */
     protected function platform(): ?Platform
     {
-        return match (Settings::choice('destination', ['otlp', 'langfuse'], 'otlp')) {
+        return match (Settings::choice('destination', self::DESTINATIONS, 'otlp')) {
             'langfuse' => $this->langfuse(),
             default => $this->otlp(),
         };
@@ -141,6 +150,8 @@ class RefractServiceProvider extends ServiceProvider
             $this->publishes([__DIR__.'/../config/refract.php' => config_path('refract.php')], 'refract-config');
 
             $this->publishesMigrations([__DIR__.'/../database/migrations' => database_path('migrations')], 'refract-migrations');
+
+            $this->commands([StatusCommand::class, TestCommand::class]);
         }
 
         // A destination that cannot send has warned once: Refract stays off, as if disabled.

@@ -25,7 +25,7 @@ class MemoryCollector implements Collector
     /**
      * The stored trees by id: the tree, when it may be claimed, and when it was claimed.
      *
-     * @var array<int, array{tree: list<array<string, mixed>>, available_at: int, claimed_at: ?int}>
+     * @var array<int, array{tree: list<array<string, mixed>>, available_at: int, claimed_at: ?int, attempts?: int}>
      */
     public array $entries = [];
 
@@ -57,7 +57,7 @@ class MemoryCollector implements Collector
             return false;
         }
 
-        $this->entries[$this->next++] = ['tree' => $tree, 'available_at' => 0, 'claimed_at' => null];
+        $this->entries[$this->next++] = ['tree' => $tree, 'available_at' => Date::now()->getTimestamp(), 'claimed_at' => null];
 
         return true;
     }
@@ -70,7 +70,11 @@ class MemoryCollector implements Collector
         $trees = [];
         $used = 0;
 
-        foreach ($this->entries as $id => $entry) {
+        // In the order they became due, as the real collectors claim them.
+        $due = $this->entries;
+        uksort($due, fn (int $one, int $other) => [$due[$one]['available_at'], $one] <=> [$due[$other]['available_at'], $other]);
+
+        foreach ($due as $id => $entry) {
             if ($used >= $maxBytes) {
                 break;
             }
@@ -81,6 +85,7 @@ class MemoryCollector implements Collector
 
             $this->entries[$id]['claimed_at'] = $now;
             $trees[$id] = $entry['tree'];
+            // Sized as the real collectors claim it, by its JSON.
             $used += strlen((string) json_encode($entry['tree']));
         }
 
@@ -96,7 +101,7 @@ class MemoryCollector implements Collector
         }
     }
 
-    public function release(array $ids, int $delay): void
+    public function release(array $ids, int $delay, bool $failed = false): void
     {
         $this->failIfTold();
 
@@ -106,8 +111,24 @@ class MemoryCollector implements Collector
             if (isset($this->entries[$id])) {
                 $this->entries[$id]['available_at'] = Date::now()->getTimestamp() + $delay;
                 $this->entries[$id]['claimed_at'] = null;
+                $this->entries[$id]['attempts'] = ($this->entries[$id]['attempts'] ?? 0) + ($failed ? 1 : 0);
             }
         }
+    }
+
+    public function attempts(array $ids): array
+    {
+        $this->failIfTold();
+
+        $attempts = [];
+
+        foreach ($ids as $id) {
+            if (isset($this->entries[$id])) {
+                $attempts[$id] = $this->entries[$id]['attempts'] ?? 0;
+            }
+        }
+
+        return $attempts;
     }
 
     public function size(): int

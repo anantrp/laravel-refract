@@ -100,7 +100,9 @@ function loadRefract(bool $cached = false): WarningLog
         (new RefractServiceProvider(app()))->register();
     }
 
+    // A fresh boot, as a new deploy would be: warnings logged by the last one are not held back.
     Diagnostics::reset();
+    app('cache')->flush();
     Log::swap($log = new WarningLog);
     Http::fake();
 

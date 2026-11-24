@@ -6,7 +6,8 @@ namespace Anantrp\Refract\Contracts;
  * What became of an export: delivered, worth trying again later, refused for good, or cut short by its time limit.
  *
  * A retryable result may carry the seconds the destination asked to wait
- * (its Retry-After), already capped by the exporter. An unfinished result
+ * (its Retry-After), already capped by the exporter, and, like an
+ * unfinished one, the trees done before the failing request. An unfinished result
  * carries the number of leading trees that were done (taken or refused)
  * before time ran out; the rest were not sent in full. When time ran out
  * inside a tree split over requests, it also carries that tree's spans
@@ -18,36 +19,75 @@ final readonly class ExportResult
      * Create a new export result instance.
      *
      * @param  list<array<string, mixed>>  $rest  The neutral spans of the tree after the done ones that were not sent, when part of it was.
+     * @param  int  $refused  The trees among the done ones that the destination refused for good, when it took others.
+     * @param  bool|null  $took  Whether the destination took any request, when the exporter knows; else whether some done tree was not refused.
      */
     private function __construct(
         protected string $status,
         public ?int $retryAfter = null,
         public int $done = 0,
         public array $rest = [],
-    ) {}
+        public bool $busy = false,
+        public int $refused = 0,
+        ?bool $took = null,
+        protected bool $refusedKnown = true,
+    ) {
+        $this->took = $took ?? ($status === 'ok' || $done > $refused || $rest !== []);
+    }
 
     /**
-     * The destination took the trees.
+     * The neutral span key that marks the unsent spans of a tree already counted as refused, so a later refusal of them is not counted again.
      */
-    public static function ok(): self
+    public const REFUSAL_COUNTED = 'refusal_counted';
+
+    /**
+     * Get the number of the given trees the destination refused for good.
+     *
+     * A rejected result from an exporter that does not count its refused
+     * trees refused them all.
+     */
+    public function refusedOf(int $trees): int
     {
-        return new self('ok');
+        return $this->refusedKnown ? $this->refused : $trees;
+    }
+
+    /**
+     * Whether the destination took any of the trees: a refusal answers, but takes nothing.
+     */
+    public bool $took;
+
+    /**
+     * The destination took the trees, but for the given number it refused for good.
+     */
+    public static function ok(int $refused = 0): self
+    {
+        return new self('ok', refused: $refused);
     }
 
     /**
      * The destination could not take the trees now: a network error, 408, 429 or 5xx.
+     *
+     * When requests before the failing one were answered, the given number
+     * of leading trees are done, and the unsent spans of a tree split over
+     * requests are given, as for an unfinished export. A busy destination
+     * (a 429) is marked, so the trees are not held to blame for it.
+     *
+     * @param  list<array<string, mixed>>  $rest  The unsent spans of the next tree, when some of its spans were sent.
      */
-    public static function retryable(?int $retryAfter = null): self
+    public static function retryable(?int $retryAfter = null, int $done = 0, array $rest = [], bool $busy = false, int $refused = 0, ?bool $took = null): self
     {
-        return new self('retryable', $retryAfter);
+        return new self('retryable', $retryAfter, $done, $rest, $busy, $refused, $took);
     }
 
     /**
      * The destination refused the trees, or they could not be sent: trying again would not help.
+     *
+     * The destination may still have taken some requests, of a tree split
+     * over requests, before or after the one it refused.
      */
-    public static function rejected(): self
+    public static function rejected(bool $took = false, ?int $refused = null): self
     {
-        return new self('rejected');
+        return new self('rejected', refused: $refused ?? 0, took: $took, refusedKnown: $refused !== null);
     }
 
     /**
@@ -55,9 +95,9 @@ final readonly class ExportResult
      *
      * @param  list<array<string, mixed>>  $rest  The unsent spans of the next tree, when some of its spans were sent.
      */
-    public static function unfinished(int $done, array $rest = []): self
+    public static function unfinished(int $done, array $rest = [], int $refused = 0, ?bool $took = null): self
     {
-        return new self('unfinished', done: $done, rest: $rest);
+        return new self('unfinished', done: $done, rest: $rest, refused: $refused, took: $took);
     }
 
     /**
@@ -82,6 +122,14 @@ final readonly class ExportResult
     public function isUnfinished(): bool
     {
         return $this->status === 'unfinished';
+    }
+
+    /**
+     * Determine if the destination is busy, not failing: it answered 429, or asked to wait with a Retry-After.
+     */
+    public function isBusy(): bool
+    {
+        return $this->busy || $this->retryAfter !== null;
     }
 
     /**

@@ -14,7 +14,7 @@ Install it, set a few environment variables, and you are done. There is no API t
 
 Refract uses `open-telemetry/api` only. It does not need the OpenTelemetry SDK.
 
-Laravel Octane is not supported in 0.3.
+Laravel Octane is not supported in 0.4.
 
 ## Installation
 
@@ -22,7 +22,13 @@ Laravel Octane is not supported in 0.3.
 composer require anantrp/laravel-refract
 ```
 
-The service provider is discovered automatically. Refract does nothing until you tell it where to send traces. Until then it logs one warning per process and records nothing.
+The service provider is discovered automatically. Refract does nothing until you tell it where to send traces. Until then it logs one warning (at most once every 10 minutes) and records nothing.
+
+### Upgrading to 0.4
+
+- **Database collector:** run `php artisan vendor:publish --tag=refract-migrations` and `php artisan migrate` again. 0.4 adds an `attempts` column to `refract_traces`.
+- **Rolling back to 0.3:** 0.4 stores trees gzipped (`gz1:...`), which 0.3 cannot read. If you roll back while trees are still stored, 0.3 drops them, each with a `decode` warning. Let the store drain first.
+- **A collector of your own:** the `Collector` contract adds `attempts(array $ids): array`, and `release()` takes a third argument, `bool $failed = false`. To show in `refract:status`, also implement `ReportsStats`.
 
 ## Quick Start
 
@@ -45,6 +51,8 @@ REFRACT_OTLP_HEADERS="x-api-key=your-key"
 ```
 
 `otlp` is the default destination, so the first line is optional. The endpoint is the full URL traces are posted to.
+
+Run `php artisan refract:test` to check the destination. It sends one test trace named `refract:test` and prints its trace id, or says whether the destination rejected it (check the keys and endpoint) or could not be reached.
 
 Run any agent. Each run is recorded as a tree of spans. A run starts a new trace, or joins your app's active OpenTelemetry trace when there is one. A sub-agent run nests inside the run that called it.
 
@@ -102,6 +110,7 @@ invoke_agent SupportAgent
 - **Tool approvals.** A run that pauses for approval has a `laravel.ai.tool_approval.requested` event per tool call, with the tool name and call id. A run resumed from approvals has a `laravel.ai.tool_approval.resolved` event per decision, with the call id, `laravel.ai.tool_approval.action` (`approve`, `reject` or `edit`) and `laravel.ai.tool_approval.approved`. The tool name is there when the call is in the messages the resumed prompt was given; a conversation the SDK loads from its store is not read. A decision for every other call has the call id `*`. A run resumed from approvals records no prompt, since none was sent.
 - **Streams.** A stream read to the end gives the same tree as `prompt()`. A stream read again after it stopped is a separate run.
 - **Abandoned spans.** A span still open when Refract exports (for example, a stream the app stopped reading) is closed as abandoned. It has no OTel status and the attribute `laravel.ai.abandoned=true`. Langfuse shows it as a warning with the message `abandoned`.
+- **Content over budget.** A run whose step inputs passed 2 MB has `laravel.ai.content_truncated=true`. See [Content Capture](#content-capture).
 - **Truncated runs.** One run records at most 1,000 spans, sub-agent runs included. Past that, its new spans are dropped with one warning, and the top-level run span gets `laravel.ai.truncated=true`. Other runs are not affected.
 - **Errors.** A run, model call or tool that throws gets status `error` and the attribute `error.type`, both the exception class. Your app gets the same exception. The exception message is never recorded.
 
@@ -206,6 +215,66 @@ A 2xx can carry an OTLP `partialSuccess` (JSON answers only). When it refuses sp
 
 Redirects are never followed, so your keys and headers never go to another host. A 3xx is dropped like any other rejected status. The HTTP timeout is 5 seconds with `sync` (for the whole export) and 15 seconds per request from the queue drain. Connecting to the destination may take at most 1 second with `sync` and 5 seconds from the queue drain, so a host that never answers a connection costs 1 second, not 5.
 
+### Lost Traces
+
+Every run tree Refract drops is counted by reason, in your default cache store, and fires an `Anantrp\Refract\Events\TracesDropped` event with the `count` and the `reason`:
+
+| Reason | What happened |
+| --- | --- |
+| `paused` | `sync`: dropped without a request, while exports pause after a failure |
+| `unavailable` | `sync`: a network error, timeout, 408, 429 or 5xx |
+| `rejected` | Any other status the destination answered with |
+| `unfinished` | `sync`: the export used its 5 seconds before sending these trees |
+| `error` | Refract failed to export or store the trees |
+| `full` | `queue`: the collector was at its cap |
+| `transaction` | `queue`: the database collector was asked to write inside a transaction open on its connection |
+| `encode`, `decode` | `queue`: a tree could not be stored, or a stored tree could not be read |
+| `run_cap` | One run passed 1,000 spans. Here `count` is the spans it dropped, not trees. |
+| `poison` | `queue`: a tree failed 10 exports alone, each while trees claimed with it went through |
+
+```php
+use Anantrp\Refract\Events\TracesDropped;
+use Illuminate\Support\Facades\Event;
+
+Event::listen(function (TracesDropped $event) {
+    // Send $event->count and $event->reason to your metrics.
+});
+```
+
+A listener that throws is ignored, and a drop inside a listener does not fire the event again.
+
+### Checking Delivery
+
+`php artisan refract:status` shows where traces go and whether they get there:
+
+```
+  Destination ....................................................... langfuse
+  Drain ................................................................ queue
+  Collector ............................................................ redis
+  Stored ........................................ 12 trees, 48211 of 67108864 bytes
+  Oldest due tree ........................................... waited 4 seconds
+  Most failed attempts ......................................................... 0
+  Backing off until ......................................................... no
+  Dropped ................................................................ none
+  Last success ................................................ 2026-11-18 09:41:07
+  Last failure ...................................................... never
+```
+
+It exits with 1 when traces are being lost:
+
+- the store of the queue drain cannot be read,
+- the oldest due tree in the store has waited over 10 minutes (no worker reads the `refract` queue),
+- traces were dropped since the last time the command ran, or
+- exports have kept failing for 10 minutes, counted from the first failure, with no success.
+
+So a scheduler, a cron job or a deploy check can alert on it:
+
+```bash
+php artisan refract:status || your-alert-command "Refract is losing traces"
+```
+
+`--json` prints the same as one JSON object. The counts live in your default cache store. With the `array` store, or when the cache fails, each process keeps its own, and the command says so.
+
 ## Collecting and Draining
 
 With `REFRACT_DRAIN=queue`, a finished run tree is not exported where it ran. It is pushed to a collector, a bounded store, and a `DrainTraces` job exports it from your own queue workers. There is no extra daemon.
@@ -229,16 +298,20 @@ It needs:
 How it works:
 
 - The first push after the store went idle dispatches one drain job, 5 seconds later, so a burst of runs leaves together. Later pushes do not dispatch another while it waits.
-- The drain claims about 4 MB of trees, exports them in one request, removes them from the store, and repeats until the store is empty. It starts no new claim after 20 seconds, and hands over to a new drain job.
+- The drain claims about 4 MB of trees, counted as JSON however small they are stored, exports them in one request, removes them from the store, and repeats until the store is empty. It starts no new claim after 20 seconds, and hands over to a new drain job.
 - The drain ends within 45 seconds, inside its 60 second job `timeout`, which is itself inside the 90 second `retry_after` of Laravel's default queue connections. Each request waits at most what is left of the 45 seconds, and a request is not started with less than a second left: the trees not sent go back to the store for the next drain, which is dispatched at once. A big tree cut part way through its requests keeps its progress: only its unsent spans go back, so the next drain picks up where this one stopped. Keep your queue connection's `retry_after` above 60 seconds.
-- On a network error, 408, 429 or 5xx, the drain gives the claimed trees back and stops. The next drain waits 10, then 60, then 300 seconds after each failure in a row, or the `Retry-After` of the answer when it is longer, at most 300 seconds. A tree is tried again until it is sent: there is no attempt limit. The store cap bounds what waits.
+- On a network error, 408 or 5xx, the drain keeps what earlier requests delivered and sends the rest again. A batch that fails without delivering anything is split in two halves, both are sent, and each half that failed is split again, until the trees it fails on are alone. So a tree the destination keeps failing on (a 5xx for that payload) cannot hold back the trees claimed with it.
+- A tree counts a failed export only when it failed alone while the destination was seen to be up: below a split whose other half went through in full, or right after earlier requests of its own export went through. It is dropped as `poison` at 10. A tree that failed before is spread among the others in later claims, so a healthy tree blamed beside a bad one goes through the next time. Five failed requests in a row, nothing delivered between, mean the destination is down: every tree goes back, nothing is counted, and the drain stops. So an outage or a flaky destination drops nothing this way: the store cap bounds what waits. A tree alone in its claim is never counted either: nothing tells it from a failing destination.
+- A request that runs out of the drain's own time limit is cut short, not failed: the trees not sent go back for the next drain, counting nothing.
+- The next drain waits 10, then 60, then 300 seconds after each failed drain in a row, or the `Retry-After` of the answer when it is longer, at most 300 seconds; a drain that delivered something starts over at 10. A `429` or a `Retry-After` (a busy destination) stops the drain at once and counts nothing.
 - If the destination settings are missing or invalid in the worker, the drain logs one warning and, while trees are stored, tries again with the same backoff. On an empty store it dispatches nothing.
 - The drain job never throws, and it has no attempt limit (`$tries = 0`), so nothing reaches `failed_jobs`: a drain whose worker dies, or that is killed at its timeout, is given to a worker again after the connection's `retry_after`.
 - A claimed tree is leased for 120 seconds, twice the job `timeout`, so a running drain never loses its trees to another. If the worker dies, the tree is claimed again when the lease runs out.
+- If no worker reads the `refract` queue, nothing drains the store. A push warns, at most every 10 minutes, once the oldest tree that is due has waited over 10 minutes: `No worker is draining the refract queue: ...`. The store is looked at no more than once a minute.
 
-Delivery is at least once. A crash between the export and the removal from the store, or a retryable failure in the middle of a batch, sends trees again. Span ids are set when a span is recorded, so backends deduplicate a resent tree by span id.
+Delivery is at least once. A crash between the export and the removal from the store sends trees again. Span ids are set when a span is recorded, so backends deduplicate a resent tree by span id.
 
-The store holds at most 64 MB of trees. At the cap, new trees are dropped and counted, with one warning. The trees already stored are kept.
+Trees are stored gzipped, so text takes several times less room. The store holds at most 64 MB of them, counted after gzip. At the cap, new trees are dropped and counted, with one warning. The trees already stored are kept.
 
 ### Redis Collector
 
@@ -264,6 +337,8 @@ Trees are kept in a `refract_traces` table. Publish the migration and run it:
 php artisan vendor:publish --tag=refract-migrations
 php artisan migrate
 ```
+
+Upgrading from 0.3, run both again: 0.4 adds an `attempts` column. Until it is there, every tree counts as never failed, so none is dropped as `poison`.
 
 - The migration and the collector use your default database connection, or the one named in `collectors.database.connection` in the published config.
 - Give the collector a connection of its own. Refract never stores a tree inside a transaction that is open on the collector's connection: it would be rolled back with your work, and an error there could abort it. A run that ends inside a transaction is handed on after it (see [Sending](#sending)); a tree that still meets an open transaction on that connection is dropped with one warning.
@@ -291,6 +366,7 @@ How values are recorded:
 - **Byte cap.** Each value is cut at 128 KB, at a character border, and marked with its original size: `…[cut, original size N bytes]`.
 - **No files or media.** Attachments and files are never recorded, with capture on or off: no bytes, no name, no URL, no size. A file inside a value, for example a tool that returns an image, becomes `[file]`.
 - **Tool results in step history.** In a `chat` span's input messages, a tool result is only a reference (tool name and call id). The result itself is on the `execute_tool` span.
+- **Budget per run.** A run sends its whole history to the model again at each step, so a long run would record its history once per step. Once a run's `chat` inputs reach 2 MB, each later step records only the messages new since the step before, after one message `[N earlier messages omitted, see step 1]`, and the run span gets `laravel.ai.content_truncated=true`. The first step is always recorded whole. The run's prompt and output, the steps' outputs, and tool arguments and results are never cut this way.
 - **No built-in redaction.** Refract does not look for secrets. Use a `mask`.
 
 ### Tool Results
@@ -330,6 +406,8 @@ class MaskSecrets
 ```
 
 The mask fails closed. When it throws or does not return a string, the value becomes `<fully masked due to failed mask function>` and one warning is logged. When the class cannot be made or is not invokable, every value is masked that way. The run always continues.
+
+A run sends its whole history to the model again at each step, so the same messages are captured again and again. The mask runs once per distinct value per request or job, and the result is reused, so it should give the same output for the same input. A mask that adds a timestamp or a random token gives every repeat the first result.
 
 The mask is not called for the output or tool result of a span dropped at the cap (see [Bounded Memory](#bounded-memory)). Its prompt, input and tool arguments still go through the mask.
 
@@ -404,9 +482,9 @@ Context::add('trigger', 'schedule');
 ## Safety
 
 - **Refract never breaks your app.** Every listener and lifecycle hook is guarded. A failure inside Refract logs one warning and the run goes on. Your app's own exceptions pass through unchanged.
-- **No extra calls.** Refract never calls agent methods that run your code (`instructions()`, `tools()`) and runs no queries while a run records. The only queries are the database collector's, after the response. A run is named without calling the agent's `name()`. To name a tool span, Refract reads the tool name the way the SDK does. This calls `name()` once per tool call, on a tool or on an agent used as a tool. The SDK makes the same call.
+- **No extra calls.** Refract never calls agent methods that run your code (`instructions()`, `tools()`) and runs no queries while a run records. The only queries are the database collector's, after the response, and, with the `database` cache store, the drop counts and warning windows, which never run inside your open transactions. A run is named without calling the agent's `name()`. To name a tool span, Refract reads the tool name the way the SDK does. This calls `name()` once per tool call, on a tool or on an agent used as a tool. The SDK makes the same call.
 - **Bounded retries.** With `REFRACT_DRAIN=queue`, the drain job never throws, so nothing reaches `failed_jobs`, and the store never grows past its cap.
-- **Warnings.** Each warning is logged at the `warning` level, prefixed `[refract]`, once per kind per process. After 10 different warnings, Refract stays silent.
+- **Warnings.** Each warning is logged at the `warning` level, prefixed `[refract]`, at most once per kind every 10 minutes, across every process that shares your default cache store. The next one ends with how many were held back meanwhile, as `(42 more since the last warning)`. So a long outage keeps reminding you without flooding your logs. A process asks the cache at most once per kind in that window. If the cache fails, each process keeps its own 10 minutes. With the `database` cache store, a count or warning inside your open transaction waits in the process and is written after it, so Refract never holds a lock in your transaction. "One warning" elsewhere in this README means one per kind in such a window.
 
 ### Bounded Memory
 
@@ -414,7 +492,7 @@ Context::add('trigger', 'schedule');
 - A run dropped at the cap stays dropped. Its steps, tools and sub-agent runs are dropped too. So they never show up as traces of their own.
 - A console process holds only its open runs: each run tree leaves when it ends. A web request holds its finished run trees until the response is sent.
 - A stream that the app stopped reading stays open until the end of the process.
-- With `REFRACT_DRAIN=queue`, the collector holds at most 64 MB of trees. At the cap, new trees are dropped with one warning.
+- With `REFRACT_DRAIN=queue`, the collector holds at most 64 MB of gzipped trees. At the cap, new trees are dropped with one warning.
 
 ## Known Limitations
 

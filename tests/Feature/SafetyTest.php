@@ -353,7 +353,7 @@ it('a flush that fails while building the trees, or a reset that throws, still c
         ->and(implode("\n", $log->warnings))->not->toContain('SECRET');
 });
 
-it('11 different internal errors give 10 warnings, then silence', function () {
+it('11 different internal errors give 11 warnings, each once per window', function () {
     bootSafety();
     Log::swap($log = new WarningLog);
 
@@ -362,8 +362,8 @@ it('11 different internal errors give 10 warnings, then silence', function () {
         Diagnostics::warn("error.{$error}", "Internal error {$error} again.");
     }
 
-    expect($log->warnings)->toHaveCount(10)
-        ->and($log->warnings[9])->toContain('Internal error 10.')
+    expect($log->warnings)->toHaveCount(11)
+        ->and($log->warnings[10])->toContain('Internal error 11.')
         ->and(implode("\n", $log->warnings))->not->toContain('again');
 });
 

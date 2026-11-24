@@ -3,6 +3,7 @@
 namespace Anantrp\Refract\Transport\Collectors;
 
 use Anantrp\Refract\Contracts\Collector;
+use Anantrp\Refract\Contracts\ReportsStats;
 use Anantrp\Refract\Support\Diagnostics;
 use Illuminate\Redis\Connections\Connection;
 use Illuminate\Redis\Connections\PhpRedisConnection;
@@ -27,7 +28,7 @@ use RuntimeException;
  * Redis Cluster. Use a connection that never evicts keys: an eviction
  * policy would drop trees, or the byte count, without a warning.
  */
-class RedisCollector implements Collector
+class RedisCollector implements Collector, ReportsStats
 {
     /**
      * The key of the stream; the other keys add a suffix to it.
@@ -74,7 +75,7 @@ class RedisCollector implements Collector
         LUA;
 
     /**
-     * Add back the delayed trees that are due, then take over expired leases and read new entries, until the bytes are reached.
+     * Add back the delayed trees that are due, then take over expired leases, 100 at a time, and read new entries, until the bytes are reached.
      */
     protected const CLAIM = <<<'LUA'
         local time = redis.call('time')
@@ -87,11 +88,17 @@ class RedisCollector implements Collector
             local tree = redis.call('hget', KEYS[5], id)
 
             if tree then
-                redis.call('xadd', KEYS[1], '*', 'tree', tree)
+                local added = redis.call('xadd', KEYS[1], '*', 'tree', tree)
+                local attempts = redis.call('hget', KEYS[6], id)
+
+                if attempts then
+                    redis.call('hset', KEYS[6], added, attempts)
+                end
             end
 
             redis.call('zrem', KEYS[4], id)
             redis.call('hdel', KEYS[5], id)
+            redis.call('hdel', KEYS[6], id)
         end
 
         local claimed, used = {}, 0
@@ -122,12 +129,26 @@ class RedisCollector implements Collector
         local cursor = '0-0'
 
         repeat
-            local result = redis.call('xautoclaim', KEYS[1], ARGV[3], ARGV[4], ARGV[2], cursor, 'COUNT', 1)
+            local result = redis.call('xautoclaim', KEYS[1], ARGV[3], ARGV[4], ARGV[2], cursor, 'COUNT', 100)
 
             cursor = result[1]
 
+            -- XAUTOCLAIM made every entry it returned look fresh: the ones not taken get their lease back as run out, so the next claim takes them.
+            local left = {'xclaim', KEYS[1], ARGV[3], ARGV[4], 0}
+
             for _, entry in ipairs(result[2]) do
-                take(entry)
+                if not full() then
+                    take(entry)
+                elseif entry then
+                    table.insert(left, entry[1])
+                end
+            end
+
+            if #left > 5 then
+                table.insert(left, 'IDLE')
+                table.insert(left, ARGV[2])
+                table.insert(left, 'JUSTID')
+                redis.call(unpack(left))
             end
         until cursor == '0-0' or full()
 
@@ -147,6 +168,23 @@ class RedisCollector implements Collector
         LUA;
 
     /**
+     * Give the given claimed entries back as they were, their lease run out, so the next claim takes them first, in order.
+     */
+    protected const GIVE_BACK = <<<'LUA'
+        local claim = {'xclaim', KEYS[1], ARGV[1], ARGV[2], 0}
+
+        for i = 4, #ARGV do
+            table.insert(claim, ARGV[i])
+        end
+
+        table.insert(claim, 'IDLE')
+        table.insert(claim, ARGV[3])
+        table.insert(claim, 'JUSTID')
+
+        return #redis.call(unpack(claim))
+        LUA;
+
+    /**
      * Ack and delete the given entries, and take their bytes off the count.
      */
     protected const ACK = <<<'LUA'
@@ -154,6 +192,7 @@ class RedisCollector implements Collector
             local entry = redis.call('xrange', KEYS[1], ARGV[i], ARGV[i])
 
             redis.call('xack', KEYS[1], ARGV[1], ARGV[i])
+            redis.call('hdel', KEYS[6], ARGV[i])
 
             if #entry > 0 and redis.call('xdel', KEYS[1], ARGV[i]) == 1 then
                 for j = 1, #entry[1][2], 2 do
@@ -168,18 +207,22 @@ class RedisCollector implements Collector
         LUA;
 
     /**
-     * Move the given entries out of the stream into the delayed trees, due after the given milliseconds. Their bytes stay counted.
+     * Move the given entries out of the stream into the delayed trees, due after the given milliseconds, adding a failed attempt when told to. Their bytes stay counted.
      */
     protected const RELEASE = <<<'LUA'
         local time = redis.call('time')
         local due = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000) + tonumber(ARGV[2])
 
-        for i = 3, #ARGV do
+        for i = 4, #ARGV do
             local entry = redis.call('xrange', KEYS[1], ARGV[i], ARGV[i])
 
             redis.call('xack', KEYS[1], ARGV[1], ARGV[i])
 
             if #entry > 0 then
+                if ARGV[3] == '1' then
+                    redis.call('hincrby', KEYS[6], ARGV[i], 1)
+                end
+
                 for j = 1, #entry[1][2], 2 do
                     if entry[1][2][j] == 'tree' then
                         redis.call('hset', KEYS[5], ARGV[i], entry[1][2][j + 1])
@@ -202,10 +245,64 @@ class RedisCollector implements Collector
         LUA;
 
     /**
+     * Read the failed attempts of the given entries that are stored, in the stream or delayed, as id and count pairs.
+     */
+    protected const ATTEMPTS = <<<'LUA'
+        local found = {}
+
+        for i = 1, #ARGV do
+            if #redis.call('xrange', KEYS[1], ARGV[i], ARGV[i]) > 0 or redis.call('hexists', KEYS[5], ARGV[i]) == 1 then
+                table.insert(found, ARGV[i])
+                table.insert(found, tonumber(redis.call('hget', KEYS[6], ARGV[i]) or '0'))
+            end
+        end
+
+        return found
+        LUA;
+
+    /**
      * Read the number of trees dropped at the cap.
      */
     protected const DROPPED = <<<'LUA'
         return tonumber(redis.call('get', KEYS[3]) or '0')
+        LUA;
+
+    /**
+     * Read the trees, their bytes, the milliseconds the oldest due tree has waited (-1 when none is due), the trees dropped at the cap, and the most failed attempts of a tree.
+     *
+     * A tree in the stream became due when it was added, at its id's time.
+     * A delayed tree is due at its score.
+     */
+    protected const STATS = <<<'LUA'
+        local time = redis.call('time')
+        local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
+        local oldest = nil
+
+        local first = redis.call('xrange', KEYS[1], '-', '+', 'COUNT', 1)
+
+        if #first > 0 then
+            oldest = tonumber(string.match(first[1][1], '^(%d+)-'))
+        end
+
+        local due = redis.call('zrangebyscore', KEYS[4], '-inf', now, 'WITHSCORES', 'LIMIT', 0, 1)
+
+        if #due > 0 and (oldest == nil or tonumber(due[2]) < oldest) then
+            oldest = tonumber(due[2])
+        end
+
+        local most = 0
+
+        for _, attempts in ipairs(redis.call('hvals', KEYS[6])) do
+            most = math.max(most, tonumber(attempts))
+        end
+
+        return {
+            redis.call('xlen', KEYS[1]) + redis.call('zcard', KEYS[4]),
+            tonumber(redis.call('get', KEYS[2]) or '0'),
+            oldest == nil and -1 or math.max(0, now - oldest),
+            tonumber(redis.call('get', KEYS[3]) or '0'),
+            most,
+        }
         LUA;
 
     /**
@@ -222,13 +319,13 @@ class RedisCollector implements Collector
         $payload = TreePayload::encode($tree);
 
         if ($payload === null) {
-            Diagnostics::warn('collect.encode', 'A run tree could not be encoded for the store and was dropped.');
+            Diagnostics::dropped('encode', 1, 'collect.encode', 'A run tree could not be encoded for the store and was dropped.');
 
             return false;
         }
 
         if ($this->run(self::PUSH, $payload, $this->maxBytes) === 0) {
-            Diagnostics::warn('collect.full', "The trace store is full ({$this->maxBytes} bytes): new run trees are dropped until the queue drain catches up.");
+            Diagnostics::dropped('full', 1, 'collect.full', "The trace store is full ({$this->maxBytes} bytes): new run trees are dropped until the queue drain catches up.");
 
             return false;
         }
@@ -240,22 +337,19 @@ class RedisCollector implements Collector
     {
         $claimed = $this->run(self::CLAIM, max(1, $maxBytes), max(0, $lease) * 1000, self::GROUP, self::CONSUMER, self::CLAIM_LIMIT);
 
-        $trees = [];
-        $broken = [];
+        [$trees, $broken, $over] = TreePayload::decodeClaim(
+            array_map(fn (array $entry) => [is_string($entry[0] ?? null) ? $entry[0] : '', is_string($entry[1] ?? null) ? $entry[1] : ''], array_chunk(is_array($claimed) ? $claimed : [], 2)),
+            $maxBytes,
+        );
 
-        foreach (array_chunk(is_array($claimed) ? $claimed : [], 2) as $entry) {
-            $id = is_string($entry[0] ?? null) ? $entry[0] : '';
-            $tree = TreePayload::decode(is_string($entry[1] ?? null) ? $entry[1] : '');
+        $over = $this->entryIds($over);
 
-            if ($tree === null) {
-                $broken[] = $id;
-            } else {
-                $trees[$id] = $tree;
-            }
+        if ($over !== []) {
+            $this->run(self::GIVE_BACK, self::GROUP, self::CONSUMER, max(0, $lease) * 1000, ...$over);
         }
 
         if ($broken !== []) {
-            Diagnostics::warn('collect.decode', 'A stored run tree could not be decoded and was dropped.');
+            Diagnostics::dropped('decode', count($broken), 'collect.decode', 'A stored run tree could not be decoded and was dropped.');
 
             $this->ack($broken);
         }
@@ -272,18 +366,53 @@ class RedisCollector implements Collector
         }
     }
 
-    public function release(array $ids, int $delay): void
+    public function release(array $ids, int $delay, bool $failed = false): void
     {
         $ids = $this->entryIds($ids);
 
         if ($ids !== []) {
-            $this->run(self::RELEASE, self::GROUP, max(0, $delay) * 1000, ...$ids);
+            $this->run(self::RELEASE, self::GROUP, max(0, $delay) * 1000, $failed ? 1 : 0, ...$ids);
         }
+    }
+
+    public function attempts(array $ids): array
+    {
+        $ids = $this->entryIds($ids);
+
+        if ($ids === []) {
+            return [];
+        }
+
+        $found = $this->run(self::ATTEMPTS, ...$ids);
+        $attempts = [];
+
+        foreach (array_chunk(is_array($found) ? $found : [], 2) as [$id, $count]) {
+            if (is_string($id)) {
+                $attempts[$id] = is_numeric($count) ? (int) $count : 0;
+            }
+        }
+
+        return $attempts;
     }
 
     public function size(): int
     {
         return $this->count(self::SIZE);
+    }
+
+    public function stats(): array
+    {
+        $stats = $this->run(self::STATS);
+        [$trees, $bytes, $age, $dropped, $attempts] = array_map(fn (mixed $value) => is_numeric($value) ? (int) $value : 0, is_array($stats) ? array_pad($stats, 5, 0) : [0, 0, -1, 0, 0]);
+
+        return [
+            'trees' => $trees,
+            'bytes' => $bytes,
+            'max_bytes' => $this->maxBytes,
+            'oldest_age' => $age < 0 ? null : intdiv($age, 1000),
+            'dropped' => $dropped,
+            'max_attempts' => $attempts,
+        ];
     }
 
     /**
@@ -327,7 +456,7 @@ class RedisCollector implements Collector
      */
     protected function run(string $script, string|int ...$arguments): mixed
     {
-        $keys = [$this->key, "{$this->key}:bytes", "{$this->key}:dropped", "{$this->key}:delayed", "{$this->key}:delayed:trees"];
+        $keys = [$this->key, "{$this->key}:bytes", "{$this->key}:dropped", "{$this->key}:delayed", "{$this->key}:delayed:trees", "{$this->key}:attempts"];
 
         // phpredis takes EVAL's keys and arguments as one array, Predis as a list: PhpRedisConnection hides the difference.
         $result = $this->redis instanceof PhpRedisConnection
