@@ -82,7 +82,7 @@ it('leases and delays follow the app clock', function () {
 
 it('a tree dropped at the cap is counted for every process, by reason', function () {
     $one = storedTree('one');
-    $collector = databaseCollector(maxBytes: storedBytes($one) + 10);
+    $collector = databaseCollector(maxBytes: intdiv(3 * storedBytes($one), 2));
 
     $collector->push($one);
     $collector->push(storedTree('two'));
@@ -222,7 +222,7 @@ it('the running total is summed again after 60 seconds', function () {
 
 it('the total is reconciled on claim, so a row deleted behind the collector\'s back frees its bytes', function () {
     $one = storedTree('one', str_repeat('x', 1_000));
-    $collector = databaseCollector(maxBytes: 2 * storedBytes($one) + 10);
+    $collector = databaseCollector(maxBytes: intdiv(5 * storedBytes($one), 2));
 
     $collector->push($one);
     $collector->push(storedTree('two', str_repeat('x', 1_000)));
@@ -242,7 +242,7 @@ it('with the cache down, the cap still holds, summing each push', function () {
     app()->instance(Repository::class, $cache);
 
     $one = storedTree('one', str_repeat('x', 1_000));
-    $collector = databaseCollector(maxBytes: storedBytes($one) + 10);
+    $collector = databaseCollector(maxBytes: intdiv(3 * storedBytes($one), 2));
 
     expect($collector->push($one))->toBeTrue()
         ->and($collector->push(storedTree('two', str_repeat('x', 1_000))))->toBeFalse();

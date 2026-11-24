@@ -23,7 +23,7 @@ use Illuminate\Support\Facades\Log;
 function storedTree(string $name, string $text = ''): array
 {
     return [[
-        'v' => 1, 'trace_id' => str_repeat('a', 32), 'span_id' => bin2hex(random_bytes(8)), 'parent_span_id' => null,
+        'v' => 1, 'trace_id' => str_repeat('a', 32), 'span_id' => hash('xxh64', $name), 'parent_span_id' => null,
         'kind' => 'invoke_agent', 'start' => 1, 'end' => 2, 'status' => 'ok', 'status_message' => null,
         'call' => ['agent' => $name], 'content' => $text === '' ? [] : ['output' => $text], 'context' => [], 'events' => [],
     ]];
@@ -204,8 +204,8 @@ function itBehavesLikeAStoredCollector(Closure $make): void
     it('at the cap a new tree is dropped and counted with one warning, and the stored trees are kept', function () use ($make) {
         $trees = array_map(fn (string $name) => storedTree($name, str_repeat('x', 1_000)), ['one', 'two', 'three', 'four']);
 
-        // Sized from the trees themselves: random span ids change the gzipped size by a few bytes.
-        $collector = $make(storedBytes($trees[0]) + storedBytes($trees[1]) + 10);
+        // Room for two trees and half of a third: trees differ in gzipped size by a few bytes.
+        $collector = $make(intdiv(5 * storedBytes($trees[0]), 2));
 
         foreach ($trees as $tree) {
             $collector->push($tree);
@@ -229,7 +229,7 @@ function itBehavesLikeAStoredCollector(Closure $make): void
 
     it('released trees still count against the cap until they are acked', function () use ($make) {
         $one = storedTree('one', str_repeat('x', 1_000));
-        $collector = $make(storedBytes($one) + 10);
+        $collector = $make(intdiv(3 * storedBytes($one), 2));
 
         $collector->push($one);
         $collector->release(array_keys($collector->claim(4_000_000, 60)), 300);

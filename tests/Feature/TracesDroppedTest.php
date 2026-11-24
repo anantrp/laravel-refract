@@ -34,7 +34,7 @@ it('fires with the right count for each reason', function (string $reason, int $
 })->with([
     'full' => ['full', 1, function () {
         $one = storedTree('one');
-        $collector = new DatabaseCollector(DB::connection(), storedBytes($one) + 10);
+        $collector = new DatabaseCollector(DB::connection(), intdiv(3 * storedBytes($one), 2));
         $collector->push($one);
         $collector->push(storedTree('two'));
     }],
