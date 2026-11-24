@@ -109,7 +109,7 @@ class HttpExporter implements Exporter
                 $left = $deadline - $this->seconds();
 
                 if ($left < self::MIN_REQUEST_SECONDS) {
-                    return ExportResult::unfinished($done, $this->unsent($trees[$done] ?? [], $answered[$done] ?? []), $this->refusedBefore($refused, $done), $took);
+                    return ExportResult::unfinished($done, $this->unsent($trees[$done] ?? [], $answered[$done] ?? [], isset($refused[$done])), $this->refusedTrees($refused, $trees), $took);
                 }
 
                 $timeout = min($timeout, $left);
@@ -120,11 +120,11 @@ class HttpExporter implements Exporter
 
             if ($sent->isRetryable() && $this->unreached && $this->timeout - $timeout >= self::MIN_REQUEST_SECONDS && $this->seconds() - $posted >= $timeout - self::MIN_REQUEST_SECONDS) {
                 // Given well under its own timeout, what was left of the time limit, the request waited it out: the export is cut short, not failed.
-                return ExportResult::unfinished($done, $this->unsent($trees[$done] ?? [], $answered[$done] ?? []), $this->refusedBefore($refused, $done), $took);
+                return ExportResult::unfinished($done, $this->unsent($trees[$done] ?? [], $answered[$done] ?? [], isset($refused[$done])), $this->refusedTrees($refused, $trees), $took);
             }
 
             if ($sent->isRetryable()) {
-                return ExportResult::retryable($sent->retryAfter, $done, $this->unsent($trees[$done] ?? [], $answered[$done] ?? []), $sent->busy, $this->refusedBefore($refused, $done), $took);
+                return ExportResult::retryable($sent->retryAfter, $done, $this->unsent($trees[$done] ?? [], $answered[$done] ?? [], isset($refused[$done])), $sent->busy, $this->refusedTrees($refused, $trees), $took);
             }
 
             $took = $took || ! $sent->isRejected();
@@ -144,20 +144,32 @@ class HttpExporter implements Exporter
             return ExportResult::ok();
         }
 
-        return count($refused) === count($trees) ? ExportResult::rejected($took) : ExportResult::ok(count($refused));
+        return count($refused) === count($trees) ? ExportResult::rejected($took, $this->refusedTrees($refused, $trees)) : ExportResult::ok($this->refusedTrees($refused, $trees));
     }
 
     /**
-     * Get the number of the given refused trees among the first done ones.
+     * Get the number of the given refused trees not counted as refused before.
      *
-     * A tree cut part way is not counted: its unsent spans are exported
-     * later, as a tree of their own, and counted then if refused again.
+     * A tree cut part way, with a request of it refused, counts now: its
+     * unsent spans are marked, so a later refusal of them is not counted
+     * again.
      *
      * @param  array<int, true>  $refused  The positions of the refused trees.
+     * @param  list<list<array<string, mixed>>>  $trees
      */
-    protected function refusedBefore(array $refused, int $done): int
+    protected function refusedTrees(array $refused, array $trees): int
     {
-        return count(array_filter(array_keys($refused), fn (int $position) => $position < $done));
+        return count(array_filter(array_keys($refused), fn (int $position) => ! $this->refusalCounted($trees[$position] ?? [])));
+    }
+
+    /**
+     * Determine whether the given tree is the unsent rest of a tree already counted as refused.
+     *
+     * @param  list<array<string, mixed>>  $tree
+     */
+    protected function refusalCounted(array $tree): bool
+    {
+        return ($tree[0][ExportResult::REFUSAL_COUNTED] ?? false) === true;
     }
 
     /**
@@ -165,11 +177,18 @@ class HttpExporter implements Exporter
      *
      * @param  list<array<string, mixed>>  $tree
      * @param  list<int>  $answered  The indexes in the tree of the spans an answered request carried.
+     * @param  bool  $refused  Whether a request of the tree was refused for good, so its unsent spans are marked as counted.
      * @return list<array<string, mixed>>
      */
-    protected function unsent(array $tree, array $answered): array
+    protected function unsent(array $tree, array $answered, bool $refused = false): array
     {
-        return $answered === [] ? [] : array_values(array_diff_key($tree, array_flip($answered)));
+        $unsent = $answered === [] ? [] : array_values(array_diff_key($tree, array_flip($answered)));
+
+        if ($refused || $this->refusalCounted($tree)) {
+            $unsent = array_map(fn (array $span) => [...$span, ExportResult::REFUSAL_COUNTED => true], $unsent);
+        }
+
+        return $unsent;
     }
 
     /**

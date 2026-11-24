@@ -30,8 +30,25 @@ final readonly class ExportResult
         public bool $busy = false,
         public int $refused = 0,
         ?bool $took = null,
+        protected bool $refusedKnown = true,
     ) {
         $this->took = $took ?? ($status === 'ok' || $done > $refused || $rest !== []);
+    }
+
+    /**
+     * The neutral span key that marks the unsent spans of a tree already counted as refused, so a later refusal of them is not counted again.
+     */
+    public const REFUSAL_COUNTED = 'refusal_counted';
+
+    /**
+     * Get the number of the given trees the destination refused for good.
+     *
+     * A rejected result from an exporter that does not count its refused
+     * trees refused them all.
+     */
+    public function refusedOf(int $trees): int
+    {
+        return $this->refusedKnown ? $this->refused : $trees;
     }
 
     /**
@@ -68,9 +85,9 @@ final readonly class ExportResult
      * The destination may still have taken some requests, of a tree split
      * over requests, before or after the one it refused.
      */
-    public static function rejected(bool $took = false): self
+    public static function rejected(bool $took = false, ?int $refused = null): self
     {
-        return new self('rejected', took: $took);
+        return new self('rejected', refused: $refused ?? 0, took: $took, refusedKnown: $refused !== null);
     }
 
     /**

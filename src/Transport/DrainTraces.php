@@ -717,11 +717,9 @@ class DrainTraces implements ShouldBeUniqueUntilProcessing, ShouldQueue
             Stats::exported();
         }
 
-        if ($result->isRejected()) {
+        if (($refused = $result->refusedOf(count($trees))) > 0) {
             // The exporter warned with the destination's answer.
-            Diagnostics::dropped('rejected', count($trees));
-        } elseif ($result->refused > 0) {
-            Diagnostics::dropped('rejected', $result->refused);
+            Diagnostics::dropped('rejected', $refused);
         }
 
         if ($result->isRejected() || $result->isRetryable()) {

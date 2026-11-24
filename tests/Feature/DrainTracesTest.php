@@ -933,6 +933,27 @@ it('a tree failing after requests that were only refused is not blamed: a refusa
         ->and(Stats::read()['last_success'])->toBeNull();
 });
 
+it('a split tree refused in part, whose rest goes through later, is still counted as rejected', function () {
+    $this->memoryExporter = null;
+    $tries = 0;
+    $collector = answeringDestination(function () use (&$tries) {
+        return match (++$tries) {
+            1 => Http::response('bad', 400),
+            2 => Http::response('', 503),
+            default => Http::response('', 200),
+        };
+    });
+
+    $collector->push(splitTree(str_repeat('b', 32)));
+
+    drainNow();
+    $this->travel(301)->seconds();
+    drainNow();
+
+    expect($collector->size())->toBe(0)
+        ->and(Stats::read()['dropped'])->toBe(['rejected' => 1]);
+});
+
 it('a big bad tree claimed behind a request that went through is blamed, and dropped in the end', function () {
     $poison = str_repeat('9', 32);
     $this->memoryExporter = null;

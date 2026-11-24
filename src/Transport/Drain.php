@@ -4,6 +4,7 @@ namespace Anantrp\Refract\Transport;
 
 use Anantrp\Refract\Contracts\Collector;
 use Anantrp\Refract\Contracts\Exporter;
+use Anantrp\Refract\Contracts\ExportResult;
 use Anantrp\Refract\Contracts\ReportsStats;
 use Anantrp\Refract\Support\Diagnostics;
 use Anantrp\Refract\Support\Stats;
@@ -96,10 +97,13 @@ class Drain
             return;
         }
 
-        if (! $result->isRejected() && $result->refused > 0) {
+        if (($refused = $result->refusedOf(count($trees))) > 0) {
             // The exporter warned with the destination's answer.
-            Diagnostics::dropped('rejected', $result->refused);
+            Diagnostics::dropped('rejected', $refused);
         }
+
+        // The tree cut part way is counted as refused already when a request of it was refused.
+        $cutRefused = ($result->rest[0][ExportResult::REFUSAL_COUNTED] ?? false) === true ? 1 : 0;
 
         // Recorded before any failure of the same export, so the failures since the last success start after it.
         if ($result->took) {
@@ -110,7 +114,7 @@ class Drain
             $pause = $breaker->failed();
             Stats::failed();
 
-            Diagnostics::dropped('unavailable', count($trees) - $result->done, 'export.unavailable', "Spans could not be exported: the destination could not be reached or answered 408, 429 or 5xx. The batch was dropped (an export in this process is not retried), and exports pause for {$pause} seconds.");
+            Diagnostics::dropped('unavailable', count($trees) - $result->done - $cutRefused, 'export.unavailable', "Spans could not be exported: the destination could not be reached or answered 408, 429 or 5xx. The batch was dropped (an export in this process is not retried), and exports pause for {$pause} seconds.");
 
             return;
         }
@@ -119,14 +123,12 @@ class Drain
 
         if ($result->isRejected()) {
             Stats::failed();
-            // The exporter warned with the destination's answer.
-            Diagnostics::dropped('rejected', count($trees));
 
             return;
         }
 
         if ($result->isUnfinished()) {
-            $dropped = count($trees) - $result->done;
+            $dropped = count($trees) - $result->done - $cutRefused;
 
             Diagnostics::dropped('unfinished', $dropped, 'export.unfinished', 'An export in this process took its whole '.self::TIMEOUT." seconds: {$dropped} of ".count($trees).' run trees were not sent and were dropped.');
         }
