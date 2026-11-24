@@ -145,18 +145,18 @@ class DatabaseCollector implements Collector, ReportsStats
             return [];
         }
 
-        $trees = [];
-        $broken = [];
+        $rows = $this->table()->whereIn('id', $ids)->orderBy('available_at')->orderBy('id')->get(['id', 'payload']);
 
-        foreach ($this->table()->whereIn('id', $ids)->orderBy('available_at')->orderBy('id')->get(['id', 'payload']) as $row) {
-            $id = $this->number($row->id);
-            $tree = TreePayload::decode(is_string($row->payload) ? $row->payload : '');
+        [$trees, $broken, $over] = TreePayload::decodeClaim(
+            array_values($rows->map(fn (object $row) => [$this->number($row->id), is_string($row->payload) ? $row->payload : ''])->all()),
+            $maxBytes,
+        );
 
-            if ($tree === null) {
-                $broken[] = $id;
-            } else {
-                $trees[$id] = $tree;
-            }
+        // The trees past the bytes go back as they were: due, and in their place.
+        $over = $this->rowIds($over);
+
+        if ($over !== []) {
+            $this->table()->whereIn('id', $over)->update(['reserved_at' => null]);
         }
 
         if ($broken !== []) {

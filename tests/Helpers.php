@@ -51,6 +51,16 @@ function storedBytes(array $tree): int
 }
 
 /**
+ * Get the bytes of the given tree's JSON, as a claim counts them.
+ *
+ * @param  list<array<string, mixed>>  $tree
+ */
+function jsonBytes(array $tree): int
+{
+    return strlen((string) json_encode($tree, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE | JSON_PRESERVE_ZERO_FRACTION | JSON_PARTIAL_OUTPUT_ON_ERROR));
+}
+
+/**
  * Define the tests every stored collector passes, in the calling test file.
  *
  * The given closure makes an empty collector, capped at the given bytes.
@@ -116,19 +126,33 @@ function itBehavesLikeAStoredCollector(Closure $make): void
             ->and($collector->claim(4_000_000, 60))->toBe([]);
     });
 
-    it('a claim adds trees until it reaches the bytes, and the rest wait for the next claim', function () use ($make) {
+    it('a claim adds trees until their JSON reaches the bytes, and the rest wait for the next claim', function () use ($make) {
         $collector = $make(64 * 1024 * 1024);
 
         foreach (['one', 'two', 'three'] as $name) {
-            // Text that does not compress, so each tree stores at about the same size.
             $collector->push(storedTree($name, bin2hex(random_bytes(500))));
         }
 
-        $limit = intdiv(3 * storedBytes(storedTree('one', bin2hex(random_bytes(500)))), 2);
+        $limit = intdiv(3 * jsonBytes(storedTree('one', bin2hex(random_bytes(500)))), 2);
 
         // The second tree takes the claim past one and a half trees.
         expect(storedNames($collector->claim($limit, 60)))->toBe(['one', 'two'])
             ->and(storedNames($collector->claim($limit, 60)))->toBe(['three']);
+    });
+
+    it('a claim of trees that compress well still stops at the bytes of their JSON, and the rest wait for the next claim', function () use ($make) {
+        $collector = $make(64 * 1024 * 1024);
+
+        foreach (['one', 'two', 'three', 'four', 'five'] as $name) {
+            // About 100 KB of JSON that stores in well under 1 KB.
+            $collector->push(storedTree($name, str_repeat('The release ships on Friday. ', 3_500)));
+        }
+
+        $limit = intdiv(5 * jsonBytes(storedTree('one', str_repeat('The release ships on Friday. ', 3_500))), 2);
+
+        expect(storedNames($collector->claim($limit, 60)))->toBe(['one', 'two', 'three'])
+            ->and(storedNames($collector->claim($limit, 60)))->toBe(['four', 'five'])
+            ->and($collector->claim($limit, 60))->toBe([]);
     });
 
     it('a tree whose lease ran out is claimed again, as a crashed worker would leave it', function () use ($make) {

@@ -30,8 +30,9 @@ interface Collector
      * A released tree goes behind the trees that were due before it, so a
      * batch that keeps failing never blocks the others.
      *
-     * Trees are added until they reach the given bytes, so the last one may
-     * take the claim over. A tree claimed more than the given lease seconds
+     * Trees are added until their JSON reaches the given bytes, so the last
+     * one may take the claim over. The bytes are of the decoded trees, not
+     * of what the store holds, so a claim bounds the worker's memory. A tree claimed more than the given lease seconds
      * ago, and neither acked nor released since, is claimed again.
      *
      * @return array<array-key, list<array<string, mixed>>>
@@ -48,9 +49,9 @@ interface Collector
     /**
      * Give the given claimed trees back, to be claimed again after the given seconds.
      *
-     * When the trees are given back because an export of them failed, each
-     * one's failed attempts go up by one. A tree keeps its count until it
-     * is acked.
+     * When a tree is given back because it failed an export of its own,
+     * its failed attempts go up by one. A tree keeps its count until it is
+     * acked.
      *
      * @param  list<array-key>  $ids
      */

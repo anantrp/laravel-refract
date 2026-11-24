@@ -56,16 +56,75 @@ class TreePayload
      */
     public static function decode(string $payload): ?array
     {
-        if (str_starts_with($payload, self::GZIP)) {
-            $gzipped = base64_decode(substr($payload, strlen(self::GZIP)), true);
-            $payload = $gzipped === false || $gzipped === '' ? false : @gzdecode($gzipped);
+        $json = self::json($payload);
 
-            if ($payload === false) {
-                return null;
+        return $json === null ? null : self::tree($json);
+    }
+
+    /**
+     * Decode the given claimed payloads in order, until the JSON of the trees reaches the given bytes.
+     *
+     * A claim is sized by the bytes stored, and a tree that compresses
+     * well stores in far less than it takes once decoded: the trees past
+     * the bytes are not decoded, and their ids come back, so the
+     * collector gives them back at once. The first tree is always taken.
+     *
+     * @param  list<array{array-key, string}>  $payloads  Each claimed id and its payload.
+     * @return array{array<array-key, list<array<string, mixed>>>, list<array-key>, list<array-key>} The trees by id, the ids that could not be decoded, and the ids past the bytes.
+     */
+    public static function decodeClaim(array $payloads, int $maxBytes): array
+    {
+        $trees = [];
+        $broken = [];
+        $over = [];
+        $used = 0;
+
+        foreach ($payloads as [$id, $payload]) {
+            if ($trees !== [] && $used >= $maxBytes) {
+                $over[] = $id;
+
+                continue;
             }
+
+            $json = self::json($payload);
+            $tree = $json === null ? null : self::tree($json);
+
+            if ($tree === null) {
+                $broken[] = $id;
+
+                continue;
+            }
+
+            $trees[$id] = $tree;
+            $used += strlen((string) $json);
         }
 
-        $spans = json_decode($payload, true);
+        return [$trees, $broken, $over];
+    }
+
+    /**
+     * Get the JSON of the given payload, gunzipped when it is gzipped, or null when it cannot be.
+     */
+    protected static function json(string $payload): ?string
+    {
+        if (! str_starts_with($payload, self::GZIP)) {
+            return $payload;
+        }
+
+        $gzipped = base64_decode(substr($payload, strlen(self::GZIP)), true);
+        $json = $gzipped === false || $gzipped === '' ? false : @gzdecode($gzipped);
+
+        return $json === false ? null : $json;
+    }
+
+    /**
+     * Get the run tree in the given JSON, or null when it is not one.
+     *
+     * @return list<array<string, mixed>>|null
+     */
+    protected static function tree(string $json): ?array
+    {
+        $spans = json_decode($json, true);
 
         if (! is_array($spans) || ! array_is_list($spans) || $spans === []) {
             return null;

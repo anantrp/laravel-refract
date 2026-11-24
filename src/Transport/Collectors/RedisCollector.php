@@ -168,6 +168,23 @@ class RedisCollector implements Collector, ReportsStats
         LUA;
 
     /**
+     * Give the given claimed entries back as they were, their lease run out, so the next claim takes them first, in order.
+     */
+    protected const GIVE_BACK = <<<'LUA'
+        local claim = {'xclaim', KEYS[1], ARGV[1], ARGV[2], 0}
+
+        for i = 4, #ARGV do
+            table.insert(claim, ARGV[i])
+        end
+
+        table.insert(claim, 'IDLE')
+        table.insert(claim, ARGV[3])
+        table.insert(claim, 'JUSTID')
+
+        return #redis.call(unpack(claim))
+        LUA;
+
+    /**
      * Ack and delete the given entries, and take their bytes off the count.
      */
     protected const ACK = <<<'LUA'
@@ -320,18 +337,15 @@ class RedisCollector implements Collector, ReportsStats
     {
         $claimed = $this->run(self::CLAIM, max(1, $maxBytes), max(0, $lease) * 1000, self::GROUP, self::CONSUMER, self::CLAIM_LIMIT);
 
-        $trees = [];
-        $broken = [];
+        [$trees, $broken, $over] = TreePayload::decodeClaim(
+            array_map(fn (array $entry) => [is_string($entry[0] ?? null) ? $entry[0] : '', is_string($entry[1] ?? null) ? $entry[1] : ''], array_chunk(is_array($claimed) ? $claimed : [], 2)),
+            $maxBytes,
+        );
 
-        foreach (array_chunk(is_array($claimed) ? $claimed : [], 2) as $entry) {
-            $id = is_string($entry[0] ?? null) ? $entry[0] : '';
-            $tree = TreePayload::decode(is_string($entry[1] ?? null) ? $entry[1] : '');
+        $over = $this->entryIds($over);
 
-            if ($tree === null) {
-                $broken[] = $id;
-            } else {
-                $trees[$id] = $tree;
-            }
+        if ($over !== []) {
+            $this->run(self::GIVE_BACK, self::GROUP, self::CONSUMER, max(0, $lease) * 1000, ...$over);
         }
 
         if ($broken !== []) {

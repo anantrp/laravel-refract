@@ -96,6 +96,11 @@ class Drain
             return;
         }
 
+        if (! $result->isRejected() && $result->refused > 0) {
+            // The exporter warned with the destination's answer.
+            Diagnostics::dropped('rejected', $result->refused);
+        }
+
         if ($result->isRetryable()) {
             $pause = $breaker->failed();
             Stats::failed();
@@ -115,7 +120,7 @@ class Drain
             return;
         }
 
-        if ($result->isOk() || $result->done > 0 || $result->rest !== []) {
+        if ($result->isOk() ? $result->refused < count($trees) : $result->done > $result->refused || $result->rest !== []) {
             Stats::exported();
         }
 

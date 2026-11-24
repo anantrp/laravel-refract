@@ -2,9 +2,11 @@
 
 use Anantrp\Refract\Contracts\Exporter;
 use Anantrp\Refract\Contracts\ExportResult;
+use Anantrp\Refract\Support\Stats;
 use Anantrp\Refract\Tests\Support\MemoryExporter;
 use Anantrp\Refract\Tests\Support\Otlp;
 use Anantrp\Refract\Transport\Drain;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\RequestException;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
@@ -642,6 +644,92 @@ it('given a time limit, a request waits at most what is left of it', function ()
     expect($result->isOk())->toBeTrue()
         ->and($timeouts)->toHaveCount(1)
         ->and($timeouts[0])->toBeGreaterThan(2)->toBeLessThanOrEqual(3);
+});
+
+it('a request that waits out what was left of the time limit is cut short, not failed', function () {
+    bootExport();
+    Http::fake(function () {
+        usleep(700_000);
+
+        throw new ConnectionException('Operation timed out');
+    });
+
+    $result = app(Exporter::class)->export([runTree(['x'])], 1.5);
+
+    expect($result->isUnfinished())->toBeTrue()
+        ->and($result->done)->toBe(0);
+});
+
+it('a destination that cannot be reached within a time limit is still a failure', function () {
+    bootExport();
+    Http::fake(fn () => throw new ConnectionException('Connection refused'));
+
+    $result = app(Exporter::class)->export([runTree(['x'])], 1.5);
+
+    expect($result->isRetryable())->toBeTrue();
+});
+
+it('a request refused for good between others counts only its trees as refused', function () {
+    bootExport();
+    $requests = 0;
+    Http::fake(function () use (&$requests) {
+        return ++$requests === 2 ? Http::response('bad', 400) : Http::response('', 200);
+    });
+
+    // Three trees of 3 MB: one request each.
+    $result = app(Exporter::class)->export(array_map(fn () => runTree([randomText(3_000_000)]), range(1, 3)));
+
+    expect($result->isOk())->toBeTrue()
+        ->and($result->refused)->toBe(1);
+});
+
+it('a tree refused for good before a request that fails is counted with the failure', function () {
+    bootExport();
+    $requests = 0;
+    Http::fake(function () use (&$requests) {
+        return match (++$requests) {
+            1 => Http::response('bad', 400),
+            default => Http::response('', 503),
+        };
+    });
+
+    $result = app(Exporter::class)->export(array_map(fn () => runTree([randomText(3_000_000)]), range(1, 3)));
+
+    expect($result->isRetryable())->toBeTrue()
+        ->and($result->done)->toBe(1)
+        ->and($result->refused)->toBe(1);
+});
+
+it('in the sync drain, a destination that never answers within its 5 s pauses exports', function () {
+    bootExport();
+    $calls = 0;
+    Http::fake(function () use (&$calls) {
+        $calls++;
+        // Just short of the 5 s the sync drain gives an export, as a read timeout would end.
+        usleep(4_200_000);
+
+        throw new ConnectionException('Operation timed out');
+    });
+
+    sendSpan();
+    sendSpan();
+
+    expect($calls)->toBe(1);
+});
+
+it('a split tree refused in its first request, then a 503, is counted once', function () {
+    bootExport();
+    $requests = 0;
+    Http::fake(function () use (&$requests) {
+        return ++$requests === 1 ? Http::response('bad', 400) : Http::response('', 503);
+    });
+
+    // One tree of two spans too big for one request together, then a small tree.
+    $split = runTree([str_repeat('first ', 500_000), str_repeat('second ', 500_000)]);
+
+    app(Drain::class)->send([$split, runTree(['x'])]);
+
+    expect(array_sum(Stats::read()['dropped']))->toBe(2);
 });
 
 it('with less than a second of the time limit left, nothing is sent and no tree is done', function () {

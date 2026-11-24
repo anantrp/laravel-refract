@@ -19,6 +19,7 @@ final readonly class ExportResult
      * Create a new export result instance.
      *
      * @param  list<array<string, mixed>>  $rest  The neutral spans of the tree after the done ones that were not sent, when part of it was.
+     * @param  int  $refused  The trees among the done ones that the destination refused for good, when it took others.
      */
     private function __construct(
         protected string $status,
@@ -26,14 +27,15 @@ final readonly class ExportResult
         public int $done = 0,
         public array $rest = [],
         public bool $busy = false,
+        public int $refused = 0,
     ) {}
 
     /**
-     * The destination took the trees.
+     * The destination took the trees, but for the given number it refused for good.
      */
-    public static function ok(): self
+    public static function ok(int $refused = 0): self
     {
-        return new self('ok');
+        return new self('ok', refused: $refused);
     }
 
     /**
@@ -46,9 +48,9 @@ final readonly class ExportResult
      *
      * @param  list<array<string, mixed>>  $rest  The unsent spans of the next tree, when some of its spans were sent.
      */
-    public static function retryable(?int $retryAfter = null, int $done = 0, array $rest = [], bool $busy = false): self
+    public static function retryable(?int $retryAfter = null, int $done = 0, array $rest = [], bool $busy = false, int $refused = 0): self
     {
-        return new self('retryable', $retryAfter, $done, $rest, $busy);
+        return new self('retryable', $retryAfter, $done, $rest, $busy, $refused);
     }
 
     /**
@@ -64,9 +66,9 @@ final readonly class ExportResult
      *
      * @param  list<array<string, mixed>>  $rest  The unsent spans of the next tree, when some of its spans were sent.
      */
-    public static function unfinished(int $done, array $rest = []): self
+    public static function unfinished(int $done, array $rest = [], int $refused = 0): self
     {
-        return new self('unfinished', done: $done, rest: $rest);
+        return new self('unfinished', done: $done, rest: $rest, refused: $refused);
     }
 
     /**

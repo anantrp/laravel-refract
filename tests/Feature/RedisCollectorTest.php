@@ -175,8 +175,8 @@ it('leases left over when the byte limit is hit part way through a batch are cla
 
     usleep(1_100_000);
 
-    // A limit that the 30th tree reaches: the trees are about the same size, give or take a few bytes of gzip.
-    $limit = intdiv(59 * storedBytes(storedTree('tree 001')), 2);
+    // A limit of JSON that the 30th tree reaches; the trees past it are handed back in place.
+    $limit = intdiv(59 * jsonBytes(storedTree('tree 001')), 2);
 
     expect(storedNames($collector->claim($limit, 1)))->toBe(array_map(fn (int $i) => sprintf('tree %03d', $i), range(1, 30)))
         ->and(storedNames($collector->claim($limit, 1)))->toBe(array_map(fn (int $i) => sprintf('tree %03d', $i), range(31, 60)));

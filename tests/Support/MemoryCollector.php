@@ -4,7 +4,6 @@ namespace Anantrp\Refract\Tests\Support;
 
 use Anantrp\Refract\Contracts\Collector;
 use Anantrp\Refract\Support\Diagnostics;
-use Anantrp\Refract\Transport\Collectors\TreePayload;
 use Illuminate\Support\Facades\Date;
 use LogicException;
 
@@ -58,7 +57,7 @@ class MemoryCollector implements Collector
             return false;
         }
 
-        $this->entries[$this->next++] = ['tree' => $tree, 'available_at' => 0, 'claimed_at' => null];
+        $this->entries[$this->next++] = ['tree' => $tree, 'available_at' => Date::now()->getTimestamp(), 'claimed_at' => null];
 
         return true;
     }
@@ -71,7 +70,11 @@ class MemoryCollector implements Collector
         $trees = [];
         $used = 0;
 
-        foreach ($this->entries as $id => $entry) {
+        // In the order they became due, as the real collectors claim them.
+        $due = $this->entries;
+        uksort($due, fn (int $one, int $other) => [$due[$one]['available_at'], $one] <=> [$due[$other]['available_at'], $other]);
+
+        foreach ($due as $id => $entry) {
             if ($used >= $maxBytes) {
                 break;
             }
@@ -82,8 +85,8 @@ class MemoryCollector implements Collector
 
             $this->entries[$id]['claimed_at'] = $now;
             $trees[$id] = $entry['tree'];
-            // Sized as the real collectors store it, gzipped.
-            $used += strlen((string) TreePayload::encode($entry['tree']));
+            // Sized as the real collectors claim it, by its JSON.
+            $used += strlen((string) json_encode($entry['tree']));
         }
 
         return $trees;
