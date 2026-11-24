@@ -545,9 +545,12 @@ it('with capture on no attachment of any kind leaves a trace, in the run input o
         ['role' => 'user', 'parts' => [['type' => 'text', 'content' => 'Look.']]],
     ])->and(Http::recorded())->toHaveCount(1);
 
-    foreach (['SECRET', $base64, 'hunter2', 'tok3n', 'frag', 'cdn.test', 'nowhere', 'TRAP', 'image/', 'audio/', 'application/', '3072', 'media', 'uri', 'file_id', 'size'] as $trace) {
+    foreach (['SECRET', $base64, 'hunter2', 'tok3n', 'frag', 'cdn.test', 'nowhere', 'TRAP', 'image/', 'audio/', 'application/', 'media', 'uri', 'file_id', 'size'] as $trace) {
         expect($body)->not->toContain($trace);
     }
+
+    // The attachment's size, as a value of its own: random ids and nanosecond times may hold the digits.
+    expect($body)->not->toMatch('/(?<![0-9a-zA-Z])3072(?![0-9a-zA-Z])/');
 
     expect(TrapImage::$calls)->toBe([]);
 });
