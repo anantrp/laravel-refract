@@ -64,10 +64,13 @@ final readonly class ExportResult
 
     /**
      * The destination refused the trees, or they could not be sent: trying again would not help.
+     *
+     * The destination may still have taken some requests, of a tree split
+     * over requests, before or after the one it refused.
      */
-    public static function rejected(): self
+    public static function rejected(bool $took = false): self
     {
-        return new self('rejected');
+        return new self('rejected', took: $took);
     }
 
     /**

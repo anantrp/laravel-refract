@@ -144,7 +144,7 @@ class HttpExporter implements Exporter
             return ExportResult::ok();
         }
 
-        return count($refused) === count($trees) ? ExportResult::rejected() : ExportResult::ok(count($refused));
+        return count($refused) === count($trees) ? ExportResult::rejected($took) : ExportResult::ok(count($refused));
     }
 
     /**

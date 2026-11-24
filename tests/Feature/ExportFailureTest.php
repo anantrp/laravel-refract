@@ -750,6 +750,23 @@ it('in the sync drain, an export that delivers a request and then fails records 
     ]);
 });
 
+it('a split tree with one request taken and one refused for good is rejected, and still records the success', function () {
+    bootExport();
+    $this->travelTo('2026-11-24 10:00:00');
+    $requests = 0;
+    Http::fake(function () use (&$requests) {
+        return ++$requests === 1 ? Http::response('', 200) : Http::response('bad', 400);
+    });
+
+    // One tree of two spans too big for one request together.
+    app(Drain::class)->send([runTree([str_repeat('first ', 500_000), str_repeat('second ', 500_000)])]);
+
+    expect(Stats::read())->toMatchArray([
+        'last_success' => strtotime('2026-11-24 10:00:00'),
+        'dropped' => ['rejected' => 1],
+    ]);
+});
+
 it('with less than a second of the time limit left, nothing is sent and no tree is done', function () {
     bootExport();
     fakeDestination(200);
