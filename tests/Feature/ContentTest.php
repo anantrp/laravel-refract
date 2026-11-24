@@ -4,6 +4,7 @@ use Anantrp\Refract\Capture\Content;
 use Anantrp\Refract\Capture\Recorder;
 use Anantrp\Refract\Export\GenAiTranslator;
 use Anantrp\Refract\Support\Diagnostics;
+use Anantrp\Refract\Tests\Support\Ai\EmptyMask;
 use Anantrp\Refract\Tests\Support\Ai\FileAgent;
 use Anantrp\Refract\Tests\Support\Ai\FileTool;
 use Anantrp\Refract\Tests\Support\Ai\NotesAgent;
@@ -1055,6 +1056,18 @@ it('a value is masked once per flush, even by a mask that is not pure', function
     $content->forget();
 
     expect($content->value('the same value'))->not->toBe($first);
+});
+
+it('a mask that empties every value still keeps the memo bounded', function () {
+    $content = new Content(app(), enabled: true, maskClass: EmptyMask::class);
+    $entries = fn () => count($this->memo);
+
+    foreach (range(1, 40_000) as $i) {
+        $content->value("distinct value {$i}");
+    }
+
+    // Each entry costs its key and its slot, not only the masked bytes.
+    expect($entries->call($content))->toBeLessThanOrEqual(intdiv(Content::MEMO_BYTES, 128));
 });
 
 it('without a mask nothing is remembered, and a value over the cap is still cut', function () {

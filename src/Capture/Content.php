@@ -75,9 +75,14 @@ class Content
     public const MAX_BYTES = 131_072;
 
     /**
-     * The most bytes of masked values remembered until the next flush. Past it, the memo starts over.
+     * The most bytes the memo of masked values is charged until the next flush. Past it, the memo starts over.
      */
     public const MEMO_BYTES = 4_194_304;
+
+    /**
+     * The bytes one memo entry is charged on top of its masked value: its key and its slot in the array.
+     */
+    protected const MEMO_ENTRY_BYTES = 128;
 
     /**
      * The bytes of step input one run records in full. Past it, each step records only its new messages.
@@ -104,7 +109,7 @@ class Content
     protected array $memo = [];
 
     /**
-     * The bytes of the masked values remembered.
+     * The bytes the memo is charged: its masked values, and a fixed cost per entry.
      */
     protected int $memoBytes = 0;
 
@@ -220,11 +225,13 @@ class Content
 
         $masked = $this->cut($this->mask($value));
 
-        if ($this->memoBytes + strlen($masked) > self::MEMO_BYTES) {
+        $bytes = strlen($masked) + self::MEMO_ENTRY_BYTES;
+
+        if ($this->memoBytes + $bytes > self::MEMO_BYTES) {
             $this->forget();
         }
 
-        $this->memoBytes += strlen($masked);
+        $this->memoBytes += $bytes;
 
         return $this->memo[$key] = $masked;
     }
