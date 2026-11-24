@@ -101,6 +101,11 @@ class Drain
             Diagnostics::dropped('rejected', $result->refused);
         }
 
+        // Recorded before any failure of the same export, so the failures since the last success start after it.
+        if ($result->took) {
+            Stats::exported();
+        }
+
         if ($result->isRetryable()) {
             $pause = $breaker->failed();
             Stats::failed();
@@ -118,10 +123,6 @@ class Drain
             Diagnostics::dropped('rejected', count($trees));
 
             return;
-        }
-
-        if ($result->took) {
-            Stats::exported();
         }
 
         if ($result->isUnfinished()) {

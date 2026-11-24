@@ -732,6 +732,24 @@ it('a split tree refused in its first request, then a 503, is counted once', fun
     expect(array_sum(Stats::read()['dropped']))->toBe(2);
 });
 
+it('in the sync drain, an export that delivers a request and then fails records the success and the failure', function () {
+    bootExport();
+    $this->travelTo('2026-11-24 10:00:00');
+    $requests = 0;
+    Http::fake(function () use (&$requests) {
+        return ++$requests === 1 ? Http::response('', 200) : Http::response('', 503);
+    });
+
+    // Two trees of 3 MB: one request each.
+    app(Drain::class)->send(array_map(fn () => runTree([randomText(3_000_000)]), range(1, 2)));
+
+    expect(Stats::read())->toMatchArray([
+        'last_success' => strtotime('2026-11-24 10:00:00'),
+        'failing_since' => strtotime('2026-11-24 10:00:00'),
+        'dropped' => ['unavailable' => 1],
+    ]);
+});
+
 it('with less than a second of the time limit left, nothing is sent and no tree is done', function () {
     bootExport();
     fakeDestination(200);
